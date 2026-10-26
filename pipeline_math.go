@@ -66,6 +66,9 @@ type WhisperSegment struct {
 
 // WhisperJSONOutput định dạng JSON tiêu chuẩn khi whisper-cli xuất ra (-oj)
 type WhisperJSONOutput struct {
+	Result struct {
+		Language string `json:"language"`
+	} `json:"result"`
 	Transcription []struct {
 		Offsets struct {
 			From int64 `json:"from"` // milliseconds
@@ -112,11 +115,11 @@ func IsHallucination(text string, duration float64) bool {
 	return false
 }
 
-// ParseWhisperJSON phân tích chuỗi JSON trả về từ whisper-cli
-func ParseWhisperJSON(jsonData []byte, extractStart float64) ([]WhisperSegment, error) {
+// ParseWhisperJSONResult phân tích chuỗi JSON trả về từ whisper-cli kèm mã ngôn ngữ phát hiện được
+func ParseWhisperJSONResult(jsonData []byte, extractStart float64) ([]WhisperSegment, string, error) {
 	var parsed WhisperJSONOutput
 	if err := json.Unmarshal(jsonData, &parsed); err != nil {
-		return nil, fmt.Errorf("không thể parse JSON từ whisper: %w", err)
+		return nil, "", fmt.Errorf("không thể parse JSON từ whisper: %w", err)
 	}
 
 	var segments []WhisperSegment
@@ -134,7 +137,28 @@ func ParseWhisperJSON(jsonData []byte, extractStart float64) ([]WhisperSegment, 
 		}
 	}
 
-	return segments, nil
+	return segments, strings.ToLower(strings.TrimSpace(parsed.Result.Language)), nil
+}
+
+// ParseWhisperJSON giữ tương thích với các caller cũ và test
+func ParseWhisperJSON(jsonData []byte, extractStart float64) ([]WhisperSegment, error) {
+	segs, _, err := ParseWhisperJSONResult(jsonData, extractStart)
+	return segs, err
+}
+
+// IsVietnameseText kiểm tra xem chuỗi văn bản có chứa các ký tự có dấu đặc trưng của Tiếng Việt hay không
+func IsVietnameseText(s string) bool {
+	vietnameseRunes := "àáảãạăằắẳẵặâầấẩẫậđèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ"
+	count := 0
+	for _, r := range strings.ToLower(s) {
+		if strings.ContainsRune(vietnameseRunes, r) {
+			count++
+			if count >= 2 {
+				return true
+			}
+		}
+	}
+	return count >= 1 && len(s) < 15
 }
 
 // FilterAndDeduplicateSegments áp dụng quy tắc điểm giữa, loại bỏ ảo giác và trùng lặp

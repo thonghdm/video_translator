@@ -34,6 +34,12 @@ type BlockStore struct {
 
 // ComputeVideoHash tính mã SHA-1 định danh video dựa trên đường dẫn + kích thước + mtime
 func ComputeVideoHash(videoPath string) (string, int64, int64, error) {
+	// Video Google Drive: định danh bằng SHA-1 của fileId (không có file local để stat)
+	if IsDrivePath(videoPath) {
+		sum := sha1.Sum([]byte(DriveFileIDFromPath(videoPath)))
+		return hex.EncodeToString(sum[:]), 0, 0, nil
+	}
+
 	fi, err := os.Stat(videoPath)
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("không thể đọc thông tin video: %w", err)

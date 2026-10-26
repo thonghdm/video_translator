@@ -14,6 +14,7 @@ type SubtitleItem struct {
 // VideoInfo trả về bởi OpenVideo khi mở một tập tin media
 type VideoInfo struct {
 	Path           string  `json:"path"`
+	Title          string  `json:"title,omitempty"` // tên hiển thị (dùng cho video Google Drive)
 	DurationSec    float64 `json:"duration_sec"`
 	BlockSec       float64 `json:"block_sec"`
 	TotalBlocks    int     `json:"total_blocks"`

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,11 +30,12 @@ type AudioJob struct {
 
 // TextJob dữ liệu chuyển từ stage STT sang stage Translator
 type TextJob struct {
-	BlockIdx int
-	Items    []SubtitleItem
-	Range    BlockRange
-	SliceMs  int64
-	SttMs    int64
+	BlockIdx     int
+	Items        []SubtitleItem
+	Range        BlockRange
+	SliceMs      int64
+	SttMs        int64
+	DetectedLang string // Ngôn ngữ nhận diện từ Whisper ("vi", "en", ...)
 }
 
 // Pipeline là cỗ máy điều phối xử lý video thời gian thực
@@ -108,6 +110,12 @@ func NewPipeline(
 			if settings.LookaheadMaxSec < 600.0 {
 				settings.LookaheadMaxSec = 600.0
 			}
+		}
+	} else if segs := GetDriveSubtitleSegments(videoPath); len(segs) > 0 {
+		// Video Google Drive có sẵn file .srt/.vtt đã tải về RAM -> bypass Whisper STT
+		extSegs = segs
+		if settings.LookaheadMaxSec < 600.0 {
+			settings.LookaheadMaxSec = 600.0
 		}
 	}
 
@@ -436,21 +444,29 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan int, outChan 
 			} else if p.MockSliceAudio != nil {
 				err = p.MockSliceAudio(ctx, p.videoPath, bRange, wavPath)
 			} else {
-				// Cắt audio bằng ffmpeg với seek nhanh trước -i:
-				// -ss <extract_start> -t <len> -i video -vn -ar 16000 -ac 1 -c:a pcm_s16le
-				args := []string{
-					"-y",
-					"-threads", "2",
+				// Cắt audio bằng ffmpeg tối ưu Fast Seek:
+				// ffmpeg -ss {startSec} -i {mediaInput} -t {durationSec} -vn -acodec pcm_s16le -ar 16000 -ac 1 -threads 2 -y {outputWav}
+				var args []string
+				sliceTimeout := 60 * time.Second
+				mediaInput := ResolveMediaInput(p.videoPath)
+				if IsDrivePath(p.videoPath) {
+					// Đọc từ loopback proxy Drive: bật seekable và reconnect để ffmpeg seek HTTP Range nhanh chóng
+					args = append(args, "-seekable", "1", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5")
+					sliceTimeout = 120 * time.Second
+				}
+				args = append(args,
 					"-ss", fmt.Sprintf("%.3f", bRange.ExtractStart),
+					"-i", mediaInput,
 					"-t", fmt.Sprintf("%.3f", bRange.ExtractLen),
-					"-i", p.videoPath,
 					"-vn",
+					"-acodec", "pcm_s16le",
 					"-ar", "16000",
 					"-ac", "1",
-					"-c:a", "pcm_s16le",
+					"-threads", "2",
+					"-y",
 					wavPath,
-				}
-				_, err = RunCommand(ctx, p.tools.FFmpeg, args, 60*time.Second, nil)
+				)
+				_, err = RunCommand(ctx, p.tools.FFmpeg, args, sliceTimeout, nil)
 			}
 			sliceMs := time.Since(tSlice0).Milliseconds()
 
@@ -495,6 +511,7 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 			var segments []WhisperSegment
 			var err error
 
+			var detectedLang string
 			if len(p.externalSegments) > 0 && p.MockRunSTT == nil {
 				// Trích xuất trực tiếp từ file phụ đề .srt/.vtt đi kèm (0ms STT, không tốn CPU/RAM)
 				for _, seg := range p.externalSegments {
@@ -510,11 +527,28 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 				if threads <= 0 {
 					threads = 4
 				}
+
+				// Xử lý tùy chọn ngôn ngữ nguồn:
+				// - "vi": chạy cờ -l vi
+				// - "en": chạy cờ -l en
+				// - "auto" (mặc định): chạy cờ -l auto để tự động phát hiện ngôn ngữ
+				lang := strings.ToLower(strings.TrimSpace(p.settings.SourceLang))
+				switch lang {
+				case "vi", "vietnamese":
+					lang = "vi"
+					detectedLang = "vi"
+				case "en", "english":
+					lang = "en"
+					detectedLang = "en"
+				default:
+					lang = "auto"
+				}
+
 				jsonOutPath := job.WavPath + ".json"
 				args := []string{
 					"-m", p.tools.WhisperModel,
 					"-f", job.WavPath,
-					"-l", p.settings.SourceLang,
+					"-l", lang,
 					"-t", fmt.Sprintf("%d", threads),
 					"-bs", "1",
 					"-bo", "1",
@@ -529,7 +563,11 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 				if err == nil {
 					data, readErr := os.ReadFile(jsonOutPath)
 					if readErr == nil {
-						segments, err = ParseWhisperJSON(data, job.Range.ExtractStart)
+						var parsedLang string
+						segments, parsedLang, err = ParseWhisperJSONResult(data, job.Range.ExtractStart)
+						if parsedLang != "" {
+							detectedLang = parsedLang
+						}
 						_ = os.Remove(jsonOutPath)
 					} else {
 						err = readErr
@@ -579,7 +617,14 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 			select {
 			case <-ctx.Done():
 				return
-			case outChan <- TextJob{BlockIdx: job.BlockIdx, Items: items, Range: job.Range, SliceMs: job.SliceMs, SttMs: sttMs}:
+			case outChan <- TextJob{
+				BlockIdx:     job.BlockIdx,
+				Items:        items,
+				Range:        job.Range,
+				SliceMs:      job.SliceMs,
+				SttMs:        sttMs,
+				DetectedLang: detectedLang,
+			}:
 			}
 		}
 	}
@@ -621,6 +666,57 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				tierLabel = "TIER-1:HIGH"
 			}
 
+			// ZERO-COST TRANSLATION BYPASS:
+			// Nếu ngôn ngữ nguồn được xác định là Tiếng Việt ("vi"), hoặc văn bản nhận diện là tiếng Việt:
+			// BỎ QUA 100% bước dịch (tuyệt đối không gọi FastGTX hay Local LLM).
+			isVietnamese := strings.ToLower(strings.TrimSpace(p.settings.SourceLang)) == "vi" ||
+				job.DetectedLang == "vi"
+			if !isVietnamese && len(job.Items) > 0 {
+				viCount := 0
+				for _, it := range job.Items {
+					if IsVietnameseText(it.SourceText) {
+						viCount++
+					}
+				}
+				if viCount > 0 && viCount >= (len(job.Items)+1)/2 {
+					isVietnamese = true
+				}
+			}
+
+			if isVietnamese {
+				for itemIdx := range translatedItems {
+					translatedItems[itemIdx].TargetText = translatedItems[itemIdx].SourceText
+					translatedItems[itemIdx].Translated = true
+				}
+
+				// Ghi nhận chỉ số: Trans 0ms, 100% on-time
+				p.recordBatchMetrics(0, int64(len(job.Items)), int64(len(job.Items)))
+
+				p50, p95, onTimePct := p.getMetricsSummary()
+				totalMs := job.SliceMs + job.SttMs
+				fmt.Printf("[BLOCK %d | %s] Slice: %dms | STT: %dms (%d lines) | Trans: 0ms (Bypass VN) | Batch p50=%dms p95=%dms | On-time: %.0f%% | Total: %dms\n",
+					job.BlockIdx, tierLabel, job.SliceMs, job.SttMs, len(job.Items), p50, p95, onTimePct, totalMs)
+
+				_ = p.blockStore.SaveBlock(job.BlockIdx, translatedItems)
+
+				p.mu.Lock()
+				delete(p.activeJobs, job.BlockIdx)
+				p.mu.Unlock()
+
+				// Phát phụ đề tiếng Việt hoàn tất ngay lập tức (Final=true)
+				if p.callbacks.OnChunk != nil {
+					p.callbacks.OnChunk(SubtitleChunkPayload{
+						Video: p.videoPath,
+						Block: job.BlockIdx,
+						Items: translatedItems,
+						Final: true,
+					})
+				}
+
+				p.triggerSchedule()
+				continue
+			}
+
 			okCount := 0
 			if p.translator != nil && len(job.Items) > 0 {
 				batches := BuildTwoTierBatches(job.Items, curPlayhead, isTier1Block)
@@ -652,13 +748,7 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 					}
 
 					tBatch0 := time.Now()
-					if p.MockRunSTT == nil {
-						p.computeMu.Lock()
-					}
 					targets, err := p.translator.TranslateBatch(ctx, batchLines)
-					if p.MockRunSTT == nil {
-						p.computeMu.Unlock()
-					}
 					batchMs := time.Since(tBatch0).Milliseconds()
 
 					if ctx.Err() != nil {

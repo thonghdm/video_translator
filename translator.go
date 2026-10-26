@@ -232,12 +232,10 @@ func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []strin
 		return results, nil
 	}
 
-	// Gộp toàn bộ câu trong batch bằng delimiter đặc thù để tránh lỗi xuống dòng của API
-	const batchDelimiter = " ⟦|⟧ "
-	joined := strings.Join(uncachedLines, batchDelimiter)
+	// Gộp toàn bộ câu trong batch bằng ký tự xuống dòng \n (Google Translate bảo toàn \n giữa các đoạn 100%, không bị biến dạng như ký tự đặc biệt)
+	joined := strings.Join(uncachedLines, "\n")
 	if batchOut, err := f.translateFastGTX(ctx, joined); err == nil && batchOut != "" {
-		// Tách theo delimiter đặc thù (chấp nhận cả khi API xóa bớt khoảng trắng quanh delimiter)
-		splitOut := strings.Split(batchOut, "⟦|⟧")
+		splitOut := strings.Split(batchOut, "\n")
 		if len(splitOut) == len(uncachedLines) {
 			valid := true
 			for _, part := range splitOut {

@@ -51,12 +51,15 @@ func NewApp() *App {
 		LookaheadMaxSec:  180.0,
 		TranslateWorkers: 1,
 		WhisperThreads:   4,
-		SourceLang:       "en",
+		SourceLang:       "auto",
 		Translator:       "cli",
 	}
 
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		_ = json.Unmarshal(data, &defaultSettings)
+	}
+	if defaultSettings.SourceLang == "" {
+		defaultSettings.SourceLang = "auto"
 	}
 
 	return &App{
@@ -81,6 +84,7 @@ func (a *App) startup(ctx context.Context) {
 	if err == nil {
 		a.mediaServer = ms
 	}
+	GetDriveManager().SetContext(ctx)
 	// Dọn dẹp ngầm các thư mục cache phụ đề cũ quá 30 ngày không sử dụng
 	go CleanupOldCaches(30 * 24 * time.Hour)
 }
@@ -133,8 +137,13 @@ func (a *App) SelectVideoFolder() (*FolderNode, error) {
 	return a.ScanVideoFolder(selected)
 }
 
-// ScanVideoFolder quét đệ quy thư mục (hoặc file đơn lẻ) để dựng cây bài học video
+// ScanVideoFolder quét đệ quy thư mục (hoặc file đơn lẻ, hoặc thư mục Drive) để dựng cây bài học video
 func (a *App) ScanVideoFolder(targetPath string) (*FolderNode, error) {
+	if strings.HasPrefix(targetPath, "gdrive_folder://") {
+		folderID := strings.TrimPrefix(targetPath, "gdrive_folder://")
+		return a.ScanDriveFolder(folderID, "")
+	}
+
 	cleaned := filepath.Clean(targetPath)
 	fi, err := os.Stat(cleaned)
 	if err != nil {
@@ -258,13 +267,31 @@ func naturalLess(a, b string) bool {
 	return len(ra) < len(rb)
 }
 
-// OpenVideo nạp video, lấy probe thông tin và chuẩn bị URL streaming
+// OpenVideo nạp video, lấy probe thông tin và chuẩn bị URL streaming (hỗ trợ cả file local và link gdrive://)
 func (a *App) OpenVideo(path string) (VideoInfo, error) {
+	// Video Google Drive từ cây bài học: đi chung đường với mở trực tiếp (OpenDriveVideo),
+	// các lệnh gọi mạng (phụ đề, thời lượng) chạy NGOÀI a.mu để không khoá app.
+	if IsDrivePath(path) {
+		fileID := DriveFileIDFromPath(path)
+		dm := GetDriveManager()
+		return a.OpenDriveVideo(fileID, DriveDisplayName(path), dm.SubtitleIDFor(fileID))
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	path = ResolveVideoFromSubtitlePath(path)
 
+	return a.openMediaLocked(path, path, "", "", 0)
+}
+
+// openMediaLocked là lõi chung của OpenVideo / OpenDriveVideo (caller phải giữ a.mu).
+//   - path:          định danh video (đường dẫn local hoặc gdrive://<id>), dùng cho BlockStore/Pipeline
+//   - probeInput:    đầu vào cho ffprobe (đường dẫn local hoặc URL proxy)
+//   - directURL:     URL phát sẵn cho thẻ <video>; rỗng thì đăng ký file local vào MediaServer
+//   - title:         tên hiển thị tùy chọn
+//   - knownDuration: thời lượng đã biết (ví dụ từ metadata Google Drive); nếu > 0 sẽ bypass ffprobe
+func (a *App) openMediaLocked(path, probeInput, directURL, title string, knownDuration float64) (VideoInfo, error) {
 	if a.currentPipe != nil {
 		a.currentPipe.Stop()
 		a.currentPipe = nil
@@ -278,16 +305,36 @@ func (a *App) OpenVideo(path string) (VideoInfo, error) {
 		return VideoInfo{}, fmt.Errorf("thiếu công cụ hoặc model phụ trợ: %s", strings.Join(missing, ", "))
 	}
 
-	// Probe thời lượng và codec
-	probe, err := ProbeMedia(a.tools, path)
-	if err != nil {
-		return VideoInfo{}, fmt.Errorf("không thể phân tích file video: %w", err)
+	var durationSec float64
+	playable := true
+	playableReason := ""
+
+	if knownDuration > 0 {
+		durationSec = knownDuration
+	} else if IsDrivePath(path) {
+		// Video Google Drive: tuyệt đối KHÔNG gọi ffprobe làm nghẽn mạng / timeout!
+		// Trình duyệt (thẻ <video>) sẽ phát qua HTTP Range và lấy duration chính xác qua loadedmetadata
+		durationSec = 3600
+		playable = true
+	} else {
+		// Probe thời lượng và codec cho file cục bộ
+		probe, err := ProbeMedia(a.tools, probeInput)
+		if err != nil {
+			return VideoInfo{}, fmt.Errorf("không thể phân tích file video: %w", err)
+		}
+		durationSec = probe.DurationSec
+		playable = probe.Playable
+		playableReason = probe.PlayableReason
 	}
 
 	// Đăng ký file vào MediaServer
-	mediaURL, err := a.mediaServer.SetMediaFile(path)
-	if err != nil {
-		return VideoInfo{}, fmt.Errorf("không thể phục vụ file media: %w", err)
+	mediaURL := directURL
+	if mediaURL == "" {
+		var err error
+		mediaURL, err = a.mediaServer.SetMediaFile(path)
+		if err != nil {
+			return VideoInfo{}, fmt.Errorf("không thể phục vụ file media: %w", err)
+		}
 	}
 
 	// Khởi tạo BlockStore
@@ -297,27 +344,28 @@ func (a *App) OpenVideo(path string) (VideoInfo, error) {
 		OverlapSec:   a.settings.OverlapSec,
 		WhisperModel: filepath.Base(a.tools.WhisperModel),
 		LlamaModel:   filepath.Base(a.tools.LlamaModel),
-		DurationSec:  probe.DurationSec,
+		DurationSec:  durationSec,
 	}
 	bs, err := NewBlockStore(path, meta)
 	if err != nil {
 		return VideoInfo{}, fmt.Errorf("không thể khởi tạo bộ nhớ cache: %w", err)
 	}
 	// Nếu có sẵn file phụ đề Tiếng Việt (_vi.srt / .vi.srt / _vn.srt...), nạp trực tiếp (và ghép cặp với _en.srt nếu có)
-	PopulateStoreFromVietnameseSRT(bs, path, probe.DurationSec, a.settings.BlockSec, a.settings.OverlapSec)
+	PopulateStoreFromVietnameseSRT(bs, path, durationSec, a.settings.BlockSec, a.settings.OverlapSec)
 	a.currentStore = bs
 
-	totalBlocks := int(math.Ceil(probe.DurationSec / a.settings.BlockSec))
+	totalBlocks := int(math.Ceil(durationSec / a.settings.BlockSec))
 	doneBlocks := bs.GetDoneBlocks()
 
 	info := VideoInfo{
 		Path:           path,
-		DurationSec:    probe.DurationSec,
+		Title:          title,
+		DurationSec:    durationSec,
 		BlockSec:       a.settings.BlockSec,
 		TotalBlocks:    totalBlocks,
 		MediaURL:       mediaURL,
-		Playable:       probe.Playable,
-		PlayableReason: probe.PlayableReason,
+		Playable:       playable,
+		PlayableReason: playableReason,
 		DoneBlocks:     doneBlocks,
 	}
 	a.currentInfo = &info
@@ -437,13 +485,25 @@ func (a *App) LoadCachedSubtitles(path string) ([]SubtitleItem, error) {
 	}
 
 	cachedItems := a.currentStore.GetAllItemsSorted()
-	subFile := FindExternalSubtitleFile(path)
-	if subFile == "" || a.currentInfo == nil {
+	if a.currentInfo == nil {
 		return cachedItems, nil
 	}
 
-	extSegs, err := LoadExternalSubtitles(subFile)
-	if err != nil || len(extSegs) == 0 {
+	var extSegs []WhisperSegment
+	if driveSegs := GetDriveSubtitleSegments(path); len(driveSegs) > 0 {
+		extSegs = driveSegs // phụ đề .srt/.vtt tải từ Google Drive (đang nằm trong RAM)
+	} else {
+		subFile := FindExternalSubtitleFile(path)
+		if subFile == "" {
+			return cachedItems, nil
+		}
+		loaded, err := LoadExternalSubtitles(subFile)
+		if err != nil {
+			return cachedItems, nil
+		}
+		extSegs = loaded
+	}
+	if len(extSegs) == 0 {
 		return cachedItems, nil
 	}
 
@@ -605,6 +665,9 @@ func (a *App) ExportSubtitle(path string, format string, mode string) (string, e
 	}
 
 	baseName := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if name := DriveDisplayName(path); name != "" {
+		baseName = strings.TrimSuffix(name, filepath.Ext(name))
+	}
 	savePath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 		Title:           fmt.Sprintf("Xuất phụ đề định dạng .%s", strings.ToUpper(ext)),
 		DefaultFilename: fmt.Sprintf("%s.%s.%s", baseName, modeSuffix, ext),
@@ -646,6 +709,92 @@ func (a *App) DownloadYouTubeVideo(rawURL string) (string, error) {
 	return videoPath, nil
 }
 
+// ---------------------------------------------------------------------------
+// Google Drive bindings (logic nằm trong drive_manager.go)
+// ---------------------------------------------------------------------------
+
+// LoginGoogleDrive mở trình duyệt đăng nhập Google, chặn đến khi hoàn tất; bắn event "drive_auth_success"
+func (a *App) LoginGoogleDrive() error {
+	return GetDriveManager().Login()
+}
+
+// IsGoogleDriveLoggedIn kiểm tra drive_token.json còn hợp lệ
+func (a *App) IsGoogleDriveLoggedIn() bool {
+	return GetDriveManager().IsLoggedIn()
+}
+
+// LogoutGoogleDrive xóa token (RAM + file)
+func (a *App) LogoutGoogleDrive() error {
+	return GetDriveManager().Logout()
+}
+
+// ListDriveItems liệt kê thư mục con + video trong folderID ("" = My Drive)
+func (a *App) ListDriveItems(folderID string) ([]DriveItem, error) {
+	return GetDriveManager().ListDriveItems(folderID)
+}
+
+// ScanDriveFolder quét đệ quy một thư mục Google Drive để đưa vào cây bài học
+func (a *App) ScanDriveFolder(folderID, folderName string) (*FolderNode, error) {
+	return GetDriveManager().ScanDriveFolder(folderID, folderName)
+}
+
+// ResolveDriveLink phân giải link Google Drive (thư mục hoặc video) do người dùng dán vào
+func (a *App) ResolveDriveLink(link string) (*DriveLinkInfo, error) {
+	return GetDriveManager().ResolveDriveLink(link)
+}
+
+// StartDriveFolderScan quét thư mục Drive ở nền và trả về ngay. Mỗi khi liệt kê xong một thư mục,
+// backend bắn event "drive_tree_update" {node, done} để UI hiển thị dần (xem được video ngay).
+func (a *App) StartDriveFolderScan(folderID, folderName string) error {
+	dm := GetDriveManager()
+	if !dm.IsLoggedIn() {
+		return ErrDriveNotLoggedIn
+	}
+	if folderName == "" && (folderID == "" || folderID == "root") {
+		folderName = "Google Drive"
+	}
+	ctx := a.ctx
+	go func() {
+		if folderName == "" {
+			folderName = dm.FolderName(folderID)
+		}
+		dm.ScanDriveFolderProgressive(folderID, folderName, func(node FolderNode, done bool) {
+			if ctx != nil {
+				runtime.EventsEmit(ctx, "drive_tree_update", map[string]interface{}{"node": node, "done": done})
+			}
+		})
+	}()
+	return nil
+}
+
+// OpenDriveVideo mở video Google Drive để phát qua loopback proxy và dịch realtime (không tải file về đĩa).
+// subtitleID (tùy chọn) là file .srt/.vtt cùng thư mục: được tải vào RAM để bỏ qua Whisper STT.
+func (a *App) OpenDriveVideo(fileID, name, subtitleID string) (VideoInfo, error) {
+	dm := GetDriveManager()
+	streamURL, err := dm.StreamURL(fileID)
+	if err != nil {
+		return VideoInfo{}, err
+	}
+	if !dm.IsLoggedIn() {
+		return VideoInfo{}, ErrDriveNotLoggedIn
+	}
+	dm.PrepareVideo(fileID, name, subtitleID) // tải phụ đề ngoài lock, lỗi thì tự fallback Whisper
+
+	// Lấy thời lượng trực tiếp từ metadata Google Drive (đã nạp từ ListDriveItems hoặc query 50ms)
+	// Bỏ qua ffprobe qua mạng để mở video ngay lập tức trong 0.05s
+	durationSec := dm.GetDuration(fileID)
+	if durationSec <= 0 {
+		durationSec = dm.FetchDurationFromDrive(fileID)
+	}
+	if durationSec <= 0 {
+		durationSec = 3600
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.openMediaLocked(DrivePathFromID(fileID), streamURL, streamURL, name, durationSec)
+}
+
 // GetSettings trả về cấu hình hiện tại
 func (a *App) GetSettings() Settings {
 	a.mu.Lock()
@@ -664,6 +813,34 @@ func (a *App) SaveSettings(settings Settings) error {
 		return err
 	}
 	return os.WriteFile(a.settingsPath, data, 0644)
+}
+
+// SetSourceLang cập nhật và lưu ngôn ngữ nguồn ("auto", "en", "vi")
+func (a *App) SetSourceLang(lang string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if lang != "vi" && lang != "en" && lang != "auto" {
+		lang = "auto"
+	}
+	a.settings.SourceLang = lang
+	data, err := json.MarshalIndent(a.settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(a.settingsPath, data, 0644)
+}
+
+// GetSourceLang trả về ngôn ngữ nguồn hiện tại ("auto", "en", "vi")
+func (a *App) GetSourceLang() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.settings.SourceLang == "" {
+		return "auto"
+	}
+	return a.settings.SourceLang
 }
 
 // CheckModelsReady kiểm tra xem các model AI đã sẵn sàng offline hay chưa

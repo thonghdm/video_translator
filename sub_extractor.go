@@ -14,6 +14,9 @@ var htmlTagRe = regexp.MustCompile(`<[^>]+>`)
 
 // FindExternalSubtitleFile tìm file phụ đề .srt / .vtt đi kèm cùng tên với file video (hỗ trợ _en.srt, .en.srt, -en.srt, .srt...)
 func FindExternalSubtitleFile(videoPath string) string {
+	if IsDrivePath(videoPath) {
+		return ""
+	}
 	dir := filepath.Dir(videoPath)
 	ext := filepath.Ext(videoPath)
 	base := strings.TrimSuffix(filepath.Base(videoPath), ext)
@@ -73,6 +76,9 @@ func FindExternalSubtitleFile(videoPath string) string {
 
 // FindExternalVietnameseSubtitleFile tìm file phụ đề Tiếng Việt đi kèm (_vi.srt, .vi.srt, _vn.srt, .vn.srt, -vi.srt, _vie.srt...)
 func FindExternalVietnameseSubtitleFile(videoPath string) string {
+	if IsDrivePath(videoPath) {
+		return ""
+	}
 	dir := filepath.Dir(videoPath)
 	ext := filepath.Ext(videoPath)
 	base := strings.TrimSuffix(filepath.Base(videoPath), ext)

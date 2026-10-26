@@ -1,5 +1,53 @@
 export namespace main {
 	
+	export class DriveItem {
+	    id: string;
+	    name: string;
+	    mime_type: string;
+	    size: number;
+	    thumbnail_link: string;
+	    is_folder: boolean;
+	    duration_sec: number;
+	    subtitle_id: string;
+	    subtitle_name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DriveItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.size = source["size"];
+	        this.thumbnail_link = source["thumbnail_link"];
+	        this.is_folder = source["is_folder"];
+	        this.duration_sec = source["duration_sec"];
+	        this.subtitle_id = source["subtitle_id"];
+	        this.subtitle_name = source["subtitle_name"];
+	    }
+	}
+	export class DriveLinkInfo {
+	    kind: string;
+	    id: string;
+	    name: string;
+	    duration_sec: number;
+	    subtitle_id: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DriveLinkInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.duration_sec = source["duration_sec"];
+	        this.subtitle_id = source["subtitle_id"];
+	    }
+	}
 	export class FolderNode {
 	    name: string;
 	    path: string;
@@ -88,8 +136,35 @@ export namespace main {
 	        this.translated = source["translated"];
 	    }
 	}
+	export class UpdateCheckResult {
+	    has_update: boolean;
+	    current_version: string;
+	    latest_version: string;
+	    release_date: string;
+	    changelog: string;
+	    download_url: string;
+	    file_size_mb: number;
+	    mandatory: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateCheckResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.has_update = source["has_update"];
+	        this.current_version = source["current_version"];
+	        this.latest_version = source["latest_version"];
+	        this.release_date = source["release_date"];
+	        this.changelog = source["changelog"];
+	        this.download_url = source["download_url"];
+	        this.file_size_mb = source["file_size_mb"];
+	        this.mandatory = source["mandatory"];
+	    }
+	}
 	export class VideoInfo {
 	    path: string;
+	    title?: string;
 	    duration_sec: number;
 	    block_sec: number;
 	    total_blocks: number;
@@ -105,6 +180,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.path = source["path"];
+	        this.title = source["title"];
 	        this.duration_sec = source["duration_sec"];
 	        this.block_sec = source["block_sec"];
 	        this.total_blocks = source["total_blocks"];

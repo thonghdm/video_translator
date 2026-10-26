@@ -60,6 +60,7 @@ func GetMediaServer() (*MediaServer, error) {
 
 		mux := http.NewServeMux()
 		mux.HandleFunc("/media/", ms.handleMediaStream)
+		mux.HandleFunc("/drive/stream", ServeDriveStream)
 
 		ms.server = &http.Server{
 			Handler:           mux,
@@ -167,10 +168,24 @@ func ProbeMedia(tools *ToolsPaths, filePath string) (*ProbeResult, error) {
 		"-v", "error",
 		"-show_entries", "stream=codec_type,codec_name,duration:format=duration",
 		"-of", "json",
-		filePath,
 	}
 
-	res, err := RunCommand(context.Background(), tools.FFprobe, args, 15*time.Second, nil)
+	isHTTP := strings.HasPrefix(filePath, "http://") || strings.HasPrefix(filePath, "https://")
+	if isHTTP {
+		// Bắt buộc bật seekable và giới hạn probesize để ffprobe không bao giờ tải tuần tự cả GB video qua mạng
+		args = append(args,
+			"-seekable", "1",
+			"-probesize", "5000000",
+			"-analyzeduration", "5000000",
+		)
+	}
+	args = append(args, filePath)
+
+	probeTimeout := 15 * time.Second
+	if isHTTP {
+		probeTimeout = 25 * time.Second
+	}
+	res, err := RunCommand(context.Background(), tools.FFprobe, args, probeTimeout, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe thất bại: %w (stderr: %s)", err, res.Stderr)
 	}
