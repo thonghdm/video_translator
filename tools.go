@@ -58,7 +58,7 @@ func GetToolsPaths() *ToolsPaths {
 			WhisperCLI:   filepath.Join(baseDir, "tools", "whisper", "whisper-cli.exe"),
 			LlamaCLI:     filepath.Join(baseDir, "tools", "llama", "llama-cli.exe"),
 			WhisperModel: filepath.Join(baseDir, "models", "ggml-base.bin"),
-			LlamaModel:   filepath.Join(baseDir, "models", "qwen2.5-0.5b-instruct-q4_k_m.gguf"),
+			LlamaModel:   filepath.Join(baseDir, "models", "qwen2.5-1.5b-instruct-q4_k_m.gguf"),
 			TempDir:      tempDir,
 		}
 
@@ -85,7 +85,8 @@ func getSafeASCIITempDir() string {
 		// Kiểm tra nếu đường dẫn thuần ASCII
 		isASCII := true
 		for _, r := range c {
-			if r > 127 {
+			rInt := int(r)
+			if rInt > 127 {
 				isASCII = false
 				break
 			}
@@ -116,7 +117,7 @@ func CheckTools() []string {
 	check("whisper-cli", tools.WhisperCLI)
 	check("llama-cli", tools.LlamaCLI)
 	check("Whisper Model (ggml-base.bin)", tools.WhisperModel)
-	check("Llama Model (qwen2.5-0.5b-instruct-q4_k_m.gguf)", tools.LlamaModel)
+	check("Llama Model (qwen2.5-1.5b-instruct-q4_k_m.gguf)", tools.LlamaModel)
 
 	return missing
 }

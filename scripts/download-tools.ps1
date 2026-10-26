@@ -54,10 +54,10 @@ $WhisperModelUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/gg
 $WhisperModelPath = Join-Path $ModelsDir "ggml-base.bin"
 Download-WithCurl -Url $WhisperModelUrl -DestinationPath $WhisperModelPath -Description "Whisper Model (ggml-base.bin)"
 
-# 2. Download Qwen2.5 0.5B Translation Model (GGUF ~ 398 MB)
-$LlamaModelUrl = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-$LlamaModelPath = Join-Path $ModelsDir "qwen2.5-0.5b-instruct-q4_k_m.gguf"
-Download-WithCurl -Url $LlamaModelUrl -DestinationPath $LlamaModelPath -Description "Qwen2.5 Translation Model (Q4_K_M GGUF)"
+# 2. Download Qwen2.5 1.5B Translation Model (GGUF ~ 1.04 GB)
+$LlamaModelUrl = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+$LlamaModelPath = Join-Path $ModelsDir "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+Download-WithCurl -Url $LlamaModelUrl -DestinationPath $LlamaModelPath -Description "Qwen2.5 1.5B Translation Model (Q4_K_M GGUF)"
 
 Write-Host "==========================================================" -ForegroundColor Yellow
 Write-Host "       SUBTRANS - CLI TOOLS SETUP                         " -ForegroundColor Yellow
