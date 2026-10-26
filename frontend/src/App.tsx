@@ -4,9 +4,10 @@ import {
   FolderOpen, FolderPlus, Folder, ChevronRight, ChevronDown,
   List, Subtitles, AlertCircle, RefreshCw,
   SkipBack, SkipForward, CheckCircle2, Trash2, Search, Film,
-  PanelLeftClose, PanelLeftOpen, Download, Globe, Loader2
+  PanelLeftClose, PanelLeftOpen, Download, Globe, Loader2, Sparkles
 } from 'lucide-react';
 import { SubtitleItem, upsertSubtitles, findSubtitleAtTime } from './lib/subtitles';
+import { LandingPage } from './components/LandingPage';
 
 // Định nghĩa kiểu dữ liệu đồng bộ với Backend
 interface VideoInfo {
@@ -476,6 +477,9 @@ const SubtitleListPanel = memo(({
 });
 
 export const App: React.FC = () => {
+  // Navigation View: 'landing' (Giới thiệu & Tính năng) hoặc 'player' (Trình phát video)
+  const [viewMode, setViewMode] = useState<'landing' | 'player'>('landing');
+
   // Video & Playback State
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -605,6 +609,7 @@ export const App: React.FC = () => {
       setVideoInfo(info);
       setDuration(info.duration_sec);
       setDoneBlocks(info.done_blocks || []);
+      setViewMode('player');
 
       // 3. Nạp cache phụ đề nếu có (bao gồm cả phụ đề gốc _en.srt đi kèm)
       const cached = await window.go?.main?.App?.LoadCachedSubtitles(info.path);
@@ -613,11 +618,13 @@ export const App: React.FC = () => {
       }
 
       // 4. Phát video ngay lập tức (không chờ pipeline)
-      if (videoRef.current) {
-        videoRef.current.src = info.media_url;
-        videoRef.current.play().catch(() => {});
-        setIsPlaying(true);
-      }
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.src = info.media_url;
+          videoRef.current.play().catch(() => {});
+          setIsPlaying(true);
+        }
+      }, 50);
 
       // 5. Bắt đầu pipeline ngầm
       await window.go?.main?.App?.StartPipeline(info.path, 0);
@@ -1060,6 +1067,37 @@ export const App: React.FC = () => {
       {/* 1. Header Bar */}
       <header className="h-12 border-b border-player-border px-4 flex items-center justify-between bg-player-surface z-10">
         <div className="flex items-center space-x-2 truncate">
+          {/* Tab Chuyển đổi Giới thiệu vs Trình phát */}
+          <div className="flex items-center bg-neutral-900/90 p-0.5 rounded-lg border border-neutral-700/80 shrink-0 mr-1">
+            <button
+              onClick={() => setViewMode('landing')}
+              className={`flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-semibold transition-all ${
+                viewMode === 'landing'
+                  ? 'bg-amber-500 text-black shadow'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Xem Trang Giới Thiệu & Demo"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Giới thiệu</span>
+            </button>
+            <button
+              onClick={() => setViewMode('player')}
+              className={`flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-semibold transition-all ${
+                viewMode === 'player'
+                  ? 'bg-amber-500 text-black shadow'
+                  : 'text-neutral-400 hover:text-white'
+              }`}
+              title="Chuyển sang Trình Phát Video"
+            >
+              <Film className="w-3.5 h-3.5" />
+              <span>Trình phát</span>
+              {videoInfo?.path && (
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse ml-0.5" />
+              )}
+            </button>
+          </div>
+
           {/* Nút ẩn/hiện cây thư mục khóa học */}
           <button
             onClick={() => setShowFolderPanel((v) => !v)}
@@ -1260,8 +1298,100 @@ export const App: React.FC = () => {
         </div>
       </header>
 
-      {/* 2. Main Content Area */}
-      <div className="flex-1 flex relative overflow-hidden bg-black">
+      {/* Toast thông báo phím tắt */}
+      {toastMessage && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 px-3.5 py-1.5 bg-black/90 text-amber-300 border border-amber-500/50 rounded-lg text-xs shadow-2xl backdrop-blur font-medium">
+          {toastMessage}
+        </div>
+      )}
+
+      {/* Modal dán link YouTube tải & dịch tự động */}
+      {showYtModal && (
+        <div className="absolute inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleStartYouTube}
+            className="w-full max-w-md bg-[#161920] border border-neutral-700 rounded-lg shadow-2xl p-5 space-y-4"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Globe className="w-5 h-5 text-red-400" />
+                <h3 className="text-sm font-bold text-white">
+                  Tải & Dịch phụ đề tự động từ YouTube
+                </h3>
+              </div>
+              {!isDownloadingYt && (
+                <button
+                  type="button"
+                  onClick={() => setShowYtModal(false)}
+                  className="text-neutral-400 hover:text-white text-xs px-2 py-0.5 rounded"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <p className="text-xs text-neutral-400 leading-relaxed">
+              Dán link video YouTube vào bên dưới. Hệ thống sẽ dùng <b>yt-dlp</b> tự động lấy phụ đề tiếng Anh gốc (nếu có) và video về máy rồi dịch sang tiếng Việt ngay lập tức.
+            </p>
+
+            <input
+              type="url"
+              required
+              disabled={isDownloadingYt}
+              value={ytUrl}
+              onChange={(e) => setYtUrl(e.target.value)}
+              placeholder="https://www.youtube.com/watch?v=..."
+              className="w-full bg-neutral-900 text-xs text-white px-3 py-2.5 rounded border border-neutral-700 focus:border-amber-400 focus:outline-none disabled:opacity-50"
+              autoFocus
+            />
+
+            {isDownloadingYt && (
+              <div className="flex items-center space-x-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded p-2.5">
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                <span className="truncate">{ytProgress || 'Đang xử lý...'}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end space-x-2 pt-1">
+              <button
+                type="button"
+                disabled={isDownloadingYt}
+                onClick={() => setShowYtModal(false)}
+                className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded disabled:opacity-50"
+              >
+                Hủy
+              </button>
+              <button
+                type="submit"
+                disabled={isDownloadingYt || !ytUrl.trim()}
+                className="flex items-center space-x-1.5 px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-black font-bold text-xs rounded shadow disabled:opacity-50"
+              >
+                {isDownloadingYt ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Đang tải...</span>
+                  </>
+                ) : (
+                  <span>Tải & Dịch ngay</span>
+                )}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Landing Page View */}
+      <div className={`flex-1 relative overflow-hidden bg-[#0a0c10] flex flex-col ${viewMode === 'landing' ? '' : 'hidden'}`}>
+        <LandingPage
+          onOpenVideo={() => handleOpenVideo()}
+          onOpenYouTube={() => setShowYtModal(true)}
+          onSwitchToPlayer={() => setViewMode('player')}
+          hasLoadedVideo={!!videoInfo?.path}
+        />
+      </div>
+
+      {/* 2. Main Content Area (Player) */}
+      <div className={`flex-1 flex relative overflow-hidden bg-black ${viewMode === 'player' ? '' : 'hidden'}`}>
         {/* Sidebar Trái: Cây thư mục khóa học */}
         {showFolderPanel ? (
           <CourseTreePanel
@@ -1298,88 +1428,6 @@ export const App: React.FC = () => {
           </button>
         )}
 
-        {/* Toast thông báo phím tắt */}
-        {toastMessage && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 bg-black/80 text-amber-300 border border-amber-500/50 rounded text-xs shadow-lg backdrop-blur">
-            {toastMessage}
-          </div>
-        )}
-
-        {/* Modal dán link YouTube tải & dịch tự động */}
-        {showYtModal && (
-          <div className="absolute inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <form
-              onSubmit={handleStartYouTube}
-              className="w-full max-w-md bg-[#161920] border border-neutral-700 rounded-lg shadow-2xl p-5 space-y-4"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <Globe className="w-5 h-5 text-red-400" />
-                  <h3 className="text-sm font-bold text-white">
-                    Tải & Dịch phụ đề tự động từ YouTube
-                  </h3>
-                </div>
-                {!isDownloadingYt && (
-                  <button
-                    type="button"
-                    onClick={() => setShowYtModal(false)}
-                    className="text-neutral-400 hover:text-white text-xs px-2 py-0.5 rounded"
-                  >
-                    ✕
-                  </button>
-                )}
-              </div>
-
-              <p className="text-xs text-neutral-400 leading-relaxed">
-                Dán link video YouTube vào bên dưới. Hệ thống sẽ dùng <b>yt-dlp</b> tự động lấy phụ đề tiếng Anh gốc (nếu có) và video về máy rồi dịch sang tiếng Việt ngay lập tức.
-              </p>
-
-              <input
-                type="url"
-                required
-                disabled={isDownloadingYt}
-                value={ytUrl}
-                onChange={(e) => setYtUrl(e.target.value)}
-                placeholder="https://www.youtube.com/watch?v=..."
-                className="w-full bg-neutral-900 text-xs text-white px-3 py-2.5 rounded border border-neutral-700 focus:border-amber-400 focus:outline-none disabled:opacity-50"
-                autoFocus
-              />
-
-              {isDownloadingYt && (
-                <div className="flex items-center space-x-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded p-2.5">
-                  <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                  <span className="truncate">{ytProgress || 'Đang xử lý...'}</span>
-                </div>
-              )}
-
-              <div className="flex items-center justify-end space-x-2 pt-1">
-                <button
-                  type="button"
-                  disabled={isDownloadingYt}
-                  onClick={() => setShowYtModal(false)}
-                  className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded disabled:opacity-50"
-                >
-                  Hủy
-                </button>
-                <button
-                  type="submit"
-                  disabled={isDownloadingYt || !ytUrl.trim()}
-                  className="flex items-center space-x-1.5 px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-black font-bold text-xs rounded shadow disabled:opacity-50"
-                >
-                  {isDownloadingYt ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Đang tải...</span>
-                    </>
-                  ) : (
-                    <span>Tải & Dịch ngay</span>
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
         {/* Video Player Box */}
         <div className="flex-1 flex items-center justify-center relative overflow-hidden">
           <video
@@ -1389,6 +1437,35 @@ export const App: React.FC = () => {
             muted={isMuted}
             onEnded={handleVideoEnded}
           />
+
+          {/* Empty state when no video is loaded */}
+          {!videoInfo?.path && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center z-20 bg-[#0c0e14]">
+              <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-4 text-amber-400">
+                <Film className="w-8 h-8" />
+              </div>
+              <h3 className="text-base font-bold text-white mb-1.5">Chưa có video nào được mở</h3>
+              <p className="text-xs text-neutral-400 max-w-sm mb-5 leading-relaxed">
+                Kéo thả file video vào đây, chọn mở file lẻ từ máy tính, hoặc xem trang giới thiệu để tìm hiểu thêm.
+              </p>
+              <div className="flex items-center space-x-3">
+                <button
+                  onClick={() => handleOpenVideo()}
+                  className="px-4 py-2 bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-black font-bold text-xs rounded-lg shadow-lg shadow-amber-500/20 transition-all flex items-center space-x-1.5"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  <span>Mở file video lẻ</span>
+                </button>
+                <button
+                  onClick={() => setViewMode('landing')}
+                  className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-semibold text-xs rounded-lg border border-neutral-700 transition-colors flex items-center space-x-1.5"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Trang giới thiệu</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Codec cảnh báo không tương thích */}
           {videoInfo && !videoInfo.playable && (
@@ -1443,7 +1520,8 @@ export const App: React.FC = () => {
       </div>
 
       {/* 3. Bottom Controls & Seekbar */}
-      <footer className="h-16 bg-player-surface border-t border-player-border px-4 flex flex-col justify-center space-y-1 z-30">
+      {viewMode === 'player' && (
+        <footer className="h-16 bg-player-surface border-t border-player-border px-4 flex flex-col justify-center space-y-1 z-30">
         {/* Seekbar với dải màu hiển thị các block đã xong (done_blocks) */}
         <div className="relative w-full h-3 flex items-center cursor-pointer group">
           {/* Thanh nền tổng thời gian */}
@@ -1562,6 +1640,7 @@ export const App: React.FC = () => {
           </div>
         </div>
       </footer>
+      )}
     </div>
   );
 };
