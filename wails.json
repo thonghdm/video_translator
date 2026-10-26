@@ -1,0 +1,20 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "subtrans",
+  "outputfilename": "subtrans",
+  "frontend:install": "pnpm install",
+  "frontend:build": "pnpm run build",
+  "frontend:dev:watcher": "pnpm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "SubTrans",
+    "email": "user@example.com"
+  },
+  "info": {
+    "companyName": "SubTrans",
+    "productName": "SubTrans Video Player",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright 2026",
+    "comments": "Realtime Offline Video Translator"
+  }
+}
