@@ -23,6 +23,7 @@ type AudioJob struct {
 	BlockIdx int
 	WavPath  string
 	Range    BlockRange
+	SliceMs  int64
 }
 
 // TextJob dữ liệu chuyển từ stage STT sang stage Translator
@@ -30,6 +31,8 @@ type TextJob struct {
 	BlockIdx int
 	Items    []SubtitleItem
 	Range    BlockRange
+	SliceMs  int64
+	SttMs    int64
 }
 
 // Pipeline là cỗ máy điều phối xử lý video thời gian thực
@@ -405,6 +408,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan int, outChan 
 			bRange := ComputeBlockRange(blockIdx, p.settings.BlockSec, p.settings.OverlapSec, p.durationSec)
 			wavPath := filepath.Join(p.tools.TempDir, fmt.Sprintf("block_%d_%d.wav", p.sessionID, blockIdx))
 
+			tSlice0 := time.Now()
 			var err error
 			if p.MockSliceAudio != nil {
 				err = p.MockSliceAudio(ctx, p.videoPath, bRange, wavPath)
@@ -424,6 +428,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan int, outChan 
 				}
 				_, err = RunCommand(ctx, p.tools.FFmpeg, args, 60*time.Second, nil)
 			}
+			sliceMs := time.Since(tSlice0).Milliseconds()
 
 			if err != nil {
 				if ctx.Err() != nil {
@@ -437,7 +442,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan int, outChan 
 			case <-ctx.Done():
 				_ = os.Remove(wavPath)
 				return
-			case outChan <- AudioJob{BlockIdx: blockIdx, WavPath: wavPath, Range: bRange}:
+			case outChan <- AudioJob{BlockIdx: blockIdx, WavPath: wavPath, Range: bRange, SliceMs: sliceMs}:
 			}
 		}
 	}
@@ -462,6 +467,7 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 				return
 			}
 
+			tStt0 := time.Now()
 			var segments []WhisperSegment
 			var err error
 
@@ -493,6 +499,8 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 					}
 				}
 			}
+
+			sttMs := time.Since(tStt0).Milliseconds()
 
 			// Dọn file wav tạm
 			_ = os.Remove(job.WavPath)
@@ -534,7 +542,7 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 			select {
 			case <-ctx.Done():
 				return
-			case outChan <- TextJob{BlockIdx: job.BlockIdx, Items: items, Range: job.Range}:
+			case outChan <- TextJob{BlockIdx: job.BlockIdx, Items: items, Range: job.Range, SliceMs: job.SliceMs, SttMs: sttMs}:
 			}
 		}
 	}
@@ -564,6 +572,7 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				sourceLines = append(sourceLines, item.SourceText)
 			}
 
+			tTrans0 := time.Now()
 			var translations []string
 			if p.translator != nil && len(sourceLines) > 0 {
 				var err error
@@ -575,7 +584,9 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			} else {
 				translations = make([]string, len(sourceLines))
 			}
+			transMs := time.Since(tTrans0).Milliseconds()
 
+			okCount := 0
 			var translatedItems []SubtitleItem
 			for i, item := range job.Items {
 				target := ""
@@ -584,8 +595,15 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				}
 				item.TargetText = target
 				item.Translated = (target != "")
+				if item.Translated {
+					okCount++
+				}
 				translatedItems = append(translatedItems, item)
 			}
+
+			totalMs := job.SliceMs + job.SttMs + transMs
+			fmt.Printf("[BLOCK %d] Slice: %dms | STT: %dms (%d lines) | Trans: %dms (%d/%d ok) | Total: %dms\n",
+				job.BlockIdx, job.SliceMs, job.SttMs, len(job.Items), okCount, len(job.Items), totalMs)
 
 			// Lưu vào cache
 			_ = p.blockStore.SaveBlock(job.BlockIdx, translatedItems)

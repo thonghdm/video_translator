@@ -588,10 +588,17 @@ export const App: React.FC = () => {
                     {currentSubtitle.source_text}
                   </div>
                 )}
-                {(subtitleMode === 'vi' || subtitleMode === 'bilingual') && currentSubtitle.target_text && (
-                  <div className="text-amber-300 text-base md:text-lg font-bold drop-shadow leading-relaxed">
-                    {currentSubtitle.target_text}
-                  </div>
+                {(subtitleMode === 'vi' || subtitleMode === 'bilingual') && (
+                  currentSubtitle.target_text ? (
+                    <div className="text-amber-300 text-base md:text-lg font-bold drop-shadow leading-relaxed">
+                      {currentSubtitle.target_text}
+                    </div>
+                  ) : subtitleMode === 'vi' ? (
+                    <div className="text-neutral-400 text-sm md:text-base italic drop-shadow flex items-center justify-center gap-1.5">
+                      <span className="inline-block w-2 h-2 rounded-full bg-amber-400/60 animate-pulse" />
+                      <span>{currentSubtitle.source_text}</span>
+                    </div>
+                  ) : null
                 )}
               </div>
             </div>
