@@ -63,6 +63,24 @@ func GetToolsPaths() *ToolsPaths {
 			}
 		}
 
+		// Ưu tiên tải/dùng model từ %LOCALAPPDATA%\SubTrans\models
+		appDataModelsDir := GetAppDataModelsDir()
+		whisperModel := filepath.Join(appDataModelsDir, "ggml-base.bin")
+		if _, err := os.Stat(whisperModel); os.IsNotExist(err) {
+			legacyWhisper := filepath.Join(baseDir, "models", "ggml-base.bin")
+			if _, errLegacy := os.Stat(legacyWhisper); errLegacy == nil {
+				whisperModel = legacyWhisper
+			}
+		}
+
+		llamaModel := filepath.Join(appDataModelsDir, "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+		if _, err := os.Stat(llamaModel); os.IsNotExist(err) {
+			legacyLlama := filepath.Join(baseDir, "models", "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+			if _, errLegacy := os.Stat(legacyLlama); errLegacy == nil {
+				llamaModel = legacyLlama
+			}
+		}
+
 		globalTools = &ToolsPaths{
 			BaseDir:      baseDir,
 			FFmpeg:       filepath.Join(baseDir, "tools", "ffmpeg", "ffmpeg.exe"),
@@ -71,8 +89,8 @@ func GetToolsPaths() *ToolsPaths {
 			LlamaCLI:     filepath.Join(llamaDir, "llama-cli.exe"),
 			LlamaServer:  filepath.Join(llamaDir, "llama-server.exe"),
 			YtDlp:        filepath.Join(baseDir, "tools", "ytdlp", "yt-dlp.exe"),
-			WhisperModel: filepath.Join(baseDir, "models", "ggml-base.bin"),
-			LlamaModel:   filepath.Join(baseDir, "models", "qwen2.5-1.5b-instruct-q4_k_m.gguf"),
+			WhisperModel: whisperModel,
+			LlamaModel:   llamaModel,
 			TempDir:      tempDir,
 		}
 
@@ -82,6 +100,23 @@ func GetToolsPaths() *ToolsPaths {
 	})
 	return globalTools
 }
+
+// RefreshModelPaths cập nhật lại đường dẫn mô hình khi hoàn tất download
+func (t *ToolsPaths) RefreshModelPaths() {
+	if t == nil {
+		return
+	}
+	appDataModelsDir := GetAppDataModelsDir()
+	whisperModel := filepath.Join(appDataModelsDir, "ggml-base.bin")
+	if _, err := os.Stat(whisperModel); err == nil {
+		t.WhisperModel = whisperModel
+	}
+	llamaModel := filepath.Join(appDataModelsDir, "qwen2.5-1.5b-instruct-q4_k_m.gguf")
+	if _, err := os.Stat(llamaModel); err == nil {
+		t.LlamaModel = llamaModel
+	}
+}
+
 
 // getSafeASCIITempDir tìm kiếm thư mục tạm có đường dẫn ASCII an toàn
 func getSafeASCIITempDir() string {

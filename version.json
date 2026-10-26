@@ -1,0 +1,8 @@
+{
+  "version": "1.0.1",
+  "release_date": "2026-10-26",
+  "changelog": "- Tối ưu hoá bộ cài ứng dụng siêu nhẹ (~20MB)\n- Bổ sung Auto-download Models với cơ chế HTTP Range Resumable\n- Bổ sung In-App Self-Updater tự động hoán đổi binary an toàn trên Windows\n- Giữ nguyên 100% dữ liệu mô hình AI trong %LOCALAPPDATA% khi cập nhật",
+  "download_url": "https://github.com/thonghdm/video_translator/releases/download/v1.0.1/SubTrans.exe",
+  "file_size_mb": 20.4,
+  "mandatory": false
+}

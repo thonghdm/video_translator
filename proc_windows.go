@@ -40,3 +40,13 @@ func killProcessTree(cmd *exec.Cmd) {
 	// Đảm bảo kill trực tiếp tiến trình cha
 	_ = cmd.Process.Kill()
 }
+
+// prepareRestartProcess cấu hình cờ tiến trình độc lập hoàn toàn để khởi động lại app sau update
+func prepareRestartProcess(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	// DETACHED_PROCESS (0x00000008) | CREATE_NEW_PROCESS_GROUP (0x00000200)
+	cmd.SysProcAttr.CreationFlags |= 0x00000008 | 0x00000200
+}
+

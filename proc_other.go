@@ -26,3 +26,11 @@ func killProcessTree(cmd *exec.Cmd) {
 	}
 	_ = cmd.Process.Kill()
 }
+
+func prepareRestartProcess(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+

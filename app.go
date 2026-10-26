@@ -30,6 +30,8 @@ type App struct {
 	currentStore   *BlockStore
 	currentPipe    *Pipeline
 	currentTrans   Translator
+	downloader     *ModelDownloader
+	updater        *Updater
 }
 
 // NewApp tạo struct App và nạp cấu hình settings
@@ -60,6 +62,8 @@ func NewApp() *App {
 	return &App{
 		settings:     defaultSettings,
 		settingsPath: settingsPath,
+		downloader:   NewModelDownloader(),
+		updater:      NewUpdater(),
 	}
 }
 
@@ -67,6 +71,12 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.tools = GetToolsPaths()
+	if a.downloader != nil {
+		a.downloader.SetContext(ctx)
+	}
+	if a.updater != nil {
+		a.updater.SetContext(ctx)
+	}
 	ms, err := GetMediaServer()
 	if err == nil {
 		a.mediaServer = ms
@@ -655,3 +665,68 @@ func (a *App) SaveSettings(settings Settings) error {
 	}
 	return os.WriteFile(a.settingsPath, data, 0644)
 }
+
+// CheckModelsReady kiểm tra xem các model AI đã sẵn sàng offline hay chưa
+func (a *App) CheckModelsReady() bool {
+	if a.downloader == nil {
+		return false
+	}
+	ready := a.downloader.CheckModelsReady()
+	if ready && a.tools != nil {
+		a.tools.RefreshModelPaths()
+	}
+	return ready
+}
+
+// GetModelStatuses lấy trạng thái sẵn sàng của từng model
+func (a *App) GetModelStatuses() map[string]bool {
+	if a.downloader == nil {
+		return map[string]bool{}
+	}
+	return a.downloader.GetModelStatuses()
+}
+
+// StartModelDownload kích hoạt tải các model AI offline
+func (a *App) StartModelDownload() error {
+	if a.downloader == nil {
+		return fmt.Errorf("downloader chưa được khởi tạo")
+	}
+	return a.downloader.StartDownload()
+}
+
+// CancelModelDownload hủy tiến trình tải model
+func (a *App) CancelModelDownload() {
+	if a.downloader != nil {
+		a.downloader.CancelDownload()
+	}
+}
+
+// CheckForUpdate kiểm tra phiên bản mới từ GitHub
+func (a *App) CheckForUpdate() (*UpdateCheckResult, error) {
+	if a.updater == nil {
+		return nil, fmt.Errorf("updater chưa được khởi tạo")
+	}
+	return a.updater.CheckForUpdate()
+}
+
+// ApplyUpdate tải bản cập nhật và hoán đổi an toàn file exe
+func (a *App) ApplyUpdate(downloadURL string) error {
+	if a.updater == nil {
+		return fmt.Errorf("updater chưa được khởi tạo")
+	}
+	return a.updater.ApplyUpdate(downloadURL)
+}
+
+// RestartApp khởi động lại phiên bản mới sau khi update
+func (a *App) RestartApp() error {
+	if a.updater == nil {
+		return fmt.Errorf("updater chưa được khởi tạo")
+	}
+	return a.updater.RestartApp()
+}
+
+// GetCurrentVersion trả về phiên bản hiện tại của app
+func (a *App) GetCurrentVersion() string {
+	return CurrentVersion
+}
+

@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 import { SubtitleItem, upsertSubtitles, findSubtitleAtTime } from './lib/subtitles';
 import { LandingPage } from './components/LandingPage';
+import { SetupWizard } from './components/SetupWizard';
+import { UpdateNotification } from './components/UpdateNotification';
 
 // Định nghĩa kiểu dữ liệu đồng bộ với Backend
 interface VideoInfo {
@@ -65,6 +67,14 @@ declare global {
           ExportSRT: (path: string, mode: string) => Promise<string>;
           ExportSubtitle: (path: string, format: string, mode: string) => Promise<string>;
           DownloadYouTubeVideo: (url: string) => Promise<string>;
+          CheckModelsReady: () => Promise<boolean>;
+          GetModelStatuses: () => Promise<Record<string, boolean>>;
+          StartModelDownload: () => Promise<void>;
+          CancelModelDownload: () => Promise<void>;
+          CheckForUpdate: () => Promise<any>;
+          ApplyUpdate: (downloadURL: string) => Promise<void>;
+          RestartApp: () => Promise<void>;
+          GetCurrentVersion: () => Promise<string>;
         };
       };
     };
@@ -1064,6 +1074,12 @@ export const App: React.FC = () => {
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDropItems}
     >
+      {/* Auto-download Models (Setup Wizard) */}
+      <SetupWizard onComplete={() => {}} />
+
+      {/* In-App Self-Updater Notification */}
+      <UpdateNotification />
+
       {/* 1. Header Bar (Chỉ hiển thị khi đang ở chế độ Trình phát Video) */}
       {viewMode === 'player' && (
         <header className="h-12 border-b border-player-border px-4 flex items-center justify-between bg-player-surface z-10">
