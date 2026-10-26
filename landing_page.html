@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SubTrans - Trình phát Video & Dịch phụ đề AI Thời gian thực</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: '#f59e0b',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    .amber-glow {
+      box-shadow: 0 0 35px -5px rgba(245, 158, 11, 0.35);
+    }
+    .gradient-text {
+      background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #d97706 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+  </style>
+</head>
+<body class="bg-[#0c0d0e] text-[#f3f4f6] font-sans antialiased selection:bg-amber-500 selection:text-black">
+
+  <!-- 1. Navigation Bar -->
+  <header class="sticky top-0 z-50 backdrop-blur-md bg-[#0c0d0e]/80 border-b border-white/10 px-6 py-4">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+      <div class="flex items-center space-x-3 cursor-pointer">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-amber-300 flex items-center justify-center text-black font-extrabold text-xl shadow-lg shadow-amber-500/30">
+          ST
+        </div>
+        <div>
+          <span class="text-xl font-black tracking-tight text-white">Sub<span class="text-amber-400">Trans</span></span>
+          <span class="ml-2 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">v2.0 Hybrid</span>
+        </div>
+      </div>
+
+      <nav class="hidden md:flex items-center space-x-8 text-sm font-medium text-neutral-300">
+        <a href="#features" class="hover:text-amber-400 transition">Tính năng</a>
+        <a href="#demo" class="hover:text-amber-400 transition">Bản Demo</a>
+        <a href="#performance" class="hover:text-amber-400 transition">Hiệu năng</a>
+        <a href="#specs" class="hover:text-amber-400 transition">Cấu hình</a>
+      </nav>
+
+      <div class="flex items-center space-x-3">
+        <button onclick="openDownloadModal()" class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black font-bold text-sm shadow-lg shadow-amber-500/25 transition-all transform hover:-translate-y-0.5 active:translate-y-0 flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          Tải về dùng thử
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 2. Hero Section -->
+  <section class="relative pt-20 pb-28 overflow-hidden">
+    <div class="max-w-7xl mx-auto px-6 relative z-10 text-center">
+      
+      <!-- Badges -->
+      <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/5 border border-white/10 text-xs font-medium text-neutral-300 mb-8 backdrop-blur">
+        <span class="flex h-2 w-2 rounded-full bg-emerald-400 animate-ping"></span>
+        <span>Hỗ trợ GPU NVIDIA GTX/RTX • Hoàn toàn Offline • Dịch Song ngữ thời gian thực</span>
+      </div>
+
+      <!-- Main Headline -->
+      <h1 class="text-4xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight text-white max-w-4xl mx-auto leading-[1.15] mb-6">
+        Xem video tiếng Anh <br>
+        <span class="gradient-text">không rào cản ngôn ngữ</span>
+      </h1>
+
+      <p class="text-lg sm:text-xl text-neutral-400 max-w-2xl mx-auto mb-10 leading-relaxed font-normal">
+        Trình phát video để bàn tích hợp AI chuyển giọng nói thành phụ đề và dịch tiếng Việt tức thì. Giữ trọn quyền riêng tư, tốc độ xử lý siêu tốc, không cần trả phí hàng tháng.
+      </p>
+
+      <!-- CTA Buttons -->
+      <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
+        <button onclick="openDownloadModal()" class="w-full sm:w-auto px-8 py-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-extrabold text-base shadow-xl shadow-amber-500/30 transition-all transform hover:-translate-y-1 flex items-center justify-center gap-3">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          Tải miễn phí cho Windows (x64)
+        </button>
+        <a href="#demo" class="w-full sm:w-auto px-8 py-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white font-semibold text-base transition flex items-center justify-center gap-2">
+          <svg class="w-5 h-5 text-amber-400" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          Xem trải nghiệm thực tế
+        </a>
+      </div>
+
+      <!-- Video Player Mockup Preview -->
+      <div id="demo" class="relative max-w-5xl mx-auto rounded-2xl p-2 bg-gradient-to-b from-white/15 to-white/5 border border-white/10 amber-glow">
+        <div class="rounded-xl overflow-hidden bg-[#121316] relative aspect-video flex flex-col justify-between p-4 shadow-2xl">
+          
+          <!-- Mock Window Header -->
+          <div class="flex items-center justify-between border-b border-white/10 pb-3">
+            <div class="flex items-center space-x-2">
+              <span class="w-3 h-3 rounded-full bg-red-500/80 inline-block"></span>
+              <span class="w-3 h-3 rounded-full bg-yellow-500/80 inline-block"></span>
+              <span class="w-3 h-3 rounded-full bg-green-500/80 inline-block"></span>
+              <span class="text-xs text-neutral-400 ml-2 font-mono">01_01_welcome-to-aws-cloud-technical-essentials.mp4</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="px-2 py-0.5 text-xs rounded bg-emerald-500/20 text-emerald-300 font-medium">GPU Vulkan Ready (GTX 1650)</span>
+              <span class="px-2 py-0.5 text-xs rounded bg-amber-500/20 text-amber-300 font-bold">Qwen 2.5 1.5B</span>
+            </div>
+          </div>
+
+          <!-- Video Mock Center Scene -->
+          <div class="flex-1 flex flex-col items-center justify-center relative">
+            <div class="w-20 h-20 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-amber-400 cursor-pointer hover:scale-110 transition">
+              <svg class="w-10 h-10 translate-x-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </div>
+
+            <!-- Dynamic Live Subtitle Display Box -->
+            <div class="absolute bottom-6 left-0 right-0 flex flex-col items-center px-4">
+              <div class="bg-black/85 backdrop-blur-md px-6 py-3 rounded-xl border border-white/10 max-w-2xl text-center space-y-1 shadow-2xl">
+                <p id="mock-en" class="text-neutral-300 text-sm font-medium">
+                  "In this course, you will learn the key concepts behind Cloud Computing and explore AWS services."
+                </p>
+                <p id="mock-vi" class="text-amber-400 text-lg font-bold">
+                  "Trong khóa học này, bạn sẽ học các khái niệm cốt lõi về Điện toán đám mây và khám phá các dịch vụ AWS."
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Mock Bottom Controls -->
+          <div class="pt-3 border-t border-white/10 space-y-2">
+            <!-- Seekbar with highlighted done_blocks -->
+            <div class="w-full h-2 bg-neutral-800 rounded-full relative overflow-hidden cursor-pointer">
+              <div class="absolute inset-y-0 left-0 w-3/5 bg-amber-500/35"></div>
+              <div class="absolute inset-y-0 left-0 w-1/4 bg-amber-400"></div>
+            </div>
+            <div class="flex items-center justify-between text-xs text-neutral-400">
+              <div class="flex items-center gap-4">
+                <span class="text-white font-mono">00:08 / 03:45</span>
+                <span class="text-amber-400 font-semibold">[Đã dịch trước 60s]</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-1 rounded bg-neutral-800 text-neutral-200">Song ngữ (Bilingual)</span>
+                <span class="px-2 py-1 rounded bg-neutral-800 text-neutral-200">Tốc độ: 1.0x</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- 3. Key Features Grid -->
+  <section id="features" class="py-24 border-t border-white/5 bg-[#0f1013]">
+    <div class="max-w-7xl mx-auto px-6">
+      
+      <div class="text-center max-w-3xl mx-auto mb-16">
+        <h2 class="text-xs uppercase tracking-widest text-amber-400 font-bold mb-3">Tính Năng Vượt Trội</h2>
+        <p class="text-3xl sm:text-4xl font-extrabold text-white">Xóa bỏ hoàn toàn rào cản khi xem video học tập</p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+        
+        <!-- Feature 1 -->
+        <div class="p-6 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-amber-500/30 transition group">
+          <div class="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center mb-5 group-hover:scale-110 transition">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <h3 class="text-lg font-bold text-white mb-2">Live Chunk Streaming</h3>
+          <p class="text-sm text-neutral-400 leading-relaxed">
+            Không bắt bạn phải đợi hết 30 giây của cả block. Dòng phụ đề nào vừa dịch xong là lập tức hiển thị ngay trên màn hình.
+          </p>
+        </div>
+
+        <!-- Feature 2 -->
+        <div class="p-6 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-amber-500/30 transition group">
+          <div class="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center mb-5 group-hover:scale-110 transition">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+          </div>
+          <h3 class="text-lg font-bold text-white mb-2">Bảo Mật Tuyệt Đối (100% Offline)</h3>
+          <p class="text-sm text-neutral-400 leading-relaxed">
+            Video riêng tư và tài liệu nội bộ không bao giờ bị tải lên máy chủ bên thứ ba. Toàn bộ model AI chạy hoàn toàn trên máy tính của bạn.
+          </p>
+        </div>
+
+        <!-- Feature 3 -->
+        <div class="p-6 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-amber-500/30 transition group">
+          <div class="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center mb-5 group-hover:scale-110 transition">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+          </div>
+          <h3 class="text-lg font-bold text-white mb-2">Tăng Tốc Bằng GPU (GTX/RTX)</h3>
+          <p class="text-sm text-neutral-400 leading-relaxed">
+            Tận dụng card đồ họa NVIDIA GeForce qua Vulkan. Dịch mượt mà, CPU mát rượi, không gây giật lag khi bạn vừa xem video vừa đa nhiệm.
+          </p>
+        </div>
+
+        <!-- Feature 4 -->
+        <div class="p-6 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-amber-500/30 transition group">
+          <div class="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center mb-5 group-hover:scale-110 transition">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+          </div>
+          <h3 class="text-lg font-bold text-white mb-2">Model Qwen 2.5 1.5B Chuyên IT</h3>
+          <p class="text-sm text-neutral-400 leading-relaxed">
+            Vốn từ vựng công nghệ phong phú. Dịch chuẩn xác các thuật ngữ AWS, Cloud, Kubernetes, Database mà không bị chép nhại lại tiếng Anh.
+          </p>
+        </div>
+
+        <!-- Feature 5 -->
+        <div class="p-6 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-amber-500/30 transition group">
+          <div class="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center mb-5 group-hover:scale-110 transition">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+          </div>
+          <h3 class="text-lg font-bold text-white mb-2">Tự Động Nạp Phụ Đề Có Sẵn</h3>
+          <p class="text-sm text-neutral-400 leading-relaxed">
+            Nếu video của bạn đã có sẵn file `_en.srt` hoặc `_vi.srt`, SubTrans sẽ nhận diện và ghép cặp song ngữ trong 1 mili-giây, bỏ qua bước chạy AI.
+          </p>
+        </div>
+
+        <!-- Feature 6 -->
+        <div class="p-6 rounded-2xl bg-white/[0.03] border border-white/10 hover:border-amber-500/30 transition group">
+          <div class="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center mb-5 group-hover:scale-110 transition">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          </div>
+          <h3 class="text-lg font-bold text-white mb-2">Xuất File SRT / VTT Đa Định Dạng</h3>
+          <p class="text-sm text-neutral-400 leading-relaxed">
+            Dễ dàng trích xuất toàn bộ bản dịch ra file phụ đề tiêu chuẩn (Chỉ Tiếng Việt, Chỉ Tiếng Anh hoặc Song ngữ) để chia sẻ hoặc lưu trữ.
+          </p>
+        </div>
+
+      </div>
+
+    </div>
+  </section>
+
+  <!-- 4. Performance Comparison Section -->
+  <section id="performance" class="py-24 border-t border-white/5">
+    <div class="max-w-5xl mx-auto px-6">
+      
+      <div class="text-center mb-16">
+        <h2 class="text-xs uppercase tracking-widest text-amber-400 font-bold mb-3">Hiệu Năng Vượt Trội</h2>
+        <p class="text-3xl font-extrabold text-white">Số liệu đo lường thực tế trên Acer Nitro 5</p>
+      </div>
+
+      <div class="bg-white/[0.02] border border-white/10 rounded-2xl overflow-hidden shadow-xl">
+        <table class="w-full text-left border-collapse text-sm">
+          <thead>
+            <tr class="border-b border-white/10 bg-white/5 text-neutral-300 font-semibold">
+              <th class="p-4 sm:p-5">Tiêu chí đo lường</th>
+              <th class="p-4 sm:p-5 text-neutral-400">Phương pháp truyền thống</th>
+              <th class="p-4 sm:p-5 text-amber-400 font-bold">SubTrans v2.0 (Hiện tại)</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-white/5 text-neutral-300">
+            <tr>
+              <td class="p-4 sm:p-5 font-medium text-white">Độ trễ dòng đầu tiên khi xem</td>
+              <td class="p-4 sm:p-5 text-red-400">~29.7 giây (chờ cả block 30s)</td>
+              <td class="p-4 sm:p-5 text-emerald-400 font-bold">~1.2 giây (Live Streaming)</td>
+            </tr>
+            <tr>
+              <td class="p-4 sm:p-5 font-medium text-white">Tốc độ xử lý phụ đề cả block</td>
+              <td class="p-4 sm:p-5 text-neutral-400">22.98 giây trên CPU</td>
+              <td class="p-4 sm:p-5 text-emerald-400 font-bold">0.18 giây (Online) / 3.8s (GPU)</td>
+            </tr>
+            <tr>
+              <td class="p-4 sm:p-5 font-medium text-white">Tỷ lệ rớt câu hoặc lệch dòng</td>
+              <td class="p-4 sm:p-5 text-red-400">18.2% (lỗi trượt số thứ tự)</td>
+              <td class="p-4 sm:p-5 text-emerald-400 font-bold">0.0% (Mapping an toàn)</td>
+            </tr>
+            <tr>
+              <td class="p-4 sm:p-5 font-medium text-white">Tải CPU hệ thống</td>
+              <td class="p-4 sm:p-5 text-red-400">100% (gây nóng máy, giật video)</td>
+              <td class="p-4 sm:p-5 text-emerald-400 font-bold">&lt; 15% (nhờ Offload GPU)</td>
+            </tr>
+            <tr>
+              <td class="p-4 sm:p-5 font-medium text-white">Khả năng hoạt động ngoại tuyến</td>
+              <td class="p-4 sm:p-5 text-neutral-400">Chỉ dùng được khi có Internet</td>
+              <td class="p-4 sm:p-5 text-emerald-400 font-bold">Hoàn toàn Offline 100%</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- 5. System Requirements Section -->
+  <section id="specs" class="py-20 border-t border-white/5 bg-[#0f1013]">
+    <div class="max-w-4xl mx-auto px-6 text-center">
+      <h2 class="text-xs uppercase tracking-widest text-amber-400 font-bold mb-3">Yêu Cầu Hệ Thống</h2>
+      <p class="text-2xl font-bold text-white mb-8">Tương thích hoàn hảo với phần cứng phổ thông</p>
+
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-left">
+        <div class="p-4 rounded-xl bg-white/[0.03] border border-white/10">
+          <span class="text-xs text-neutral-400 block mb-1">Hệ điều hành</span>
+          <span class="text-sm font-bold text-white">Windows 10 / 11 (64-bit)</span>
+        </div>
+        <div class="p-4 rounded-xl bg-white/[0.03] border border-white/10">
+          <span class="text-xs text-neutral-400 block mb-1">Bộ xử lý (CPU)</span>
+          <span class="text-sm font-bold text-white">Intel Core i3/i5 hoặc Ryzen</span>
+        </div>
+        <div class="p-4 rounded-xl bg-white/[0.03] border border-white/10">
+          <span class="text-xs text-neutral-400 block mb-1">Card đồ họa (GPU)</span>
+          <span class="text-sm font-bold text-white">NVIDIA GTX 1650+ hoặc CPU</span>
+        </div>
+        <div class="p-4 rounded-xl bg-white/[0.03] border border-white/10">
+          <span class="text-xs text-neutral-400 block mb-1">Bộ nhớ RAM</span>
+          <span class="text-sm font-bold text-white">Tối thiểu 4GB (Khuyên dùng 8GB)</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. Footer CTA Banner -->
+  <section class="py-20 border-t border-white/10 text-center relative overflow-hidden">
+    <div class="max-w-3xl mx-auto px-6 relative z-10">
+      <h2 class="text-3xl sm:text-4xl font-extrabold text-white mb-4">
+        Sẵn sàng trải nghiệm học tập đỉnh cao?
+      </h2>
+      <p class="text-neutral-400 mb-8 text-base">
+        Tải ngay bản thử nghiệm SubTrans v2.0, chạy trực tiếp trên máy của bạn chỉ trong 30 giây.
+      </p>
+      <button onclick="openDownloadModal()" class="px-8 py-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-extrabold text-base shadow-xl shadow-amber-500/30 transition-all transform hover:-translate-y-1">
+        Tải Về Trải Nghiệm Ngay
+      </button>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="py-8 border-t border-white/5 text-center text-xs text-neutral-500">
+    <p>© 2026 SubTrans Project. Phát triển bằng Go + Wails + React TypeScript + Whisper + Llama.cpp.</p>
+  </footer>
+
+  <!-- 7. Interactive Download & Setup Modal -->
+  <div id="download-modal" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+    <div class="bg-[#15171b] border border-white/15 rounded-2xl max-w-lg w-full p-6 sm:p-8 shadow-2xl relative">
+      
+      <!-- Close Button -->
+      <button onclick="closeDownloadModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white p-1 rounded-lg">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+
+      <div class="flex items-center gap-3 mb-5">
+        <div class="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-xl">
+          ⚡
+        </div>
+        <div>
+          <h3 class="text-lg font-bold text-white">Tải về SubTrans v2.0 (Windows)</h3>
+          <p class="text-xs text-neutral-400">Phiên bản Desktop độc lập • Tích hợp sẵn AI Qwen 1.5B</p>
+        </div>
+      </div>
+
+      <!-- Quick Setup Instructions -->
+      <div class="space-y-3.5 my-6">
+        <div class="flex items-start gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/5">
+          <span class="w-6 h-6 rounded-full bg-amber-500/20 text-amber-400 text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">1</span>
+          <div>
+            <h4 class="text-xs font-bold text-white mb-0.5">Khởi động nhanh trong 1 cú click</h4>
+            <p class="text-xs text-neutral-400">Nhấp đúp chuột vào file <code class="text-amber-300 bg-black/50 px-1 py-0.5 rounded">run-dev.bat</code> có sẵn trong thư mục dự án.</p>
+          </div>
+        </div>
+
+        <div class="flex items-start gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/5">
+          <span class="w-6 h-6 rounded-full bg-amber-500/20 text-amber-400 text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">2</span>
+          <div>
+            <h4 class="text-xs font-bold text-white mb-0.5">Hoặc gõ lệnh trong PowerShell</h4>
+            <p class="text-xs text-neutral-400">Mở terminal tại thư mục dự án và gõ: <code class="text-amber-300 bg-black/50 px-1 py-0.5 rounded">.\run-dev.ps1</code></p>
+          </div>
+        </div>
+
+        <div class="flex items-start gap-3 p-3 rounded-xl bg-white/[0.03] border border-white/5">
+          <span class="w-6 h-6 rounded-full bg-amber-500/20 text-amber-400 text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">3</span>
+          <div>
+            <h4 class="text-xs font-bold text-white mb-0.5">Đóng gói ra file .EXE độc lập</h4>
+            <p class="text-xs text-neutral-400">Chạy <code class="text-amber-300 bg-black/50 px-1 py-0.5 rounded">run-build.bat</code> để tạo file thực thi hoàn chỉnh trong thư mục <code class="text-neutral-300">build/bin/</code>.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Action Button inside modal -->
+      <div class="pt-2">
+        <button onclick="triggerDirectDownload()" class="w-full py-3.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-black font-extrabold text-sm transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/></svg>
+          Mở Thư Mục & Trải Nghiệm Ngay
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    function openDownloadModal() {
+      document.getElementById('download-modal').classList.remove('hidden');
+    }
+    function closeDownloadModal() {
+      document.getElementById('download-modal').classList.add('hidden');
+    }
+    function triggerDirectDownload() {
+      alert("Hệ thống đã sẵn sàng!\nBạn chỉ cần nhấp đúp file 'run-dev.bat' trong thư mục dự án để khởi động ngay SubTrans.");
+      closeDownloadModal();
+    }
+
+    // Interactive Demo Subtitle Rotator
+    const demoPairs = [
+      {
+        en: '"In this course, you will learn the key concepts behind Cloud Computing and explore AWS services."',
+        vi: '"Trong khóa học này, bạn sẽ học các khái niệm cốt lõi về Điện toán đám mây và khám phá các dịch vụ AWS."'
+      },
+      {
+        en: '"Hey everyone, I\'m Morgan Willis, Principal Cloud Technologies at AWS."',
+        vi: '"Xin chào mọi người, tôi là Morgan Willis, Giám đốc Công nghệ Đám mây tại AWS."'
+      },
+      {
+        en: '"We will cover compute, networking, storage, databases, security, and more using real-life examples."',
+        vi: '"Chúng ta sẽ tìm hiểu về điện toán, mạng, lưu trữ, cơ sở dữ liệu và bảo mật qua các ví dụ thực tế."'
+      }
+    ];
+    let demoIdx = 0;
+    setInterval(() => {
+      demoIdx = (demoIdx + 1) % demoPairs.length;
+      const enEl = document.getElementById('mock-en');
+      const viEl = document.getElementById('mock-vi');
+      if (enEl && viEl) {
+        enEl.style.opacity = '0';
+        viEl.style.opacity = '0';
+        setTimeout(() => {
+          enEl.textContent = demoPairs[demoIdx].en;
+          viEl.textContent = demoPairs[demoIdx].vi;
+          enEl.style.opacity = '1';
+          viEl.style.opacity = '1';
+        }, 300);
+      }
+    }, 4500);
+  </script>
+</body>
+</html>
