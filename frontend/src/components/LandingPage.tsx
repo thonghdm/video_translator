@@ -9,7 +9,6 @@ import {
   ShieldCheck,
   Layers,
   Globe,
-  FileText,
   ChevronRight,
   CheckCircle2,
   ArrowRight,
@@ -22,7 +21,8 @@ import {
   FolderOpen,
   Flame,
   Laptop,
-  HardDrive
+  HardDrive,
+  RotateCcw
 } from 'lucide-react';
 
 interface LandingPageProps {
@@ -181,7 +181,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         {/* Release Pill Badge */}
         <div className="inline-flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-neutral-900/90 border border-amber-500/30 text-amber-300 text-xs font-medium mb-6 backdrop-blur shadow-sm hover:border-amber-500/60 transition-colors cursor-default">
           <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-spin" style={{ animationDuration: '6s' }} />
-          <span>Kiến trúc Đón đầu Two-Tier + Qwen 2.5 1.5B Instruct GPU (Vulkan)</span>
+          <span>Bộ cài siêu nhẹ ~20MB • Tự động tải Model %LOCALAPPDATA% • In-App Updater</span>
           <ChevronRight className="w-3.5 h-3.5 text-neutral-400" />
         </div>
 
@@ -201,21 +201,29 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         </p>
 
         {/* Quick Value Props Tags */}
-        <div className="mt-6 flex flex-wrap justify-center gap-2.5 max-w-2xl text-xs text-neutral-300">
+        <div className="mt-6 flex flex-wrap justify-center gap-2.5 max-w-3xl text-xs text-neutral-300">
           <div className="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-neutral-900/80 border border-neutral-800">
             <Zap className="w-3.5 h-3.5 text-amber-400" />
             <span>Đón đầu Playhead trước 30s</span>
+          </div>
+          <div className="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-neutral-900/80 border border-neutral-800">
+            <Download className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Bộ cài siêu nhẹ (~20 MB)</span>
+          </div>
+          <div className="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-neutral-900/80 border border-neutral-800">
+            <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+            <span>In-App Updater (Giữ 100% Model AI)</span>
           </div>
           <div className="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-neutral-900/80 border border-neutral-800">
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
             <span>100% Offline & Bảo mật tuyệt đối</span>
           </div>
           <div className="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-neutral-900/80 border border-neutral-800">
-            <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+            <Cpu className="w-3.5 h-3.5 text-purple-400" />
             <span>Vulkan GPU Acceleration</span>
           </div>
           <div className="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-neutral-900/80 border border-neutral-800">
-            <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
             <span>0.0% Tỉ lệ mất câu (0/11 drop)</span>
           </div>
         </div>
@@ -244,15 +252,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             className="w-full sm:w-auto flex items-center justify-center space-x-2 px-5 py-3 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-200 font-medium text-sm border border-neutral-800 hover:border-amber-500/40 transition-all"
           >
             <Download className="w-4 h-4 text-amber-400" />
-            <span>Tải bộ cài Windows</span>
+            <span>Tải bộ cài Windows (~20MB)</span>
           </button>
         </div>
 
         {/* Real-time Metrics Bar */}
         <div className="mt-12 w-full max-w-4xl grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 rounded-2xl bg-[#11141b]/80 border border-neutral-800/80 backdrop-blur-sm shadow-2xl">
           <div className="flex flex-col items-center justify-center p-3">
-            <span className="text-2xl sm:text-3xl font-black text-amber-400">0.0%</span>
-            <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider mt-1">Tỷ lệ mất phụ đề</span>
+            <span className="text-2xl sm:text-3xl font-black text-amber-400">~20 MB</span>
+            <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider mt-1">Bộ cài siêu nhẹ</span>
           </div>
           <div className="flex flex-col items-center justify-center p-3 border-l border-neutral-800/80">
             <span className="text-2xl sm:text-3xl font-black text-emerald-400">100%</span>
@@ -263,8 +271,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider mt-1">Độ trễ phản hồi (p50)</span>
           </div>
           <div className="flex flex-col items-center justify-center p-3 border-l border-neutral-800/80">
-            <span className="text-2xl sm:text-3xl font-black text-white">1.04 GB</span>
-            <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider mt-1">Qwen 2.5 1.5B GGUF</span>
+            <span className="text-2xl sm:text-3xl font-black text-white">1.1 GB</span>
+            <span className="text-[11px] font-medium text-neutral-400 uppercase tracking-wider mt-1">Model Offline (%LOCALAPPDATA%)</span>
           </div>
         </div>
       </section>
@@ -501,19 +509,18 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           {/* Card 5 */}
           <div className="p-6 rounded-2xl bg-[#11141c] border border-neutral-800 hover:border-amber-500/40 transition-all group shadow-lg flex flex-col justify-between">
             <div>
-              <div className="w-10 h-10 rounded-xl bg-red-500/15 text-red-400 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                <Globe className="w-5 h-5" />
+              <div className="w-10 h-10 rounded-xl bg-cyan-500/15 text-cyan-400 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                <RotateCcw className="w-5 h-5" />
               </div>
-              <h3 className="text-base font-bold text-white mb-2 group-hover:text-red-400 transition-colors">
-                Tích Hợp YouTube Tự Động
+              <h3 className="text-base font-bold text-white mb-2 group-hover:text-cyan-400 transition-colors">
+                Setup Wizard & Tự Cập Nhật In-App
               </h3>
               <p className="text-xs text-neutral-400 leading-relaxed">
-                Chỉ cần dán link URL video từ YouTube, SubTrans tự động tải phụ đề gốc qua yt-dlp, 
-                phân giải âm thanh và kích hoạt pipeline dịch tức thời mà không cần công cụ trung gian nào.
+                Bộ cài ban đầu siêu nhẹ chỉ ~20MB. Tích hợp Setup Wizard tự động tải model AI vào <code className="text-amber-300 font-mono">%LOCALAPPDATA%</code> với cơ chế HTTP Range (tải tiếp khi rớt mạng). Cập nhật phiên bản mới chỉ thay thế file .exe, giữ nguyên 100% dữ liệu model.
               </p>
             </div>
-            <div className="mt-4 pt-4 border-t border-neutral-800/80 flex items-center text-[11px] text-red-400 font-semibold">
-              <span>Hỗ trợ tải 1080p + auto-subs</span>
+            <div className="mt-4 pt-4 border-t border-neutral-800/80 flex items-center text-[11px] text-cyan-400 font-semibold">
+              <span>Cập nhật .exe an toàn • 0 byte tải lại model</span>
             </div>
           </div>
 
@@ -521,18 +528,17 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <div className="p-6 rounded-2xl bg-[#11141c] border border-neutral-800 hover:border-amber-500/40 transition-all group shadow-lg flex flex-col justify-between">
             <div>
               <div className="w-10 h-10 rounded-xl bg-yellow-500/15 text-yellow-400 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                <FileText className="w-5 h-5" />
+                <Globe className="w-5 h-5" />
               </div>
               <h3 className="text-base font-bold text-white mb-2 group-hover:text-yellow-400 transition-colors">
-                Xuất Phụ Đề & Quản Lý Khóa Học
+                Tích Hợp YouTube & Xuất Phụ Đề
               </h3>
               <p className="text-xs text-neutral-400 leading-relaxed">
-                Tự động quét cây thư mục toàn bộ bài học (10-100 video), ghi nhớ tiến độ hoàn thành, 
-                cho phép xuất phụ đề song ngữ `.srt`, `.vtt` hoặc tài liệu văn bản `.txt` để ôn tập.
+                Chỉ cần dán link URL video từ YouTube để bóc tách phụ đề và dịch tức thời. Quản lý toàn bộ cây thư mục bài học, ghi nhớ tiến độ hoàn thành và xuất file `.srt`, `.vtt` song ngữ hoặc `.txt` để ôn tập.
               </p>
             </div>
             <div className="mt-4 pt-4 border-t border-neutral-800/80 flex items-center text-[11px] text-yellow-400 font-semibold">
-              <span>Định dạng chuẩn SRT / VTT / TXT</span>
+              <span>Hỗ trợ YouTube 1080p • Chuẩn SRT / VTT / TXT</span>
             </div>
           </div>
         </div>
@@ -592,6 +598,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 </td>
               </tr>
               <tr>
+                <td className="py-4 px-5 font-semibold text-white">Dung lượng bộ cài & Cập nhật</td>
+                <td className="py-4 px-5 text-red-400">Tải nguyên gói 2 - 3 GB mỗi khi có bản sửa lỗi</td>
+                <td className="py-4 px-5 text-neutral-400">Nhẹ nhưng phụ thuộc hoàn toàn vào Cloud API bên ngoài</td>
+                <td className="py-4 px-5 text-emerald-400 font-bold bg-amber-500/5 border-l border-r border-amber-500/20">
+                  Bộ cài chỉ ~20 MB! Tự cập nhật .exe, giữ 100% Model trong %LOCALAPPDATA%
+                </td>
+              </tr>
+              <tr>
                 <td className="py-4 px-5 font-semibold text-white">Bảo mật & Chi phí vận hành</td>
                 <td className="py-4 px-5 text-neutral-400">Tốn tiền API hoặc upload file lên web lạ</td>
                 <td className="py-4 px-5 text-red-400">Dễ bị lỗi Rate Limit HTTP 429 hoặc khóa IP</td>
@@ -639,8 +653,12 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   <span className="font-semibold text-white">8 GB RAM (Trống tối thiểu 2GB)</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-neutral-400">Dung lượng ổ cứng:</span>
-                  <span className="font-semibold text-white">~2.5 GB (Bao gồm AI Model)</span>
+                  <span className="text-neutral-400">Bộ cài ban đầu (.exe):</span>
+                  <span className="font-semibold text-amber-300">~20 MB (Cài đặt trong 2 giây)</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-neutral-400">Lưu trữ mô hình AI:</span>
+                  <span className="font-semibold text-white">~1.1 GB (%LOCALAPPDATA%\SubTrans\models)</span>
                 </div>
               </div>
             </div>
@@ -788,14 +806,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-white text-sm">SubTrans-Setup-v2.0.0-x64.exe</span>
                       <span className="text-[11px] px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-mono">
-                        Khuyến nghị
+                        Khuyến nghị • Siêu nhẹ
                       </span>
                     </div>
-                    <p className="text-neutral-400 text-[11px]">
-                      Bao gồm trình quản lý dịch tự động, Wails runtime v8 và trình tải mô hình Qwen 2.5 1.5B tự động.
+                    <p className="text-neutral-400 text-[11px] leading-relaxed">
+                      Bộ cài siêu nhẹ (~20 MB). Tích hợp Setup Wizard tự động tải mô hình AI vào <code className="text-amber-300 font-mono">%LOCALAPPDATA%</code> trong lần mở đầu tiên với cơ chế HTTP Range Resumable (tải tiếp khi rớt mạng) và tự động cập nhật In-App mà không cần tải lại 1.1 GB dữ liệu mô hình!
                     </p>
                     <div className="flex items-center space-x-4 text-[11px] text-neutral-400 pt-1">
-                      <span>Dung lượng: <b>~46 MB</b></span>
+                      <span>Dung lượng: <b className="text-amber-400">~20 MB</b></span>
+                      <span>Mô hình AI: <b>Tự động tải (~1.1 GB)</b></span>
                       <span>Hệ điều hành: <b>Windows 10/11 (64-bit)</b></span>
                     </div>
                   </div>
@@ -814,7 +833,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-black font-bold text-center text-xs shadow-lg shadow-amber-500/25 flex items-center justify-center space-x-2 transition-transform active:scale-95"
                   >
                     <Download className="w-4 h-4" />
-                    <span>Tải Bản Cài Đặt (GitHub Releases)</span>
+                    <span>Tải Bản Cài Đặt Siêu Nhẹ 20MB (GitHub Releases)</span>
                   </a>
                 </div>
               )}
@@ -823,11 +842,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 <div className="space-y-4">
                   <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 space-y-2">
                     <span className="font-bold text-white text-sm">SubTrans-v2.0.0-Windows-Portable.zip</span>
-                    <p className="text-neutral-400 text-[11px]">
-                      Giải nén và chạy ngay tập tin <code>SubTrans.exe</code> mà không cần quyền Administrator.
+                    <p className="text-neutral-400 text-[11px] leading-relaxed">
+                      Giải nén và chạy ngay tập tin <code>SubTrans.exe</code> không cần quyền Administrator. Tự động liên kết và lưu trữ mô hình AI trong <code>%LOCALAPPDATA%</code>.
                     </p>
                     <div className="text-[11px] text-neutral-400">
-                      Dung lượng giải nén: <b>~98 MB</b>
+                      Dung lượng tải: <b className="text-amber-400">~25 MB</b>
                     </div>
                   </div>
 
@@ -845,7 +864,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     className="w-full py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-center text-xs border border-neutral-600 flex items-center justify-center space-x-2"
                   >
                     <Download className="w-4 h-4 text-amber-400" />
-                    <span>Tải Bản Portable (.zip)</span>
+                    <span>Tải Bản Portable (~25 MB)</span>
                   </a>
                 </div>
               )}
