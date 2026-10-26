@@ -94,8 +94,8 @@ func (a *App) SelectVideoFile() (string, error) {
 		Title: "Chọn tập tin video",
 		Filters: []runtime.FileFilter{
 			{
-				DisplayName: "Video Files (*.mp4;*.mkv;*.webm;*.avi;*.mov)",
-				Pattern:     "*.mp4;*.mkv;*.webm;*.avi;*.mov",
+				DisplayName: "Video & Subtitle Files (*.mp4;*.mkv;*.webm;*.avi;*.mov;*.srt;*.vtt)",
+				Pattern:     "*.mp4;*.mkv;*.webm;*.avi;*.mov;*.srt;*.vtt",
 			},
 			{
 				DisplayName: "All Files (*.*)",
@@ -132,6 +132,7 @@ func (a *App) ScanVideoFolder(targetPath string) (*FolderNode, error) {
 	}
 
 	if !fi.IsDir() {
+		cleaned = ResolveVideoFromSubtitlePath(cleaned)
 		if !isSupportedVideoExt(cleaned) {
 			return nil, fmt.Errorf("tập tin không phải định dạng video hỗ trợ")
 		}
@@ -139,7 +140,7 @@ func (a *App) ScanVideoFolder(targetPath string) (*FolderNode, error) {
 			Name:     filepath.Base(cleaned),
 			Path:     cleaned,
 			IsDir:    false,
-			HasCache: HasCachedSubtitles(cleaned),
+			HasCache: HasCachedSubtitles(cleaned) || FindExternalSubtitleFile(cleaned) != "" || FindExternalVietnameseSubtitleFile(cleaned) != "",
 		}, nil
 	}
 
@@ -197,7 +198,7 @@ func scanDirRecursive(dirPath string, depth int) (FolderNode, bool) {
 				Name:     name,
 				Path:     fullPath,
 				IsDir:    false,
-				HasCache: HasCachedSubtitles(fullPath),
+				HasCache: HasCachedSubtitles(fullPath) || FindExternalSubtitleFile(fullPath) != "" || FindExternalVietnameseSubtitleFile(fullPath) != "",
 			})
 		}
 	}
@@ -252,6 +253,8 @@ func (a *App) OpenVideo(path string) (VideoInfo, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	path = ResolveVideoFromSubtitlePath(path)
+
 	if a.currentPipe != nil {
 		a.currentPipe.Stop()
 		a.currentPipe = nil
@@ -290,6 +293,8 @@ func (a *App) OpenVideo(path string) (VideoInfo, error) {
 	if err != nil {
 		return VideoInfo{}, fmt.Errorf("không thể khởi tạo bộ nhớ cache: %w", err)
 	}
+	// Nếu có sẵn file phụ đề Tiếng Việt (_vi.srt / .vi.srt / _vn.srt...), nạp trực tiếp (và ghép cặp với _en.srt nếu có)
+	PopulateStoreFromVietnameseSRT(bs, path, probe.DurationSec, a.settings.BlockSec, a.settings.OverlapSec)
 	a.currentStore = bs
 
 	totalBlocks := int(math.Ceil(probe.DurationSec / a.settings.BlockSec))
@@ -315,12 +320,31 @@ func (a *App) StartPipeline(path string, startSec float64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	path = ResolveVideoFromSubtitlePath(path)
+
 	if a.currentVideo != path || a.currentStore == nil {
 		return fmt.Errorf("video chưa được mở hoặc không khớp đường dẫn")
 	}
 
 	if a.currentPipe != nil {
 		a.currentPipe.Stop()
+	}
+
+	// Nếu 100% các block đã hoàn thành (từ cache hoặc từ file _vi.srt có sẵn), không cần bật llama-server tốn RAM
+	doneCount := len(a.currentStore.GetDoneBlocks())
+	if a.currentInfo != nil && a.currentInfo.TotalBlocks > 0 && doneCount >= a.currentInfo.TotalBlocks {
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "pipeline_status", PipelineStatus{
+				State:       "done",
+				Message:     "Đã có sẵn toàn bộ phụ đề Tiếng Việt",
+				Block:       -1,
+				DoneBlocks:  doneCount,
+				TotalBlocks: a.currentInfo.TotalBlocks,
+				AheadSec:    a.currentInfo.DurationSec,
+				Video:       path,
+			})
+		}
+		return nil
 	}
 
 	// Khởi tạo Translator nếu chưa có (ưu tiên llama-server thường trú, fallback llama-cli)
@@ -405,15 +429,69 @@ func (a *App) StopPipeline() error {
 	return nil
 }
 
-// LoadCachedSubtitles trả về toàn bộ danh sách phụ đề đã có trong cache
+// LoadCachedSubtitles trả về toàn bộ danh sách phụ đề đã có trong cache (kết hợp nạp trước phụ đề gốc _en.srt nếu có)
 func (a *App) LoadCachedSubtitles(path string) ([]SubtitleItem, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	path = ResolveVideoFromSubtitlePath(path)
 	if a.currentVideo != path || a.currentStore == nil {
 		return nil, nil
 	}
-	return a.currentStore.GetAllItemsSorted(), nil
+
+	cachedItems := a.currentStore.GetAllItemsSorted()
+	subFile := FindExternalSubtitleFile(path)
+	if subFile == "" || a.currentInfo == nil {
+		return cachedItems, nil
+	}
+
+	extSegs, err := LoadExternalSubtitles(subFile)
+	if err != nil || len(extSegs) == 0 {
+		return cachedItems, nil
+	}
+
+	blockSec := a.settings.BlockSec
+	if blockSec <= 0 {
+		blockSec = 30.0
+	}
+	overlapSec := a.settings.OverlapSec
+	if overlapSec <= 0 {
+		overlapSec = 2.0
+	}
+	totalBlocks := int(math.Ceil(a.currentInfo.DurationSec / blockSec))
+
+	var allItems []SubtitleItem
+	allItems = append(allItems, cachedItems...)
+
+	for b := 0; b < totalBlocks; b++ {
+		if a.currentStore.IsBlockDone(b) {
+			continue
+		}
+		bRange := ComputeBlockRange(b, blockSec, overlapSec, a.currentInfo.DurationSec)
+		var rawBlockSegs []WhisperSegment
+		for _, seg := range extSegs {
+			if seg.EndSec >= bRange.ExtractStart && seg.StartSec <= bRange.ExtractEnd {
+				rawBlockSegs = append(rawBlockSegs, seg)
+			}
+		}
+		filtered := FilterAndDeduplicateSegments(rawBlockSegs, bRange)
+		for seq, s := range filtered {
+			allItems = append(allItems, SubtitleItem{
+				ID:         int64(b)*1000 + int64(seq),
+				Block:      b,
+				StartSec:   s.StartSec,
+				EndSec:     s.EndSec,
+				SourceText: s.Text,
+				TargetText: "",
+				Translated: false,
+			})
+		}
+	}
+
+	sort.Slice(allItems, func(i, j int) bool {
+		return allItems[i].StartSec < allItems[j].StartSec
+	})
+	return allItems, nil
 }
 
 // FormatSRTTime chuyển đổi float64 giây sang định dạng HH:MM:SS,mmm của file SRT
@@ -431,40 +509,36 @@ func FormatSRTTime(sec float64) string {
 	return fmt.Sprintf("%02d:%02d:%02d,%03d", h, m, s, ms)
 }
 
-// ExportSRT xuất danh sách phụ đề ra file SRT theo 3 chế độ: "source", "target", "bilingual"
-func (a *App) ExportSRT(path string, mode string) (string, error) {
-	a.mu.Lock()
-	store := a.currentStore
-	a.mu.Unlock()
-
-	if store == nil {
-		return "", fmt.Errorf("không có dữ liệu phụ đề để xuất")
+// FormatVTTTime chuyển đổi float64 giây sang định dạng HH:MM:SS.mmm của file WebVTT
+func FormatVTTTime(sec float64) string {
+	if sec < 0 {
+		sec = 0
 	}
-
-	items := store.GetAllItemsSorted()
-	if len(items) == 0 {
-		return "", fmt.Errorf("chưa có dòng phụ đề nào được ghi nhận")
+	h := int(sec / 3600)
+	m := int(math.Mod(sec, 3600) / 60)
+	s := int(math.Mod(sec, 60))
+	ms := int(math.Round((sec - math.Floor(sec)) * 1000))
+	if ms >= 1000 {
+		ms = 999
 	}
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", h, m, s, ms)
+}
 
-	savePath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "Xuất phụ đề định dạng SRT",
-		DefaultFilename: fmt.Sprintf("%s.srt", strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))),
-		Filters: []runtime.FileFilter{
-			{DisplayName: "SubRip Subtitle (*.srt)", Pattern: "*.srt"},
-		},
-	})
-	if err != nil || savePath == "" {
-		return "", err
-	}
-
+// BuildSubtitleContent tạo chuỗi nội dung file .srt hoặc .vtt theo 3 chế độ: "target" (Chỉ Tiếng Việt), "bilingual" (Song ngữ Anh-Việt), "source" (Chỉ Tiếng Anh)
+func BuildSubtitleContent(items []SubtitleItem, format string, mode string) string {
+	isVTT := strings.ToLower(strings.TrimSpace(format)) == "vtt"
 	var sb strings.Builder
+	if isVTT {
+		sb.WriteString("WEBVTT\n\n")
+	}
+
 	idx := 1
 	for _, it := range items {
 		var text string
 		switch mode {
-		case "source":
+		case "source", "en":
 			text = it.SourceText
-		case "target":
+		case "target", "vi":
 			text = it.TargetText
 			if text == "" {
 				text = it.SourceText
@@ -484,16 +558,95 @@ func (a *App) ExportSRT(path string, mode string) (string, error) {
 		}
 
 		sb.WriteString(fmt.Sprintf("%d\n", idx))
-		sb.WriteString(fmt.Sprintf("%s --> %s\n", FormatSRTTime(it.StartSec), FormatSRTTime(it.EndSec)))
+		if isVTT {
+			sb.WriteString(fmt.Sprintf("%s --> %s\n", FormatVTTTime(it.StartSec), FormatVTTTime(it.EndSec)))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s --> %s\n", FormatSRTTime(it.StartSec), FormatSRTTime(it.EndSec)))
+		}
 		sb.WriteString(fmt.Sprintf("%s\n\n", strings.TrimSpace(text)))
 		idx++
 	}
 
-	if err := os.WriteFile(savePath, []byte(sb.String()), 0644); err != nil {
-		return "", fmt.Errorf("lỗi ghi file SRT: %w", err)
+	return sb.String()
+}
+
+// ExportSRT xuất danh sách phụ đề ra file SRT theo 3 chế độ: "source", "target", "bilingual"
+func (a *App) ExportSRT(path string, mode string) (string, error) {
+	return a.ExportSubtitle(path, "srt", mode)
+}
+
+// ExportSubtitle xuất danh sách phụ đề ra file .srt hoặc .vtt độc lập ("target", "bilingual", "source")
+func (a *App) ExportSubtitle(path string, format string, mode string) (string, error) {
+	a.mu.Lock()
+	store := a.currentStore
+	a.mu.Unlock()
+
+	if store == nil {
+		return "", fmt.Errorf("không có dữ liệu phụ đề để xuất")
+	}
+
+	items := store.GetAllItemsSorted()
+	if len(items) == 0 {
+		return "", fmt.Errorf("chưa có dòng phụ đề nào được ghi nhận")
+	}
+
+	ext := "srt"
+	filterName := "SubRip Subtitle (*.srt)"
+	filterPattern := "*.srt"
+	if strings.ToLower(strings.TrimSpace(format)) == "vtt" {
+		ext = "vtt"
+		filterName = "WebVTT Subtitle (*.vtt)"
+		filterPattern = "*.vtt"
+	}
+
+	modeSuffix := "vi"
+	switch mode {
+	case "bilingual":
+		modeSuffix = "bilingual"
+	case "source", "en":
+		modeSuffix = "en"
+	}
+
+	baseName := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	savePath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           fmt.Sprintf("Xuất phụ đề định dạng .%s", strings.ToUpper(ext)),
+		DefaultFilename: fmt.Sprintf("%s.%s.%s", baseName, modeSuffix, ext),
+		Filters: []runtime.FileFilter{
+			{DisplayName: filterName, Pattern: filterPattern},
+		},
+	})
+	if err != nil || savePath == "" {
+		return "", err
+	}
+
+	content := BuildSubtitleContent(items, ext, mode)
+	if err := os.WriteFile(savePath, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("lỗi ghi file phụ đề: %w", err)
 	}
 
 	return savePath, nil
+}
+
+// DownloadYouTubeVideo tải nhanh video và phụ đề gốc từ link YouTube bằng yt-dlp để phát và dịch ngay
+func (a *App) DownloadYouTubeVideo(rawURL string) (string, error) {
+	a.mu.Lock()
+	tools := a.tools
+	ctx := a.ctx
+	a.mu.Unlock()
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	videoPath, err := DownloadYouTubeMedia(ctx, tools, rawURL, func(msg string) {
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "youtube_progress", msg)
+		}
+	})
+	if err != nil {
+		return "", err
+	}
+	return videoPath, nil
 }
 
 // GetSettings trả về cấu hình hiện tại

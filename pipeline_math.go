@@ -183,7 +183,10 @@ func MergeBrokenSegments(segments []WhisperSegment) []WhisperSegment {
 
 	var merged []WhisperSegment
 	for _, seg := range segments {
-		cleanText := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(seg.Text), "- "))
+		cleanText := strings.TrimSpace(seg.Text)
+		for _, prefix := range []string{"-: ", "- :", "- ", ">> "} {
+			cleanText = strings.TrimSpace(strings.TrimPrefix(cleanText, prefix))
+		}
 		if cleanText == "" {
 			continue
 		}
@@ -195,7 +198,7 @@ func MergeBrokenSegments(segments []WhisperSegment) []WhisperSegment {
 			combinedDur := seg.EndSec - prev.StartSec
 			combinedLen := len(prev.Text) + 1 + len(seg.Text)
 
-			if !endsWithSentencePunct(prev.Text) && gap <= 0.8 && combinedDur <= 6.5 && combinedLen <= 82 {
+			if !endsWithSentencePunct(prev.Text) && gap <= 0.8 && combinedDur <= 8.5 && combinedLen <= 115 {
 				prev.Text = prev.Text + " " + seg.Text
 				prev.EndSec = seg.EndSec
 				continue

@@ -2,9 +2,9 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from '
 import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
   FolderOpen, FolderPlus, Folder, ChevronRight, ChevronDown,
-  List, Subtitles, AlertCircle, FileText, RefreshCw,
+  List, Subtitles, AlertCircle, RefreshCw,
   SkipBack, SkipForward, CheckCircle2, Trash2, Search, Film,
-  PanelLeftClose, PanelLeftOpen
+  PanelLeftClose, PanelLeftOpen, Download, Globe, Loader2
 } from 'lucide-react';
 import { SubtitleItem, upsertSubtitles, findSubtitleAtTime } from './lib/subtitles';
 
@@ -62,6 +62,8 @@ declare global {
           StopPipeline: () => Promise<void>;
           LoadCachedSubtitles: (path: string) => Promise<SubtitleItem[]>;
           ExportSRT: (path: string, mode: string) => Promise<string>;
+          ExportSubtitle: (path: string, format: string, mode: string) => Promise<string>;
+          DownloadYouTubeVideo: (url: string) => Promise<string>;
         };
       };
     };
@@ -504,6 +506,11 @@ export const App: React.FC = () => {
   const [subtitleMode, setSubtitleMode] = useState<SubtitleMode>('bilingual');
   const [subtitleOffset, setSubtitleOffset] = useState<number>(0.0);
   const [showSubPanel, setShowSubPanel] = useState<boolean>(false);
+  const [showExportMenu, setShowExportMenu] = useState<boolean>(false);
+  const [showYtModal, setShowYtModal] = useState<boolean>(false);
+  const [ytUrl, setYtUrl] = useState<string>('');
+  const [isDownloadingYt, setIsDownloadingYt] = useState<boolean>(false);
+  const [ytProgress, setYtProgress] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string>('');
 
   // Pipeline Status State
@@ -599,8 +606,8 @@ export const App: React.FC = () => {
       setDuration(info.duration_sec);
       setDoneBlocks(info.done_blocks || []);
 
-      // 3. Nạp cache phụ đề nếu có
-      const cached = await window.go?.main?.App?.LoadCachedSubtitles(selected);
+      // 3. Nạp cache phụ đề nếu có (bao gồm cả phụ đề gốc _en.srt đi kèm)
+      const cached = await window.go?.main?.App?.LoadCachedSubtitles(info.path);
       if (cached && cached.length > 0) {
         setSubtitles(cached);
       }
@@ -613,7 +620,7 @@ export const App: React.FC = () => {
       }
 
       // 5. Bắt đầu pipeline ngầm
-      await window.go?.main?.App?.StartPipeline(selected, 0);
+      await window.go?.main?.App?.StartPipeline(info.path, 0);
     } catch (err: any) {
       alert(`Không thể mở video: ${err?.message || err}`);
     }
@@ -726,9 +733,15 @@ export const App: React.FC = () => {
       setPipelineStatus(st);
     });
 
+    // Lắng nghe tiến độ tải YouTube
+    const unYt = window.runtime.EventsOn('youtube_progress', (msg: string) => {
+      setYtProgress(msg);
+    });
+
     return () => {
       unChunk();
       unStatus();
+      unYt();
     };
   }, [videoInfo?.path]);
 
@@ -929,14 +942,48 @@ export const App: React.FC = () => {
     }
   };
 
-  // Xuất file SRT
-  const handleExportSRT = async (mode: string) => {
-    if (!videoInfo?.path) return;
+  // Xuất file phụ đề (.srt / .vtt)
+  const handleExportSubtitle = async (format: 'srt' | 'vtt', mode: 'target' | 'bilingual' | 'source') => {
+    setShowExportMenu(false);
+    if (!videoInfo?.path) {
+      showToast('Vui lòng mở video trước khi xuất phụ đề');
+      return;
+    }
     try {
-      const res = await window.go?.main?.App?.ExportSRT(videoInfo.path, mode);
-      if (res) showToast(`Đã xuất phụ đề: ${res}`);
+      let res: string | undefined;
+      if (window.go?.main?.App?.ExportSubtitle) {
+        res = await window.go.main.App.ExportSubtitle(videoInfo.path, format, mode);
+      } else {
+        res = await window.go?.main?.App?.ExportSRT(videoInfo.path, mode);
+      }
+      if (res) showToast(`✅ Đã xuất phụ đề: ${res}`);
     } catch (err: any) {
-      alert(`Xuất SRT thất bại: ${err?.message || err}`);
+      alert(`Xuất phụ đề thất bại: ${err?.message || err}`);
+    }
+  };
+
+  // Tải & Dịch tự động từ link YouTube
+  const handleStartYouTube = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = ytUrl.trim();
+    if (!trimmed || isDownloadingYt) return;
+
+    setIsDownloadingYt(true);
+    setYtProgress('Đang kết nối YouTube và tách phụ đề gốc...');
+
+    try {
+      const downloadedPath = await window.go?.main?.App?.DownloadYouTubeVideo(trimmed);
+      if (downloadedPath) {
+        setShowYtModal(false);
+        setYtUrl('');
+        setYtProgress('');
+        showToast('🎉 Đã tải xong từ YouTube! Đang phát & dịch tự động...');
+        await handleOpenVideo(downloadedPath);
+      }
+    } catch (err: any) {
+      alert(`Không thể tải video YouTube: ${err?.message || err}`);
+    } finally {
+      setIsDownloadingYt(false);
     }
   };
 
@@ -1047,6 +1094,16 @@ export const App: React.FC = () => {
             <span>Mở file lẻ</span>
           </button>
 
+          {/* Nút Dán link YouTube tải & dịch tự động */}
+          <button
+            onClick={() => setShowYtModal(true)}
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-300 font-semibold text-xs rounded border border-red-500/30 transition-colors"
+            title="Dán link YouTube để tự động tách phụ đề gốc và dịch"
+          >
+            <Globe className="w-3.5 h-3.5 text-red-400" />
+            <span>YouTube</span>
+          </button>
+
           <span className="text-xs font-medium text-neutral-300 truncate max-w-xs pl-1">
             {videoInfo?.path ? videoInfo.path.split(/[\\/]/).pop() : 'Chưa mở file'}
           </span>
@@ -1133,14 +1190,73 @@ export const App: React.FC = () => {
             <List className="w-4 h-4" />
           </button>
 
-          {/* Xuất SRT menu */}
-          <button
-            onClick={() => handleExportSRT(subtitleMode === 'off' ? 'bilingual' : subtitleMode)}
-            className="p-1.5 rounded text-neutral-300 hover:bg-neutral-800"
-            title="Xuất file SRT"
-          >
-            <FileText className="w-4 h-4" />
-          </button>
+          {/* Xuất phụ đề (.SRT / .VTT) Dropdown Menu */}
+          <div className="relative">
+            <button
+              onClick={() => setShowExportMenu((v) => !v)}
+              className="flex items-center space-x-1 px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 text-xs transition-colors"
+              title="Xuất file phụ đề độc lập (.SRT / .VTT)"
+            >
+              <Download className="w-3.5 h-3.5 text-amber-400" />
+              <span>Xuất Sub</span>
+            </button>
+
+            {showExportMenu && (
+              <div className="absolute right-0 mt-1.5 w-60 bg-[#161920] border border-neutral-700 rounded-md shadow-2xl py-1.5 z-50 text-xs">
+                <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-amber-400/90">
+                  Định dạng .SRT (Phổ biến)
+                </div>
+                <button
+                  onClick={() => handleExportSubtitle('srt', 'target')}
+                  className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-neutral-200 flex items-center justify-between"
+                >
+                  <span>Chỉ Tiếng Việt</span>
+                  <span className="text-[10px] text-neutral-500 font-mono">.vi.srt</span>
+                </button>
+                <button
+                  onClick={() => handleExportSubtitle('srt', 'bilingual')}
+                  className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-amber-300 font-medium flex items-center justify-between"
+                >
+                  <span>Song ngữ (Anh - Việt)</span>
+                  <span className="text-[10px] text-neutral-500 font-mono">.bilingual.srt</span>
+                </button>
+                <button
+                  onClick={() => handleExportSubtitle('srt', 'source')}
+                  className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-neutral-400 flex items-center justify-between"
+                >
+                  <span>Chỉ Tiếng Anh (Gốc)</span>
+                  <span className="text-[10px] text-neutral-500 font-mono">.en.srt</span>
+                </button>
+
+                <div className="my-1 border-t border-neutral-800" />
+
+                <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-cyan-400/90">
+                  Định dạng .VTT (Web / HTML5)
+                </div>
+                <button
+                  onClick={() => handleExportSubtitle('vtt', 'target')}
+                  className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-neutral-200 flex items-center justify-between"
+                >
+                  <span>Chỉ Tiếng Việt</span>
+                  <span className="text-[10px] text-neutral-500 font-mono">.vi.vtt</span>
+                </button>
+                <button
+                  onClick={() => handleExportSubtitle('vtt', 'bilingual')}
+                  className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-amber-300 font-medium flex items-center justify-between"
+                >
+                  <span>Song ngữ (Anh - Việt)</span>
+                  <span className="text-[10px] text-neutral-500 font-mono">.bilingual.vtt</span>
+                </button>
+                <button
+                  onClick={() => handleExportSubtitle('vtt', 'source')}
+                  className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 text-neutral-400 flex items-center justify-between"
+                >
+                  <span>Chỉ Tiếng Anh (Gốc)</span>
+                  <span className="text-[10px] text-neutral-500 font-mono">.en.vtt</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -1186,6 +1302,81 @@ export const App: React.FC = () => {
         {toastMessage && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 bg-black/80 text-amber-300 border border-amber-500/50 rounded text-xs shadow-lg backdrop-blur">
             {toastMessage}
+          </div>
+        )}
+
+        {/* Modal dán link YouTube tải & dịch tự động */}
+        {showYtModal && (
+          <div className="absolute inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <form
+              onSubmit={handleStartYouTube}
+              className="w-full max-w-md bg-[#161920] border border-neutral-700 rounded-lg shadow-2xl p-5 space-y-4"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <Globe className="w-5 h-5 text-red-400" />
+                  <h3 className="text-sm font-bold text-white">
+                    Tải & Dịch phụ đề tự động từ YouTube
+                  </h3>
+                </div>
+                {!isDownloadingYt && (
+                  <button
+                    type="button"
+                    onClick={() => setShowYtModal(false)}
+                    className="text-neutral-400 hover:text-white text-xs px-2 py-0.5 rounded"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              <p className="text-xs text-neutral-400 leading-relaxed">
+                Dán link video YouTube vào bên dưới. Hệ thống sẽ dùng <b>yt-dlp</b> tự động lấy phụ đề tiếng Anh gốc (nếu có) và video về máy rồi dịch sang tiếng Việt ngay lập tức.
+              </p>
+
+              <input
+                type="url"
+                required
+                disabled={isDownloadingYt}
+                value={ytUrl}
+                onChange={(e) => setYtUrl(e.target.value)}
+                placeholder="https://www.youtube.com/watch?v=..."
+                className="w-full bg-neutral-900 text-xs text-white px-3 py-2.5 rounded border border-neutral-700 focus:border-amber-400 focus:outline-none disabled:opacity-50"
+                autoFocus
+              />
+
+              {isDownloadingYt && (
+                <div className="flex items-center space-x-2 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded p-2.5">
+                  <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                  <span className="truncate">{ytProgress || 'Đang xử lý...'}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end space-x-2 pt-1">
+                <button
+                  type="button"
+                  disabled={isDownloadingYt}
+                  onClick={() => setShowYtModal(false)}
+                  className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded disabled:opacity-50"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={isDownloadingYt || !ytUrl.trim()}
+                  className="flex items-center space-x-1.5 px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-black font-bold text-xs rounded shadow disabled:opacity-50"
+                >
+                  {isDownloadingYt ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Đang tải...</span>
+                    </>
+                  ) : (
+                    <span>Tải & Dịch ngay</span>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         )}
 

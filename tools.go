@@ -21,6 +21,7 @@ type ToolsPaths struct {
 	WhisperCLI   string
 	LlamaCLI     string
 	LlamaServer  string
+	YtDlp        string
 	WhisperModel string
 	LlamaModel   string
 	TempDir      string
@@ -69,6 +70,7 @@ func GetToolsPaths() *ToolsPaths {
 			WhisperCLI:   filepath.Join(baseDir, "tools", "whisper", "whisper-cli.exe"),
 			LlamaCLI:     filepath.Join(llamaDir, "llama-cli.exe"),
 			LlamaServer:  filepath.Join(llamaDir, "llama-server.exe"),
+			YtDlp:        filepath.Join(baseDir, "tools", "ytdlp", "yt-dlp.exe"),
 			WhisperModel: filepath.Join(baseDir, "models", "ggml-base.bin"),
 			LlamaModel:   filepath.Join(baseDir, "models", "qwen2.5-1.5b-instruct-q4_k_m.gguf"),
 			TempDir:      tempDir,

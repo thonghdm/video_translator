@@ -57,26 +57,104 @@ func Test_ScanVideoFolder_NaturalSort(t *testing.T) {
 	}
 }
 
-// Test_ParseSRTorVTT_And_MergeBrokenSegments kiểm tra đọc file .srt đi kèm và gộp câu đứt đoạn
+// Test_ParseSRTorVTT_And_MergeBrokenSegments kiểm tra đọc file _en.srt đi kèm và gộp câu đứt đoạn
 func Test_ParseSRTorVTT_And_MergeBrokenSegments(t *testing.T) {
+	tempDir := t.TempDir()
+	vidPath := filepath.Join(tempDir, "001 Introduction.mp4")
+	srtPath := filepath.Join(tempDir, "001 Introduction_en.srt")
+
 	srtRaw := `1
-00:00:01,000 --> 00:00:02,500
-- Hey everyone, I'm Morgan,
+00:00:00,000 --> 00:00:01,589
+-: Hi, welcome back.
 
 2
-00:00:02,600 --> 00:00:04,800
-welcome to this course.
+00:00:01,589 --> 00:00:05,190
+I am Kalyan Reddy Daida and I will be your instructor
+
+3
+00:00:05,190 --> 00:00:09,210
+in this EKS Kubernetes Masterclass course.
 `
+	_ = os.WriteFile(vidPath, []byte("dummy"), 0644)
+	_ = os.WriteFile(srtPath, []byte(srtRaw), 0644)
+
+	// 1. Kiểm tra FindExternalSubtitleFile tự phát hiện _en.srt từ đường dẫn .mp4
+	foundSub := FindExternalSubtitleFile(vidPath)
+	if foundSub != srtPath {
+		t.Fatalf("Kỳ vọng tìm thấy %q, thực tế nhận %q", srtPath, foundSub)
+	}
+
+	// 2. Kiểm tra ResolveVideoFromSubtitlePath tự ánh xạ từ _en.srt sang .mp4
+	resolvedVid := ResolveVideoFromSubtitlePath(srtPath)
+	if resolvedVid != vidPath {
+		t.Fatalf("Kỳ vọng ánh xạ về %q, thực tế nhận %q", vidPath, resolvedVid)
+	}
+
 	segs := ParseSRTorVTT(srtRaw)
-	if len(segs) != 2 {
-		t.Fatalf("Kỳ vọng parse được 2 segment từ SRT, nhận được %d", len(segs))
+	if len(segs) != 3 {
+		t.Fatalf("Kỳ vọng parse được 3 segment từ SRT, nhận được %d", len(segs))
 	}
 
 	merged := MergeBrokenSegments(segs)
-	if len(merged) != 1 {
-		t.Fatalf("Kỳ vọng gộp 2 mảnh câu chưa kết thúc thành 1 câu hoàn chỉnh, nhận được %d", len(merged))
+	if len(merged) != 2 {
+		t.Fatalf("Kỳ vọng gộp mảnh 2 và 3 chưa kết thúc câu thành 1 câu hoàn chỉnh (tổng 2 câu), nhận được %d", len(merged))
 	}
-	if merged[0].Text != "Hey everyone, I'm Morgan, welcome to this course." {
-		t.Errorf("Nội dung câu sau khi gộp không khớp: %q", merged[0].Text)
+	if merged[0].Text != "Hi, welcome back." {
+		t.Errorf("Kỳ vọng lọc sạch tiền tố '-: ', nhận được: %q", merged[0].Text)
+	}
+
+	// 3. Kiểm tra thêm trường hợp có file _vi.srt đi kèm (nạp thẳng phụ đề Tiếng Việt + ghép cặp Song ngữ với _en.srt)
+	viSrtPath := filepath.Join(tempDir, "001 Introduction_vi.srt")
+	viRaw := `1
+00:00:00,000 --> 00:00:01,589
+Xin chào, chào mừng quay trở lại.
+
+2
+00:00:01,589 --> 00:00:05,190
+Tôi là Kalyan Reddy Daida và tôi sẽ là giảng viên của bạn
+
+3
+00:00:05,190 --> 00:00:09,210
+trong khóa học EKS Kubernetes Masterclass này.
+`
+	_ = os.WriteFile(viSrtPath, []byte(viRaw), 0644)
+
+	foundVi := FindExternalVietnameseSubtitleFile(vidPath)
+	if foundVi != viSrtPath {
+		t.Fatalf("Kỳ vọng tìm thấy file Tiếng Việt %q, thực tế nhận %q", viSrtPath, foundVi)
+	}
+	if ResolveVideoFromSubtitlePath(viSrtPath) != vidPath {
+		t.Fatalf("Kỳ vọng ánh xạ từ _vi.srt về %q", vidPath)
+	}
+
+	bs, err := NewBlockStore(vidPath, CacheMeta{BlockSec: 30, OverlapSec: 2, DurationSec: 30})
+	if err != nil {
+		t.Fatalf("Lỗi tạo BlockStore: %v", err)
+	}
+	if !PopulateStoreFromVietnameseSRT(bs, vidPath, 30.0, 30.0, 2.0) {
+		t.Fatalf("Kỳ vọng nạp thành công phụ đề từ _vi.srt")
+	}
+	items := bs.GetAllItemsSorted()
+	if len(items) != 3 || !items[0].Translated || items[0].TargetText != "Xin chào, chào mừng quay trở lại." || items[0].SourceText != "Hi, welcome back." {
+		t.Errorf("Ghép cặp song ngữ _en.srt + _vi.srt không đúng mong đợi: %+v", items)
+	}
+}
+
+// Test_BuildSubtitleContent_SRT_And_VTT kiểm tra xuất phụ đề .srt và .vtt ở chế độ Chỉ Tiếng Việt & Song ngữ
+func Test_BuildSubtitleContent_SRT_And_VTT(t *testing.T) {
+	items := []SubtitleItem{
+		{ID: 1, StartSec: 1.5, EndSec: 4.25, SourceText: "Hello world.", TargetText: "Xin chào thế giới.", Translated: true},
+	}
+
+	srtVi := BuildSubtitleContent(items, "srt", "target")
+	expectedSrtVi := "1\n00:00:01,500 --> 00:00:04,250\nXin chào thế giới.\n\n"
+	if srtVi != expectedSrtVi {
+		t.Errorf("SRT target sai:\n%q\nkỳ vọng:\n%q", srtVi, expectedSrtVi)
+	}
+
+	vttBi := BuildSubtitleContent(items, "vtt", "bilingual")
+	expectedVttBi := "WEBVTT\n\n1\n00:00:01.500 --> 00:00:04.250\nHello world.\nXin chào thế giới.\n\n"
+	if vttBi != expectedVttBi {
+		t.Errorf("VTT bilingual sai:\n%q\nkỳ vọng:\n%q", vttBi, expectedVttBi)
 	}
 }
