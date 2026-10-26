@@ -567,43 +567,42 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				return
 			}
 
-			var sourceLines []string
-			for _, item := range job.Items {
-				sourceLines = append(sourceLines, item.SourceText)
-			}
-
 			tTrans0 := time.Now()
-			var translations []string
-			if p.translator != nil && len(sourceLines) > 0 {
-				var err error
-				translations, err = p.translator.TranslateBatch(ctx, sourceLines)
-				if err != nil {
-					// Fallback nếu batch lỗi: mảng rỗng
-					translations = make([]string, len(sourceLines))
+			translatedItems := make([]SubtitleItem, len(job.Items))
+			copy(translatedItems, job.Items)
+
+			okCount := 0
+			if p.translator != nil && len(job.Items) > 0 {
+				for i, item := range job.Items {
+					if ctx.Err() != nil {
+						return
+					}
+					target, err := p.translator.Translate(ctx, item.SourceText, nil)
+					if err == nil && target != "" {
+						translatedItems[i].TargetText = target
+						translatedItems[i].Translated = true
+						okCount++
+					} else {
+						translatedItems[i].TargetText = ""
+						translatedItems[i].Translated = false
+					}
+
+					// Phát cập nhật tức thì từng dòng tiếng Việt vừa dịch xong lên giao diện
+					if p.callbacks.OnChunk != nil {
+						p.callbacks.OnChunk(SubtitleChunkPayload{
+							Video: p.videoPath,
+							Block: job.BlockIdx,
+							Items: []SubtitleItem{translatedItems[i]},
+							Final: false,
+						})
+					}
 				}
-			} else {
-				translations = make([]string, len(sourceLines))
 			}
 			transMs := time.Since(tTrans0).Milliseconds()
 
-			okCount := 0
-			var translatedItems []SubtitleItem
-			for i, item := range job.Items {
-				target := ""
-				if i < len(translations) {
-					target = translations[i]
-				}
-				item.TargetText = target
-				item.Translated = (target != "")
-				if item.Translated {
-					okCount++
-				}
-				translatedItems = append(translatedItems, item)
-			}
-
 			totalMs := job.SliceMs + job.SttMs + transMs
 			fmt.Printf("[BLOCK %d] Slice: %dms | STT: %dms (%d lines) | Trans: %dms (%d/%d ok) | Total: %dms\n",
-				job.BlockIdx, job.SliceMs, job.SttMs, len(job.Items), okCount, len(job.Items), totalMs)
+				job.BlockIdx, job.SliceMs, job.SttMs, len(job.Items), transMs, okCount, len(job.Items), totalMs)
 
 			// Lưu vào cache
 			_ = p.blockStore.SaveBlock(job.BlockIdx, translatedItems)

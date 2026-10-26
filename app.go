@@ -179,9 +179,18 @@ func (a *App) StartPipeline(path string, startSec float64) error {
 		a.currentPipe.Stop()
 	}
 
-	// Khởi tạo Translator nếu chưa có
+	// Khởi tạo Translator nếu chưa có (ưu tiên llama-server thường trú, fallback llama-cli)
 	if a.currentTrans == nil {
-		trans, err := NewLlamaCliTranslator(a.tools.LlamaModel, a.tools.LlamaCLI)
+		var trans Translator
+		var err error
+		if a.tools.LlamaServer != "" {
+			if _, statErr := os.Stat(a.tools.LlamaServer); statErr == nil {
+				trans, err = NewLlamaServerTranslator(a.tools.LlamaModel, a.tools.LlamaServer, 4)
+			}
+		}
+		if trans == nil || err != nil {
+			trans, err = NewLlamaCliTranslator(a.tools.LlamaModel, a.tools.LlamaCLI)
+		}
 		if err != nil {
 			return fmt.Errorf("khởi tạo translator thất bại: %w", err)
 		}

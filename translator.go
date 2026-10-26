@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +23,196 @@ type Translator interface {
 	Close() error
 }
 
-// LlamaCliTranslator triển khai gọi llama-cli
+// LlamaServerTranslator triển khai dịch thuật qua llama-server thường trú
+type LlamaServerTranslator struct {
+	cmd      *exec.Cmd
+	baseURL  string
+	port     int
+	client   *http.Client
+	mu       sync.Mutex
+	isClosed bool
+}
+
+// getFreePort tìm cổng mạng nội bộ ngẫu nhiên đang trống
+func getFreePort() (int, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// NewLlamaServerTranslator khởi động llama-server ngầm ở cổng ngẫu nhiên và kiểm tra sẵn sàng
+func NewLlamaServerTranslator(modelPath, serverExe string, threads int) (*LlamaServerTranslator, error) {
+	port, err := getFreePort()
+	if err != nil {
+		return nil, fmt.Errorf("không tìm được cổng trống cho llama-server: %w", err)
+	}
+
+	if threads <= 0 {
+		threads = 4
+	}
+
+	portStr := strconv.Itoa(port)
+	args := []string{
+		"-m", modelPath,
+		"-c", "2048",
+		"-t", strconv.Itoa(threads),
+		"--port", portStr,
+		"--host", "127.0.0.1",
+	}
+
+	cmd := exec.Command(serverExe, args...)
+	prepareCmdPlatform(cmd) // Ẩn cửa sổ trên Windows
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("không thể khởi động llama-server: %w", err)
+	}
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%s", portStr)
+	srv := &LlamaServerTranslator{
+		cmd:     cmd,
+		baseURL: baseURL,
+		port:    port,
+		client:  &http.Client{Timeout: 30 * time.Second},
+	}
+
+	// Đợi server sẵn sàng (poll /health trong tối đa 20 giây)
+	ready := false
+	t0 := time.Now()
+	for time.Since(t0) < 20*time.Second {
+		resp, err := srv.client.Get(baseURL + "/health")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if !ready {
+		_ = srv.Close()
+		return nil, fmt.Errorf("hết thời gian chờ llama-server khởi động")
+	}
+
+	// Smoke test
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	out, err := srv.Translate(ctx, "Hello.", nil)
+	if err != nil || strings.TrimSpace(out) == "" {
+		_ = srv.Close()
+		return nil, fmt.Errorf("smoke test llama-server thất bại: %v (out: %s)", err, out)
+	}
+
+	return srv, nil
+}
+
+// Translate dịch một dòng thoại qua HTTP endpoint /completion
+func (s *LlamaServerTranslator) Translate(ctx context.Context, line string, _ []string) (string, error) {
+	trimmed := strings.TrimSpace(line)
+	if isIgnoredSubtitle(trimmed) {
+		return "", nil
+	}
+
+	res, err := s.callCompletion(ctx, trimmed)
+	if err == nil && res != "" {
+		return res, nil
+	}
+
+	// Retry đúng 1 lần nếu câu trả về rỗng hoặc lỗi
+	resRetry, _ := s.callCompletion(ctx, trimmed)
+	return resRetry, nil
+}
+
+func (s *LlamaServerTranslator) callCompletion(ctx context.Context, line string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isClosed {
+		return "", fmt.Errorf("llama-server đã dừng")
+	}
+
+	prompt := BuildPrompt(line)
+	reqData := map[string]interface{}{
+		"prompt":      prompt,
+		"temperature": 0.1,
+		"n_predict":   64,
+		"stop":        []string{"<|im_end|>", "\n\n", "English:"},
+	}
+
+	jsonBytes, err := json.Marshal(reqData)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/completion", bytes.NewReader(jsonBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("llama-server HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	cleaned := CleanLLMOutput(result.Content, line)
+	return cleaned, nil
+}
+
+// TranslateBatch dịch toàn bộ câu bằng cách gọi tuần tự nhanh
+func (s *LlamaServerTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	results := make([]string, len(lines))
+	for i, l := range lines {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		trans, err := s.Translate(ctx, l, nil)
+		if err == nil {
+			results[i] = trans
+		}
+	}
+	return results, nil
+}
+
+// Close dập tắt toàn bộ cây tiến trình của llama-server
+func (s *LlamaServerTranslator) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isClosed {
+		return nil
+	}
+	s.isClosed = true
+
+	if s.cmd != nil {
+		killProcessTree(s.cmd)
+	}
+	return nil
+}
+
+// LlamaCliTranslator triển khai gọi llama-cli (chế độ dự phòng)
 type LlamaCliTranslator struct {
 	modelPath string
 	llamaCLI  string
