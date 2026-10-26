@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
-  FolderOpen, List, Subtitles, Settings, AlertCircle, FileText
+  FolderOpen, List, Subtitles, AlertCircle, FileText,
+  RefreshCw
 } from 'lucide-react';
 import { SubtitleItem, upsertSubtitles, findSubtitleAtTime } from './lib/subtitles';
 
@@ -122,9 +123,14 @@ const SubtitleListPanel = memo(({
                   {item.translated && <span className="text-emerald-400">Đã dịch</span>}
                 </div>
                 <div className="text-neutral-300 select-text">{item.source_text}</div>
-                {item.target_text && (
+                {item.target_text ? (
                   <div className="text-amber-300 mt-0.5 font-medium select-text">
                     {item.target_text}
+                  </div>
+                ) : (
+                  <div className="text-neutral-500 italic text-[11px] mt-0.5 flex items-center space-x-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    <span>Đang dịch...</span>
                   </div>
                 )}
               </div>
@@ -162,7 +168,6 @@ export const App: React.FC = () => {
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const lastTargetBlockRef = useRef<number>(-1);
   const seekDebounceTimerRef = useRef<any>(null);
   const lastPlayheadUpdateRef = useRef<number>(0);
 
@@ -295,6 +300,14 @@ export const App: React.FC = () => {
     };
   }, [subtitles, subtitleOffset, videoInfo?.path]);
 
+  // Cập nhật volume và playbackRate cho thẻ video DOM
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.volume = volume;
+      videoRef.current.playbackRate = playbackRate;
+    }
+  }, [volume, playbackRate]);
+
   // Điều khiển Play / Pause
   const togglePlay = () => {
     if (!videoRef.current) return;
@@ -318,15 +331,16 @@ export const App: React.FC = () => {
     const blockSec = videoInfo.block_sec || 30;
     const targetBlock = Math.floor(clamped / blockSec);
 
-    // Không gọi trùng nếu cùng block
-    if (targetBlock === lastTargetBlockRef.current) return;
-    lastTargetBlockRef.current = targetBlock;
+    // Nếu tua vào block chưa dịch xong, báo toast cho người dùng biết
+    if (!doneBlocks.includes(targetBlock)) {
+      showToast('⚡ Đang xử lý phụ đề đoạn này...');
+    }
 
     clearTimeout(seekDebounceTimerRef.current);
     seekDebounceTimerRef.current = setTimeout(() => {
       window.go?.main?.App?.SeekTo(videoInfo.path, clamped);
-    }, 250);
-  }, [videoInfo, duration]);
+    }, 200);
+  }, [videoInfo, duration, doneBlocks]);
 
   // Phím tắt điều khiển
   useEffect(() => {
@@ -428,6 +442,13 @@ export const App: React.FC = () => {
     }
   };
 
+  // Kích hoạt dịch đón đầu trước 1 đoạn
+  const handleTriggerBufferAhead = () => {
+    if (!videoInfo?.path) return;
+    showToast('Đang tăng tốc đón đầu phụ đề phía trước...');
+    window.go?.main?.App?.SeekTo(videoInfo.path, currentTime);
+  };
+
   return (
     <div
       ref={containerRef}
@@ -456,8 +477,9 @@ export const App: React.FC = () => {
           </span>
         </div>
 
-        {/* Dynamic Pipeline Status Label */}
+        {/* Right Header Controls */}
         <div className="flex items-center space-x-3 text-xs">
+          {/* Dynamic Pipeline Status Label */}
           {pipelineStatus && (
             <div className="flex items-center space-x-2 px-2.5 py-1 bg-neutral-800/80 rounded-full border border-neutral-700">
               <span className={`w-2 h-2 rounded-full ${
@@ -474,6 +496,16 @@ export const App: React.FC = () => {
               </span>
             </div>
           )}
+
+          {/* Nút dịch đón đầu trước 1 khúc */}
+          <button
+            onClick={handleTriggerBufferAhead}
+            className="flex items-center space-x-1 px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-amber-300 hover:text-amber-200 rounded border border-neutral-700 text-xs transition-colors"
+            title="Kích thích pipeline dịch đón đầu trước một đoạn"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Dịch trước</span>
+          </button>
 
           {/* Subtitle Mode Button */}
           <button
@@ -528,9 +560,7 @@ export const App: React.FC = () => {
             ref={videoRef}
             className="max-h-full max-w-full object-contain"
             onClick={togglePlay}
-            volume={volume}
             muted={isMuted}
-            playbackRate={playbackRate}
             onEnded={() => setIsPlaying(false)}
           />
 

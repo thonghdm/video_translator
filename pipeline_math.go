@@ -89,17 +89,20 @@ var commonHallucinations = []string{
 
 // IsHallucination kiểm tra xem đoạn text có phải là ảo giác phổ biến của Whisper không
 func IsHallucination(text string, duration float64) bool {
-	cleaned := strings.ToLower(strings.TrimSpace(text))
-	cleaned = strings.Trim(cleaned, `.,!?:;'"[]()♪-`)
+	rawCleaned := strings.ToLower(strings.TrimSpace(text))
+	if rawCleaned == "" || rawCleaned == "[blank_audio]" || rawCleaned == "(music)" || rawCleaned == "♪" {
+		return true
+	}
 
-	if cleaned == "" || cleaned == "[blank_audio]" || cleaned == "(music)" || cleaned == "music" {
+	cleaned := strings.Trim(rawCleaned, `.,!?:;'"[]()♪- `)
+	if cleaned == "" || cleaned == "blank_audio" || cleaned == "music" {
 		return true
 	}
 
 	// Nếu câu thoại quá ngắn hoặc nằm trong danh sách câu ảo giác khi im lặng
 	for _, h := range commonHallucinations {
 		if cleaned == h {
-			// Thường xuất hiện ở các đoạn âm thanh im lặng (hoặc rất ngắn < 3s)
+			// Thường xuất hiện ở các đoạn âm thanh im lặng (hoặc rất ngắn < 3.5s)
 			if duration <= 3.5 {
 				return true
 			}

@@ -17,6 +17,14 @@ func (m *MockTranslator) Translate(ctx context.Context, line string, prevContext
 	return "[VI] " + line, nil
 }
 
+func (m *MockTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	var res []string
+	for _, l := range lines {
+		res = append(res, "[VI] "+l)
+	}
+	return res, nil
+}
+
 func (m *MockTranslator) Close() error {
 	return nil
 }

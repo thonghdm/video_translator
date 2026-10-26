@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -169,7 +170,7 @@ func ProbeMedia(tools *ToolsPaths, filePath string) (*ProbeResult, error) {
 		filePath,
 	}
 
-	res, err := RunCommand(nil, tools.FFprobe, args, 15*time.Second, nil)
+	res, err := RunCommand(context.Background(), tools.FFprobe, args, 15*time.Second, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe thất bại: %w (stderr: %s)", err, res.Stderr)
 	}

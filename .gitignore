@@ -1,0 +1,16 @@
+# Binaries and tools
+build/bin/
+build/windows/
+dist/
+*.exe
+*.dll
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/package.json.md5
+
+# Logs and temp
+*.log
+main.log
+temp/

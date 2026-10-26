@@ -168,16 +168,16 @@ func (p *Pipeline) Start(startSec float64) error {
 
 	p.stopCurrentSessionLocked()
 
-	p.sessionID = atomic.AddInt64(&p.sessionID, 1)
+	newSessionID := atomic.AddInt64(&p.sessionID, 1)
 	p.sessionCtx, p.cancelFunc = context.WithCancel(context.Background())
 	p.playheadSec = startSec
 	p.state = "processing"
 
-	p.startSessionWorkers(p.sessionCtx, p.sessionID)
+	p.startSessionWorkers(p.sessionCtx, newSessionID)
 	return nil
 }
 
-// SeekTo di chuyển playhead an toàn, hủy phiên cũ nếu cần
+// SeekTo di chuyển playhead an toàn, hủy ngay phiên cũ nếu bị lệch vị trí
 func (p *Pipeline) SeekTo(startSec float64) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -192,26 +192,30 @@ func (p *Pipeline) SeekTo(startSec float64) error {
 	p.playheadSec = startSec
 	targetBlock := int(startSec / p.settings.BlockSec)
 
-	// 1. Nếu block đích đã hoàn thành trong cache -> chỉ cập nhật playhead, đánh thức scheduler
-	if p.blockStore.IsBlockDone(targetBlock) {
+	// Kiểm tra xem worker hiện tại có đang xử lý đúng ngay tại targetBlock hoặc block kế tiếp không
+	isProcessingTarget := p.activeJobs[targetBlock] || p.activeJobs[targetBlock+1]
+
+	// 1. Nếu block đích đã có trong cache VÀ các worker đang chạy gần đó -> chỉ dời playhead
+	if p.blockStore.IsBlockDone(targetBlock) && isProcessingTarget {
 		p.triggerSchedule()
 		return nil
 	}
 
-	// 2. Nếu block đích đang được xử lý hoặc ngay sau đó -> giữ nguyên hướng chạy
-	if p.activeJobs[targetBlock] || p.activeJobs[targetBlock+1] {
+	// 2. Nếu block đích chưa có trong cache nhưng worker đang xử lý đúng nó -> giữ nguyên hướng chạy
+	if !p.blockStore.IsBlockDone(targetBlock) && isProcessingTarget {
 		p.triggerSchedule()
 		return nil
 	}
 
-	// 3. Cần nhảy phiên mới: Hủy phiên cũ và khởi tạo phiên mới
+	// 3. Tua nhảy cóc hoặc tua lùi xa vị trí cũ:
+	// Hủy ngay lập tức phiên cũ để giải phóng 100% CPU cho block vừa tua tới
 	p.stopCurrentSessionLocked()
 
-	p.sessionID = atomic.AddInt64(&p.sessionID, 1)
+	newSessionID := atomic.AddInt64(&p.sessionID, 1)
 	p.sessionCtx, p.cancelFunc = context.WithCancel(context.Background())
 	p.state = "seeking"
 
-	p.startSessionWorkers(p.sessionCtx, p.sessionID)
+	p.startSessionWorkers(p.sessionCtx, newSessionID)
 	return nil
 }
 
@@ -536,7 +540,7 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 	}
 }
 
-// translatorWorker dịch từng câu thoại bằng LLM
+// translatorWorker dịch toàn bộ câu trong block bằng TranslateBatch siêu tốc
 func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -555,34 +559,32 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				return
 			}
 
-			var translatedItems []SubtitleItem
-			var prevContext []string
-
+			var sourceLines []string
 			for _, item := range job.Items {
-				if ctx.Err() != nil {
-					return
-				}
+				sourceLines = append(sourceLines, item.SourceText)
+			}
 
-				targetText := ""
-				if p.translator != nil && item.SourceText != "" {
-					var transErr error
-					targetText, transErr = p.translator.Translate(ctx, item.SourceText, prevContext)
-					if transErr != nil {
-						// Một dòng lỗi không làm hỏng cả block, giữ targetText rỗng
-						targetText = ""
-					}
+			var translations []string
+			if p.translator != nil && len(sourceLines) > 0 {
+				var err error
+				translations, err = p.translator.TranslateBatch(ctx, sourceLines)
+				if err != nil {
+					// Fallback nếu batch lỗi: mảng rỗng
+					translations = make([]string, len(sourceLines))
 				}
+			} else {
+				translations = make([]string, len(sourceLines))
+			}
 
-				item.TargetText = targetText
-				item.Translated = (targetText != "")
+			var translatedItems []SubtitleItem
+			for i, item := range job.Items {
+				target := ""
+				if i < len(translations) {
+					target = translations[i]
+				}
+				item.TargetText = target
+				item.Translated = (target != "")
 				translatedItems = append(translatedItems, item)
-
-				if item.SourceText != "" {
-					prevContext = append(prevContext, item.SourceText)
-					if len(prevContext) > 2 {
-						prevContext = prevContext[len(prevContext)-2:]
-					}
-				}
 			}
 
 			// Lưu vào cache

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,6 +150,10 @@ func splitCRLF(data []byte, atEOF bool) (advance int, token []byte, err error) {
 
 // RunCommand thực thi tiến trình với timeout, ẩn console và kill cây tiến trình khi hủy
 func RunCommand(ctx context.Context, bin string, args []string, timeout time.Duration, onStderrLine func(string)) (*RunCommandResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	var cmdCtx context.Context
 	var cancel context.CancelFunc
 
