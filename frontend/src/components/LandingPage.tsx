@@ -92,8 +92,26 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   // Current subtitle for demo
   const currentSub = DEMO_TIMELINE.slice().reverse().find((s) => demoTime >= s.time) || DEMO_TIMELINE[0];
 
+  const isWebEnvironment = typeof window !== 'undefined' && !window.go?.main?.App;
+
+  const handleTryNow = () => {
+    if (isWebEnvironment) {
+      setShowDownloadModal(true);
+    } else {
+      onOpenVideo();
+    }
+  };
+
+  const handleTryYouTube = () => {
+    if (isWebEnvironment) {
+      setShowDownloadModal(true);
+    } else {
+      onOpenYouTube();
+    }
+  };
+
   const handleCopyCli = () => {
-    navigator.clipboard.writeText('git clone https://github.com/hoang/subtrans.git\ncd subtrans\n./run-dev.bat');
+    navigator.clipboard.writeText('git clone https://github.com/thonghdm/video_translator.git\ncd video_translator\n./run-dev.bat');
     setCopiedCmd(true);
     setTimeout(() => setCopiedCmd(false), 2500);
   };
@@ -146,7 +164,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           </button>
 
           <button
-            onClick={onOpenVideo}
+            onClick={handleTryNow}
             className="flex items-center space-x-2 px-4 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-black shadow-lg shadow-amber-500/25 hover:shadow-amber-500/40 transition-all transform active:scale-95"
           >
             <FolderOpen className="w-3.5 h-3.5" />
@@ -205,7 +223,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         {/* Hero CTA Action Buttons */}
         <div className="mt-8 flex flex-col sm:flex-row items-center gap-3.5 w-full sm:w-auto">
           <button
-            onClick={onOpenVideo}
+            onClick={handleTryNow}
             className="w-full sm:w-auto flex items-center justify-center space-x-2 px-6 py-3 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-black font-bold text-sm shadow-xl shadow-amber-500/25 hover:shadow-amber-500/40 transition-all transform active:scale-95"
           >
             <FolderOpen className="w-4 h-4" />
@@ -214,7 +232,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           </button>
 
           <button
-            onClick={onOpenYouTube}
+            onClick={handleTryYouTube}
             className="w-full sm:w-auto flex items-center justify-center space-x-2 px-5 py-3 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-100 font-semibold text-sm border border-neutral-700 hover:border-neutral-600 transition-all"
           >
             <Globe className="w-4 h-4 text-red-400" />
@@ -378,7 +396,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 Delimiter ⟦|⟧: 100% Khớp
               </span>
               <button
-                onClick={onOpenVideo}
+                onClick={handleTryNow}
                 className="px-3 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-semibold border border-neutral-700 transition-colors"
               >
                 Thử trên video thật
@@ -667,7 +685,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
           <div className="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
             <button
-              onClick={onOpenVideo}
+              onClick={handleTryNow}
               className="w-full sm:w-auto px-8 py-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-black font-extrabold text-sm shadow-xl shadow-amber-500/30 hover:shadow-amber-500/50 transition-all transform active:scale-95 flex items-center justify-center space-x-2"
             >
               <FolderOpen className="w-4 h-4" />
@@ -694,11 +712,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <span>Real-time Video Subtitle Translation Engine</span>
           </div>
           <div className="flex items-center space-x-4 text-neutral-400">
-            <span className="hover:text-amber-400 cursor-pointer" onClick={onOpenVideo}>Dùng thử ứng dụng</span>
+            <span className="hover:text-amber-400 cursor-pointer" onClick={handleTryNow}>Dùng thử ứng dụng</span>
             <span>•</span>
             <span className="hover:text-amber-400 cursor-pointer" onClick={() => setShowDownloadModal(true)}>Tải về</span>
             <span>•</span>
-            <span>Bản quyền © 2026</span>
+            <a href="https://github.com/thonghdm/video_translator" target="_blank" rel="noreferrer" className="hover:text-amber-400">
+              GitHub Repo
+            </a>
           </div>
         </div>
       </footer>
@@ -781,17 +801,20 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   </div>
 
                   <a
-                    href="#download"
+                    href="https://github.com/thonghdm/video_translator/releases"
+                    target="_blank"
+                    rel="noreferrer"
                     onClick={(e) => {
-                      e.preventDefault();
-                      alert('Bạn đang chạy trực tiếp ứng dụng SubTrans v2.0 trong môi trường Desktop!');
-                      setShowDownloadModal(false);
-                      onOpenVideo();
+                      if (!isWebEnvironment) {
+                        e.preventDefault();
+                        setShowDownloadModal(false);
+                        onOpenVideo();
+                      }
                     }}
                     className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-black font-bold text-center text-xs shadow-lg shadow-amber-500/25 flex items-center justify-center space-x-2 transition-transform active:scale-95"
                   >
                     <Download className="w-4 h-4" />
-                    <span>Tải Bản Cài Đặt (Miễn Phí)</span>
+                    <span>Tải Bản Cài Đặt (GitHub Releases)</span>
                   </a>
                 </div>
               )}
@@ -808,17 +831,22 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => {
-                      alert('Bạn đang chạy trực tiếp ứng dụng SubTrans v2.0 trong môi trường Desktop!');
-                      setShowDownloadModal(false);
-                      onOpenVideo();
+                  <a
+                    href="https://github.com/thonghdm/video_translator/releases"
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => {
+                      if (!isWebEnvironment) {
+                        e.preventDefault();
+                        setShowDownloadModal(false);
+                        onOpenVideo();
+                      }
                     }}
                     className="w-full py-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white font-bold text-center text-xs border border-neutral-600 flex items-center justify-center space-x-2"
                   >
                     <Download className="w-4 h-4 text-amber-400" />
                     <span>Tải Bản Portable (.zip)</span>
-                  </button>
+                  </a>
                 </div>
               )}
 
@@ -829,7 +857,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   </p>
                   <div className="relative p-3.5 rounded-xl bg-black border border-neutral-800 font-mono text-[11px] text-amber-300">
                     <pre className="whitespace-pre-wrap leading-5">
-                      {`git clone https://github.com/hoang/subtrans.git\ncd subtrans\n./run-dev.bat`}
+                      {`git clone https://github.com/thonghdm/video_translator.git\ncd video_translator\n./run-dev.bat`}
                     </pre>
                     <button
                       onClick={handleCopyCli}
