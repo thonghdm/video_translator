@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -21,6 +22,285 @@ type Translator interface {
 	Translate(ctx context.Context, line string, prevContext []string) (string, error)
 	TranslateBatch(ctx context.Context, lines []string) ([]string, error)
 	Close() error
+}
+
+// sharedHTTPTransport tái sử dụng kết nối TCP/TLS (HTTP Connection Pooling) trong toàn bộ ứng dụng
+var sharedHTTPTransport = &http.Transport{
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 20,
+	IdleConnTimeout:     90 * time.Second,
+	DisableKeepAlives:   false,
+	ForceAttemptHTTP2:   true,
+}
+
+// SplitLinesIntoControlledBatches chia danh sách câu thành các batch giới hạn theo cả số câu (maxLines) và số ký tự (maxChars)
+func SplitLinesIntoControlledBatches(lines []string, maxLines int, maxChars int) [][]int {
+	if len(lines) == 0 {
+		return nil
+	}
+	if maxLines <= 0 {
+		maxLines = 8
+	}
+	if maxChars <= 0 {
+		maxChars = 600
+	}
+
+	var batches [][]int
+	var currentBatch []int
+	currentChars := 0
+
+	for i, line := range lines {
+		lineLen := len(line)
+		if len(currentBatch) > 0 && (len(currentBatch) >= maxLines || currentChars+lineLen > maxChars) {
+			batches = append(batches, currentBatch)
+			currentBatch = nil
+			currentChars = 0
+		}
+		currentBatch = append(currentBatch, i)
+		currentChars += lineLen
+	}
+	if len(currentBatch) > 0 {
+		batches = append(batches, currentBatch)
+	}
+	return batches
+}
+
+// FastHybridTranslator kết hợp dịch siêu tốc (~120ms/block, 0MB RAM LLM) và tự động fallback sang Local LLM (llama-server) khi offline
+type FastHybridTranslator struct {
+	client      *http.Client
+	cacheMu     sync.RWMutex
+	phraseCache map[string]string
+	fallbackMu  sync.Mutex
+	fallback    Translator
+	modelPath   string
+	serverExe   string
+	cliExe      string
+}
+
+// NewFastHybridTranslator khởi tạo bộ dịch lai siêu tốc (tiết kiệm 1.2GB RAM khi có mạng, tự bật Local LLM khi offline)
+func NewFastHybridTranslator(modelPath, serverExe, cliExe string) *FastHybridTranslator {
+	return &FastHybridTranslator{
+		client: &http.Client{
+			Timeout:   5 * time.Second,
+			Transport: sharedHTTPTransport,
+		},
+		phraseCache: make(map[string]string, 512),
+		modelPath:   modelPath,
+		serverExe:   serverExe,
+		cliExe:      cliExe,
+	}
+}
+
+func (f *FastHybridTranslator) getCached(line string) (string, bool) {
+	key := normalizePhraseKey(line)
+	if key == "" {
+		return "", false
+	}
+	f.cacheMu.RLock()
+	val, ok := f.phraseCache[key]
+	f.cacheMu.RUnlock()
+	return val, ok
+}
+
+func (f *FastHybridTranslator) setCached(line, trans string) {
+	key := normalizePhraseKey(line)
+	if key == "" || trans == "" {
+		return
+	}
+	f.cacheMu.Lock()
+	if len(f.phraseCache) >= 8000 {
+		f.phraseCache = make(map[string]string, 512)
+	}
+	f.phraseCache[key] = trans
+	f.cacheMu.Unlock()
+}
+
+func (f *FastHybridTranslator) getOrInitFallback() (Translator, error) {
+	f.fallbackMu.Lock()
+	defer f.fallbackMu.Unlock()
+
+	if f.fallback != nil {
+		return f.fallback, nil
+	}
+
+	var trans Translator
+	var err error
+	if f.serverExe != "" {
+		if _, statErr := os.Stat(f.serverExe); statErr == nil {
+			trans, err = NewLlamaServerTranslator(f.modelPath, f.serverExe, 4)
+		}
+	}
+	if trans == nil || err != nil {
+		trans, err = NewLlamaCliTranslator(f.modelPath, f.cliExe)
+	}
+	if err != nil {
+		return nil, err
+	}
+	f.fallback = trans
+	return f.fallback, nil
+}
+
+func (f *FastHybridTranslator) translateFastGTX(ctx context.Context, text string) (string, error) {
+	u := "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=vi&dt=t&q=" + url.QueryEscape(text)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fast translate HTTP %d", resp.StatusCode)
+	}
+
+	var raw []interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return "", err
+	}
+	if len(raw) == 0 {
+		return "", fmt.Errorf("empty response")
+	}
+
+	sentences, ok := raw[0].([]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid format")
+	}
+
+	var sb strings.Builder
+	for _, s := range sentences {
+		if pair, ok := s.([]interface{}); ok && len(pair) > 0 {
+			if part, ok := pair[0].(string); ok {
+				sb.WriteString(part)
+			}
+		}
+	}
+	return strings.TrimSpace(sb.String()), nil
+}
+
+func (f *FastHybridTranslator) Translate(ctx context.Context, line string, prevContext []string) (string, error) {
+	trimmed := strings.TrimSpace(line)
+	if isIgnoredSubtitle(trimmed) {
+		return "", nil
+	}
+	if cached, ok := f.getCached(trimmed); ok {
+		return cached, nil
+	}
+
+	if out, err := f.translateFastGTX(ctx, trimmed); err == nil && out != "" {
+		f.setCached(trimmed, out)
+		return out, nil
+	}
+
+	fb, err := f.getOrInitFallback()
+	if err != nil {
+		return "", err
+	}
+	return fb.Translate(ctx, trimmed, prevContext)
+}
+
+func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	if len(lines) == 0 {
+		return nil, nil
+	}
+
+	results := make([]string, len(lines))
+	var uncachedLines []string
+	var uncachedIdx []int
+
+	for i, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if isIgnoredSubtitle(trimmed) {
+			continue
+		}
+		if cached, ok := f.getCached(trimmed); ok {
+			results[i] = cached
+		} else {
+			uncachedLines = append(uncachedLines, trimmed)
+			uncachedIdx = append(uncachedIdx, i)
+		}
+	}
+
+	if len(uncachedLines) == 0 {
+		return results, nil
+	}
+
+	// Gộp toàn bộ câu trong batch bằng delimiter đặc thù để tránh lỗi xuống dòng của API
+	const batchDelimiter = " ⟦|⟧ "
+	joined := strings.Join(uncachedLines, batchDelimiter)
+	if batchOut, err := f.translateFastGTX(ctx, joined); err == nil && batchOut != "" {
+		// Tách theo delimiter đặc thù (chấp nhận cả khi API xóa bớt khoảng trắng quanh delimiter)
+		splitOut := strings.Split(batchOut, "⟦|⟧")
+		if len(splitOut) == len(uncachedLines) {
+			valid := true
+			for _, part := range splitOut {
+				if strings.TrimSpace(part) == "" {
+					valid = false
+					break
+				}
+			}
+			if valid {
+				for j, origIdx := range uncachedIdx {
+					cleaned := strings.TrimSpace(splitOut[j])
+					f.setCached(uncachedLines[j], cleaned)
+					results[origIdx] = cleaned
+				}
+				return results, nil
+			}
+		}
+
+		// Fallback dòng-bởi-dòng nếu delimiter bị nuốt hoặc lệch
+		// Nếu phát hiện HTTP 429 hoặc lỗi mạng, chuyển ngay sang Local LLM không spam API
+		allOk := true
+		for j, origIdx := range uncachedIdx {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			singleOut, sErr := f.translateFastGTX(ctx, uncachedLines[j])
+			if sErr == nil && singleOut != "" {
+				f.setCached(uncachedLines[j], singleOut)
+				results[origIdx] = singleOut
+			} else {
+				allOk = false
+				break
+			}
+		}
+		if allOk {
+			return results, nil
+		}
+	}
+
+	// Fallback sang Local LLM (llama-server / llama-cli) nếu mất kết nối mạng
+	fb, err := f.getOrInitFallback()
+	if err != nil {
+		return results, err
+	}
+	fbRes, err := fb.TranslateBatch(ctx, uncachedLines)
+	if err == nil {
+		for j, origIdx := range uncachedIdx {
+			if j < len(fbRes) && fbRes[j] != "" {
+				f.setCached(uncachedLines[j], fbRes[j])
+				results[origIdx] = fbRes[j]
+			}
+		}
+	}
+	return results, err
+}
+
+func (f *FastHybridTranslator) Close() error {
+	f.fallbackMu.Lock()
+	defer f.fallbackMu.Unlock()
+	if f.fallback != nil {
+		return f.fallback.Close()
+	}
+	return nil
 }
 
 // LlamaServerTranslator triển khai dịch thuật qua llama-server thường trú
@@ -123,10 +403,13 @@ func NewLlamaServerTranslator(modelPath, serverExe string, threads int) (*LlamaS
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%s", portStr)
 	srv := &LlamaServerTranslator{
-		cmd:         cmd,
-		baseURL:     baseURL,
-		port:        port,
-		client:      &http.Client{Timeout: 30 * time.Second},
+		cmd:     cmd,
+		baseURL: baseURL,
+		port:    port,
+		client: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: sharedHTTPTransport,
+		},
 		phraseCache: make(map[string]string, 256),
 	}
 
@@ -220,7 +503,10 @@ func (s *LlamaServerTranslator) callCompletion(ctx context.Context, line string)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -338,7 +624,10 @@ func (s *LlamaServerTranslator) callBatchCompletion(ctx context.Context, lines [
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

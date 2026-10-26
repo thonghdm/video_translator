@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -62,6 +63,12 @@ type Pipeline struct {
 	activeJobs       map[int]bool
 	externalSegments []WhisperSegment
 
+	// Metrics đo p50/p95 latency và tỷ lệ phụ đề sẵn sàng trước thời điểm phát
+	metricsMu        sync.Mutex
+	batchLatenciesMs []int64
+	onTimeCount      int64
+	totalTransCount  int64
+
 	// Custom runners hỗ trợ Mock trong Test tự động
 	MockSliceAudio func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error
 	MockRunSTT     func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error)
@@ -97,6 +104,10 @@ func NewPipeline(
 	if subFile := FindExternalSubtitleFile(videoPath); subFile != "" {
 		if loaded, err := LoadExternalSubtitles(subFile); err == nil && len(loaded) > 0 {
 			extSegs = loaded
+			// Khi đã có sẵn _en.srt, cho phép dịch đón đầu xa hơn (10 phút = 600s) vì không tốn CPU chạy Whisper
+			if settings.LookaheadMaxSec < 600.0 {
+				settings.LookaheadMaxSec = 600.0
+			}
 		}
 	}
 
@@ -429,6 +440,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan int, outChan 
 				// -ss <extract_start> -t <len> -i video -vn -ar 16000 -ac 1 -c:a pcm_s16le
 				args := []string{
 					"-y",
+					"-threads", "2",
 					"-ss", fmt.Sprintf("%.3f", bRange.ExtractStart),
 					"-t", fmt.Sprintf("%.3f", bRange.ExtractLen),
 					"-i", p.videoPath,
@@ -596,23 +608,50 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			translatedItems := make([]SubtitleItem, len(job.Items))
 			copy(translatedItems, job.Items)
 
+			p.mu.Lock()
+			curPlayhead := p.playheadSec
+			p.mu.Unlock()
+
+			// Xác định Tầng ưu tiên (Two-Tier Lookahead Buffer):
+			// - Tier 1 (High Priority): Block chứa playhead hoặc nằm trong 15 giây sắp phát
+			// - Tier 2 (Low Priority): Các block nền từ +15s đến LookaheadMaxSec
+			isTier1Block := job.Range.OwnerStart <= curPlayhead+15.0 && job.Range.OwnerEnd >= curPlayhead
+			tierLabel := "TIER-2:BG"
+			if isTier1Block {
+				tierLabel = "TIER-1:HIGH"
+			}
+
 			okCount := 0
 			if p.translator != nil && len(job.Items) > 0 {
-				const microBatchSize = 4
-				for start := 0; start < len(job.Items); start += microBatchSize {
+				batches := BuildTwoTierBatches(job.Items, curPlayhead, isTier1Block)
+
+				for bIdx, indices := range batches {
 					if ctx.Err() != nil {
 						return
 					}
-					end := start + microBatchSize
-					if end > len(job.Items) {
-						end = len(job.Items)
+
+					// Ở Tier 2 (Low Priority), nhường nhịp nhỏ giữa các batch nền để tránh dồn request (dùng timer có drain sạch)
+					if !isTier1Block && bIdx > 0 && p.MockRunSTT == nil {
+						timer := time.NewTimer(25 * time.Millisecond)
+						select {
+						case <-ctx.Done():
+							if !timer.Stop() {
+								select {
+								case <-timer.C:
+								default:
+								}
+							}
+							return
+						case <-timer.C:
+						}
 					}
 
-					batchLines := make([]string, end-start)
-					for idx := start; idx < end; idx++ {
-						batchLines[idx-start] = job.Items[idx].SourceText
+					batchLines := make([]string, len(indices))
+					for k, itemIdx := range indices {
+						batchLines[k] = job.Items[itemIdx].SourceText
 					}
 
+					tBatch0 := time.Now()
 					if p.MockRunSTT == nil {
 						p.computeMu.Lock()
 					}
@@ -620,25 +659,37 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 					if p.MockRunSTT == nil {
 						p.computeMu.Unlock()
 					}
+					batchMs := time.Since(tBatch0).Milliseconds()
+
 					if ctx.Err() != nil {
 						return
 					}
 
-					updatedSlice := make([]SubtitleItem, 0, end-start)
-					for idx := start; idx < end; idx++ {
-						rel := idx - start
-						if err == nil && rel < len(targets) && targets[rel] != "" {
-							translatedItems[idx].TargetText = targets[rel]
-							translatedItems[idx].Translated = true
+					p.mu.Lock()
+					nowPlayhead := p.playheadSec
+					p.mu.Unlock()
+
+					updatedSlice := make([]SubtitleItem, 0, len(indices))
+					batchOnTime := int64(0)
+					for k, itemIdx := range indices {
+						if err == nil && k < len(targets) && targets[k] != "" {
+							translatedItems[itemIdx].TargetText = targets[k]
+							translatedItems[itemIdx].Translated = true
 							okCount++
+							// P1: Chỉ tính On-time nếu câu hoàn tất TRƯỚC mốc StartSec hiển thị của câu
+							if nowPlayhead < translatedItems[itemIdx].StartSec {
+								batchOnTime++
+							}
 						} else {
-							translatedItems[idx].TargetText = ""
-							translatedItems[idx].Translated = false
+							translatedItems[itemIdx].TargetText = ""
+							translatedItems[itemIdx].Translated = false
 						}
-						updatedSlice = append(updatedSlice, translatedItems[idx])
+						updatedSlice = append(updatedSlice, translatedItems[itemIdx])
 					}
 
-					// Phát cập nhật theo từng cụm micro-batch lên giao diện (giảm tải IPC & re-render)
+					p.recordBatchMetrics(batchMs, batchOnTime, int64(len(indices)))
+
+					// Phát cập nhật theo từng cụm batch lên giao diện
 					if p.callbacks.OnChunk != nil {
 						p.callbacks.OnChunk(SubtitleChunkPayload{
 							Video: p.videoPath,
@@ -651,9 +702,10 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			}
 			transMs := time.Since(tTrans0).Milliseconds()
 
+			p50, p95, onTimePct := p.getMetricsSummary()
 			totalMs := job.SliceMs + job.SttMs + transMs
-			fmt.Printf("[BLOCK %d] Slice: %dms | STT: %dms (%d lines) | Trans: %dms (%d/%d ok) | Total: %dms\n",
-				job.BlockIdx, job.SliceMs, job.SttMs, len(job.Items), transMs, okCount, len(job.Items), totalMs)
+			fmt.Printf("[BLOCK %d | %s] Slice: %dms | STT: %dms (%d lines) | Trans: %dms (%d/%d ok) | Batch p50=%dms p95=%dms | On-time: %.0f%% | Total: %dms\n",
+				job.BlockIdx, tierLabel, job.SliceMs, job.SttMs, len(job.Items), transMs, okCount, len(job.Items), p50, p95, onTimePct, totalMs)
 
 			// Lưu vào cache
 			_ = p.blockStore.SaveBlock(job.BlockIdx, translatedItems)
@@ -696,4 +748,109 @@ func (p *Pipeline) handleBlockFailure(blockIdx int, stage string, err error) {
 	}
 
 	p.triggerSchedule()
+}
+
+// BuildTwoTierBatches chia danh sách câu trong block theo mô hình Two-Tier Lookahead:
+// - Tier 1 (High Priority): Ưu tiên gom cụm nhỏ (tối đa 3 câu / 240 ký tự) cho các câu nằm trong vùng [playheadSec - 1s, playheadSec + 15s] để hiển thị tức thì.
+// - Tier 2 (Low Priority): Gom các câu còn lại thành các batch lớn (tối đa 8 câu / 600 ký tự) để tối ưu số lượng request HTTP.
+func BuildTwoTierBatches(items []SubtitleItem, playheadSec float64, isTier1Block bool) [][]int {
+	if len(items) == 0 {
+		return nil
+	}
+
+	var tier1Indices []int
+	var tier2Indices []int
+
+	if isTier1Block {
+		for i, it := range items {
+			// Các câu sắp phát trong vòng 15 giây tới tính từ playhead được đưa vào Tier 1
+			if it.EndSec >= playheadSec-1.0 && it.StartSec <= playheadSec+15.0 {
+				tier1Indices = append(tier1Indices, i)
+			} else {
+				tier2Indices = append(tier2Indices, i)
+			}
+		}
+	} else {
+		for i := range items {
+			tier2Indices = append(tier2Indices, i)
+		}
+	}
+
+	var result [][]int
+
+	// 1. Chia batch cho Tier 1: batch đầu tiên cực gọn (tối đa 3 câu / 240 ký tự) để trả kết quả nhanh nhất
+	if len(tier1Indices) > 0 {
+		tier1Lines := make([]string, len(tier1Indices))
+		for k, idx := range tier1Indices {
+			tier1Lines[k] = items[idx].SourceText
+		}
+		subBatches := SplitLinesIntoControlledBatches(tier1Lines, 3, 240)
+		for _, sb := range subBatches {
+			mapped := make([]int, len(sb))
+			for k, relIdx := range sb {
+				mapped[k] = tier1Indices[relIdx]
+			}
+			result = append(result, mapped)
+		}
+	}
+
+	// 2. Chia batch cho Tier 2: gom tối đa 8 câu hoặc 600 ký tự mỗi request
+	if len(tier2Indices) > 0 {
+		tier2Lines := make([]string, len(tier2Indices))
+		for k, idx := range tier2Indices {
+			tier2Lines[k] = items[idx].SourceText
+		}
+		subBatches := SplitLinesIntoControlledBatches(tier2Lines, 8, 600)
+		for _, sb := range subBatches {
+			mapped := make([]int, len(sb))
+			for k, relIdx := range sb {
+				mapped[k] = tier2Indices[relIdx]
+			}
+			result = append(result, mapped)
+		}
+	}
+
+	return result
+}
+
+func (p *Pipeline) recordBatchMetrics(latencyMs int64, onTime int64, total int64) {
+	p.metricsMu.Lock()
+	defer p.metricsMu.Unlock()
+
+	if len(p.batchLatenciesMs) >= 500 {
+		p.batchLatenciesMs = p.batchLatenciesMs[1:]
+	}
+	p.batchLatenciesMs = append(p.batchLatenciesMs, latencyMs)
+	p.onTimeCount += onTime
+	p.totalTransCount += total
+}
+
+func (p *Pipeline) getMetricsSummary() (p50 int64, p95 int64, onTimePct float64) {
+	p.metricsMu.Lock()
+	defer p.metricsMu.Unlock()
+
+	p50, p95 = ComputeLatencyPercentiles(p.batchLatenciesMs)
+	if p.totalTransCount > 0 {
+		onTimePct = (float64(p.onTimeCount) / float64(p.totalTransCount)) * 100.0
+	} else {
+		onTimePct = 100.0
+	}
+	return p50, p95, onTimePct
+}
+
+// ComputeLatencyPercentiles tính độ trễ trung vị p50 và p95 (ms) từ danh sách mẫu đo thực tế
+func ComputeLatencyPercentiles(samples []int64) (p50 int64, p95 int64) {
+	n := len(samples)
+	if n == 0 {
+		return 0, 0
+	}
+	sorted := make([]int64, n)
+	copy(sorted, samples)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i] < sorted[j]
+	})
+
+	idx50 := (n - 1) * 50 / 100
+	idx95 := (n - 1) * 95 / 100
+	return sorted[idx50], sorted[idx95]
 }

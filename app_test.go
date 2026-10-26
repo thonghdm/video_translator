@@ -158,3 +158,35 @@ func Test_BuildSubtitleContent_SRT_And_VTT(t *testing.T) {
 		t.Errorf("VTT bilingual sai:\n%q\nkỳ vọng:\n%q", vttBi, expectedVttBi)
 	}
 }
+
+// Test_TwoTierLookaheadBatches_And_Metrics kiểm tra chia batch 2 tầng ưu tiên Playhead và tính p50/p95 latency
+func Test_TwoTierLookaheadBatches_And_Metrics(t *testing.T) {
+	items := []SubtitleItem{
+		{ID: 0, StartSec: 1.0, EndSec: 4.0, SourceText: "Past line 1"},
+		{ID: 1, StartSec: 5.0, EndSec: 9.0, SourceText: "Past line 2"},
+		{ID: 2, StartSec: 16.0, EndSec: 19.0, SourceText: "Playhead priority line 1"},
+		{ID: 3, StartSec: 20.0, EndSec: 24.0, SourceText: "Playhead priority line 2"},
+		{ID: 4, StartSec: 25.0, EndSec: 29.0, SourceText: "Playhead priority line 3"},
+	}
+
+	// Giả sử người dùng vừa tua tới giây thứ 16.0 trong block [0..30s]
+	batches := BuildTwoTierBatches(items, 16.0, true)
+	if len(batches) != 2 {
+		t.Fatalf("Kỳ vọng 2 batch (Tier 1 trước, Tier 2 sau), nhận được %d", len(batches))
+	}
+	// Batch đầu tiên phải là các câu tại Playhead (chỉ số 2, 3, 4)
+	if len(batches[0]) != 3 || batches[0][0] != 2 || batches[0][1] != 3 || batches[0][2] != 4 {
+		t.Errorf("Tier 1 phải ưu tiên dịch câu tại playhead [2, 3, 4] trước, nhận được: %v", batches[0])
+	}
+	// Batch thứ hai mới quay lại bù các câu đầu block [0, 1]
+	if len(batches[1]) != 2 || batches[1][0] != 0 || batches[1][1] != 1 {
+		t.Errorf("Tier 2 phải chứa các câu còn lại [0, 1], nhận được: %v", batches[1])
+	}
+
+	// Kiểm tra tính toán p50 / p95
+	samples := []int64{80, 110, 95, 120, 100, 130, 90, 105, 115, 250}
+	p50, p95 := ComputeLatencyPercentiles(samples)
+	if p50 != 105 || p95 != 130 {
+		t.Errorf("Percentile p50=%d p95=%d không khớp kỳ vọng (105, 130)", p50, p95)
+	}
+}
