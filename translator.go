@@ -61,7 +61,13 @@ func NewLlamaServerTranslator(modelPath, serverExe string, threads int) (*LlamaS
 	portStr := strconv.Itoa(port)
 	args := []string{
 		"-m", modelPath,
-		"-c", "2048",
+		"-c", "512",
+		"-b", "256",
+		"-ub", "256",
+		"-ctk", "q8_0",
+		"-ctv", "q8_0",
+		"-fa",
+		"-np", "1",
 		"-t", strconv.Itoa(threads),
 		"--port", portStr,
 		"--host", "127.0.0.1",
@@ -142,10 +148,11 @@ func (s *LlamaServerTranslator) callCompletion(ctx context.Context, line string)
 
 	prompt := BuildPrompt(line)
 	reqData := map[string]interface{}{
-		"prompt":      prompt,
-		"temperature": 0.1,
-		"n_predict":   64,
-		"stop":        []string{"<|im_end|>", "\n\n", "English:"},
+		"prompt":       prompt,
+		"temperature":  0.1,
+		"n_predict":    56,
+		"cache_prompt": true,
+		"stop":         []string{"<|im_end|>", "\n", "English:"},
 	}
 
 	jsonBytes, err := json.Marshal(reqData)
@@ -181,19 +188,92 @@ func (s *LlamaServerTranslator) callCompletion(ctx context.Context, line string)
 	return cleaned, nil
 }
 
-// TranslateBatch dịch toàn bộ câu bằng cách gọi tuần tự nhanh
+// TranslateBatch dịch cụm câu trong 1 lần gọi tới llama-server (với KV prefix cache và fallback từng câu nếu sót)
 func (s *LlamaServerTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
-	results := make([]string, len(lines))
-	for i, l := range lines {
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	if len(lines) == 1 {
+		single, err := s.Translate(ctx, lines[0], nil)
+		return []string{single}, err
+	}
+
+	raw, err := s.callBatchCompletion(ctx, lines)
+	var parsed []string
+	if err == nil && raw != "" {
+		parsed = ParseBatchOutput(raw, len(lines), lines)
+	} else {
+		parsed = make([]string, len(lines))
+	}
+
+	// Fallback: Nếu câu nào trong cụm chưa dịch được, dịch đơn lẻ bổ sung
+	for i := range parsed {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		trans, err := s.Translate(ctx, l, nil)
-		if err == nil {
-			results[i] = trans
+		if parsed[i] == "" && !isIgnoredSubtitle(lines[i]) {
+			single, _ := s.Translate(ctx, lines[i], nil)
+			parsed[i] = single
 		}
 	}
-	return results, nil
+	return parsed, nil
+}
+
+func (s *LlamaServerTranslator) callBatchCompletion(ctx context.Context, lines []string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isClosed {
+		return "", fmt.Errorf("llama-server đã dừng")
+	}
+
+	maxTokens := len(lines) * 40
+	if maxTokens < 128 {
+		maxTokens = 128
+	}
+	if maxTokens > 320 {
+		maxTokens = 320
+	}
+
+	prompt := BuildBatchPrompt(lines)
+	reqData := map[string]interface{}{
+		"prompt":       prompt,
+		"temperature":  0.1,
+		"n_predict":    maxTokens,
+		"cache_prompt": true,
+		"stop":         []string{"<|im_end|>", "\n\n", "<|im_start|>"},
+	}
+
+	jsonBytes, err := json.Marshal(reqData)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/completion", bytes.NewReader(jsonBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("llama-server HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+
+	return result.Content, nil
 }
 
 // Close dập tắt toàn bộ cây tiến trình của llama-server
@@ -423,11 +503,16 @@ func (t *LlamaCliTranslator) executeInference(ctx context.Context, trimmed strin
 
 	args := []string{
 		"-m", t.modelPath,
-		"-c", "2048",
+		"-c", "512",
+		"-b", "256",
+		"-ub", "256",
+		"-ctk", "q8_0",
+		"-ctv", "q8_0",
+		"-fa",
 		"-t", "4",
 		"-f", promptFile,
 		"--temp", "0.2",
-		"-n", "64",
+		"-n", "56",
 		"--no-display-prompt",
 		"--simple-io",
 	}
@@ -465,7 +550,12 @@ func (t *LlamaCliTranslator) TranslateBatch(ctx context.Context, lines []string)
 
 	args := []string{
 		"-m", t.modelPath,
-		"-c", "2048",
+		"-c", "512",
+		"-b", "256",
+		"-ub", "256",
+		"-ctk", "q8_0",
+		"-ctv", "q8_0",
+		"-fa",
 		"-t", "4",
 		"-f", promptFile,
 		"--temp", "0.2",

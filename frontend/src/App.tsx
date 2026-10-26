@@ -170,6 +170,7 @@ export const App: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const seekDebounceTimerRef = useRef<any>(null);
   const lastPlayheadUpdateRef = useRef<number>(0);
+  const lastUiTimeRef = useRef<number>(0);
 
   // Hiển thị toast thông báo ngắn
   const showToast = (msg: string) => {
@@ -265,11 +266,20 @@ export const App: React.FC = () => {
 
     const syncFrame = (_now: DOMHighResTimeStamp, metadata?: any) => {
       const mediaTime = metadata?.mediaTime ?? video.currentTime;
-      setCurrentTime(mediaTime);
+      if (Math.abs(mediaTime - lastUiTimeRef.current) >= 0.25) {
+        lastUiTimeRef.current = mediaTime;
+        setCurrentTime(mediaTime);
+      }
 
       // Tra cứu phụ đề bằng Binary Search với offset
       const sub = findSubtitleAtTime(subtitles, mediaTime + subtitleOffset);
-      setCurrentSubtitle((prev) => (prev?.id === sub?.id ? prev : sub));
+      setCurrentSubtitle((prev) =>
+        prev?.id === sub?.id &&
+        prev?.target_text === sub?.target_text &&
+        prev?.source_text === sub?.source_text
+          ? prev
+          : sub
+      );
 
       // Báo cáo playhead lên backend mỗi ~2 giây
       const nowTs = Date.now();

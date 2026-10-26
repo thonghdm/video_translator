@@ -62,9 +62,9 @@ func GetMediaServer() (*MediaServer, error) {
 		mux.HandleFunc("/media/", ms.handleMediaStream)
 
 		ms.server = &http.Server{
-			Handler:      mux,
-			ReadTimeout:  30 * time.Minute,
-			WriteTimeout: 30 * time.Minute,
+			Handler:           mux,
+			ReadHeaderTimeout: 15 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		}
 
 		go func() {

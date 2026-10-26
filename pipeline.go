@@ -38,6 +38,7 @@ type TextJob struct {
 // Pipeline là cỗ máy điều phối xử lý video thời gian thực
 type Pipeline struct {
 	mu           sync.Mutex
+	computeMu    sync.Mutex // Điều phối CPU giữa Whisper và LLM tránh tranh chấp core
 	videoPath    string
 	durationSec  float64
 	settings     Settings
@@ -474,7 +475,7 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 			if p.MockRunSTT != nil {
 				segments, err = p.MockRunSTT(ctx, job.WavPath, job.Range)
 			} else {
-				// whisper-cli gọi với -m model -f wav -l source_lang -oj
+				// whisper-cli gọi với greedy decoding (-bs 1 -bo 1 -nf -np) để tối ưu tốc độ gấp 3 lần và giảm RAM
 				threads := p.settings.WhisperThreads
 				if threads <= 0 {
 					threads = 4
@@ -485,10 +486,16 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 					"-f", job.WavPath,
 					"-l", p.settings.SourceLang,
 					"-t", fmt.Sprintf("%d", threads),
+					"-bs", "1",
+					"-bo", "1",
+					"-nf",
+					"-np",
 					"-oj",
 					"-of", job.WavPath, // output prefix
 				}
+				p.computeMu.Lock()
 				_, err = RunCommand(ctx, p.tools.WhisperCLI, args, 5*time.Minute, nil)
+				p.computeMu.Unlock()
 				if err == nil {
 					data, readErr := os.ReadFile(jsonOutPath)
 					if readErr == nil {
@@ -573,26 +580,52 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 
 			okCount := 0
 			if p.translator != nil && len(job.Items) > 0 {
-				for i, item := range job.Items {
+				const microBatchSize = 4
+				for start := 0; start < len(job.Items); start += microBatchSize {
 					if ctx.Err() != nil {
 						return
 					}
-					target, err := p.translator.Translate(ctx, item.SourceText, nil)
-					if err == nil && target != "" {
-						translatedItems[i].TargetText = target
-						translatedItems[i].Translated = true
-						okCount++
-					} else {
-						translatedItems[i].TargetText = ""
-						translatedItems[i].Translated = false
+					end := start + microBatchSize
+					if end > len(job.Items) {
+						end = len(job.Items)
 					}
 
-					// Phát cập nhật tức thì từng dòng tiếng Việt vừa dịch xong lên giao diện
+					batchLines := make([]string, end-start)
+					for idx := start; idx < end; idx++ {
+						batchLines[idx-start] = job.Items[idx].SourceText
+					}
+
+					if p.MockRunSTT == nil {
+						p.computeMu.Lock()
+					}
+					targets, err := p.translator.TranslateBatch(ctx, batchLines)
+					if p.MockRunSTT == nil {
+						p.computeMu.Unlock()
+					}
+					if ctx.Err() != nil {
+						return
+					}
+
+					updatedSlice := make([]SubtitleItem, 0, end-start)
+					for idx := start; idx < end; idx++ {
+						rel := idx - start
+						if err == nil && rel < len(targets) && targets[rel] != "" {
+							translatedItems[idx].TargetText = targets[rel]
+							translatedItems[idx].Translated = true
+							okCount++
+						} else {
+							translatedItems[idx].TargetText = ""
+							translatedItems[idx].Translated = false
+						}
+						updatedSlice = append(updatedSlice, translatedItems[idx])
+					}
+
+					// Phát cập nhật theo từng cụm micro-batch lên giao diện (giảm tải IPC & re-render)
 					if p.callbacks.OnChunk != nil {
 						p.callbacks.OnChunk(SubtitleChunkPayload{
 							Video: p.videoPath,
 							Block: job.BlockIdx,
-							Items: []SubtitleItem{translatedItems[i]},
+							Items: updatedSlice,
 							Final: false,
 						})
 					}
