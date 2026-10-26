@@ -31,19 +31,24 @@ test('Step 3: Scheduler Lookahead & Backfill Algorithm Logic', () => {
     const playheadBlock = Math.floor(playheadSec / blockSec);
     const ahead = computeAheadSec(playheadSec, doneSet);
 
-    // Vượt ngưỡng lookahead
-    if (ahead >= lookaheadMaxSec) {
-      return { block: -1, state: 'ahead' };
-    }
-
-    // Tìm block chưa xong phía trước
+    // 1. Tìm block chưa xong phía trước playhead
+    let nextBlock = -1;
     for (let b = playheadBlock; b < totalBlocks; b++) {
       if (!doneSet.has(b) && !activeJobs.has(b)) {
-        return { block: b, state: ahead < lookaheadMinSec ? 'catching_up' : 'processing' };
+        nextBlock = b;
+        break;
       }
     }
 
-    // Kiểm tra Backfill các block phía sau còn thiếu
+    // 2. Nếu phía trước còn block, áp dụng giới hạn lookahead_max
+    if (nextBlock !== -1) {
+      if (ahead >= lookaheadMaxSec) {
+        return { block: -1, state: 'ahead' };
+      }
+      return { block: nextBlock, state: ahead < lookaheadMinSec ? 'catching_up' : 'processing' };
+    }
+
+    // 3. Nếu phía trước đã xong hết tới cuối video, kích hoạt Backfill các block thiếu từ đầu video
     for (let b = 0; b < playheadBlock; b++) {
       if (!doneSet.has(b) && !activeJobs.has(b)) {
         return { block: b, state: 'backfill' };

@@ -315,21 +315,7 @@ func (p *Pipeline) schedulerLoop(ctx context.Context, slicerChan chan<- int) {
 		playheadBlock := int(p.playheadSec / p.settings.BlockSec)
 		aheadSec := p.computeAheadSecLocked()
 
-		// 1. Kiểm tra giới hạn đón đầu Lookahead Max
-		if aheadSec >= p.settings.LookaheadMaxSec {
-			p.state = "ahead"
-			p.mu.Unlock()
-			p.emitStatus(-1)
-			continue
-		}
-
-		if p.playing && aheadSec < p.settings.LookaheadMinSec {
-			p.state = "catching_up"
-		} else {
-			p.state = "processing"
-		}
-
-		// 2. Tìm block tiếp theo từ playheadBlock trở đi
+		// 1. Tìm block tiếp theo từ playheadBlock trở đi
 		nextBlock := -1
 		for b := playheadBlock; b < totalBlocks; b++ {
 			if !p.blockStore.IsBlockDone(b) && !p.activeJobs[b] && p.failedBlocks[b] < 2 {
@@ -338,7 +324,23 @@ func (p *Pipeline) schedulerLoop(ctx context.Context, slicerChan chan<- int) {
 			}
 		}
 
-		// 3. Nếu phía trước đã xong hết, kiểm tra Backfill phía trước playhead cũ
+		// 2. Nếu phía trước playhead còn block cần làm, áp dụng chặn đón đầu Lookahead Max
+		if nextBlock != -1 {
+			if aheadSec >= p.settings.LookaheadMaxSec {
+				p.state = "ahead"
+				p.mu.Unlock()
+				p.emitStatus(-1)
+				continue
+			}
+
+			if p.playing && aheadSec < p.settings.LookaheadMinSec {
+				p.state = "catching_up"
+			} else {
+				p.state = "processing"
+			}
+		}
+
+		// 3. Nếu phía trước đã xong hết tới cuối video, kích hoạt Backfill các block thiếu từ đầu video
 		isBackfill := false
 		if nextBlock == -1 {
 			for b := 0; b < playheadBlock; b++ {
