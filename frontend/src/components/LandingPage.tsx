@@ -145,13 +145,13 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
         {/* Right CTA */}
         <div className="flex items-center space-x-3">
-          {hasLoadedVideo && onSwitchToPlayer && (
+          {!isWebEnvironment && onSwitchToPlayer && (
             <button
               onClick={onSwitchToPlayer}
               className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-neutral-800 hover:bg-neutral-700 text-amber-400 border border-amber-500/40 transition-colors flex items-center space-x-1.5"
             >
               <Play className="w-3.5 h-3.5 fill-amber-400" />
-              <span>Quay lại Trình phát</span>
+              <span>{hasLoadedVideo ? 'Quay lại Trình phát' : 'Vào Trình phát'}</span>
             </button>
           )}
 

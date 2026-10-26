@@ -1064,39 +1064,19 @@ export const App: React.FC = () => {
       onDragOver={(e) => e.preventDefault()}
       onDrop={handleDropItems}
     >
-      {/* 1. Header Bar */}
-      <header className="h-12 border-b border-player-border px-4 flex items-center justify-between bg-player-surface z-10">
+      {/* 1. Header Bar (Chỉ hiển thị khi đang ở chế độ Trình phát Video) */}
+      {viewMode === 'player' && (
+        <header className="h-12 border-b border-player-border px-4 flex items-center justify-between bg-player-surface z-10">
         <div className="flex items-center space-x-2 truncate">
-          {/* Tab Chuyển đổi Giới thiệu vs Trình phát */}
-          <div className="flex items-center bg-neutral-900/90 p-0.5 rounded-lg border border-neutral-700/80 shrink-0 mr-1">
-            <button
-              onClick={() => setViewMode('landing')}
-              className={`flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-semibold transition-all ${
-                viewMode === 'landing'
-                  ? 'bg-amber-500 text-black shadow'
-                  : 'text-neutral-400 hover:text-white'
-              }`}
-              title="Xem Trang Giới Thiệu & Demo"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>Giới thiệu</span>
-            </button>
-            <button
-              onClick={() => setViewMode('player')}
-              className={`flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-semibold transition-all ${
-                viewMode === 'player'
-                  ? 'bg-amber-500 text-black shadow'
-                  : 'text-neutral-400 hover:text-white'
-              }`}
-              title="Chuyển sang Trình Phát Video"
-            >
-              <Film className="w-3.5 h-3.5" />
-              <span>Trình phát</span>
-              {videoInfo?.path && (
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse ml-0.5" />
-              )}
-            </button>
-          </div>
+          {/* Nút quay lại Trang Giới thiệu */}
+          <button
+            onClick={() => setViewMode('landing')}
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-amber-400 font-medium text-xs rounded border border-neutral-700 transition-colors mr-1 shrink-0"
+            title="Quay lại Trang Giới Thiệu & Demo"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+            <span>Trang giới thiệu</span>
+          </button>
 
           {/* Nút ẩn/hiện cây thư mục khóa học */}
           <button
@@ -1297,6 +1277,7 @@ export const App: React.FC = () => {
           </div>
         </div>
       </header>
+      )}
 
       {/* Toast thông báo phím tắt */}
       {toastMessage && (
