@@ -1,16 +1,64 @@
-# Binaries and tools
+# ========================================================
+# SubTrans - .gitignore
+# ========================================================
+
+# 1. AI Models & Large Weights (Do NOT push to git)
+*.gguf
+*.bin
+build/bin/models/
+
+# 2. Precompiled CLI Tools & Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+build/bin/tools/
 build/bin/
 build/windows/
 dist/
-*.exe
-*.dll
+bin/
 
-# Frontend
+# 3. Node.js & Frontend Build Outputs
 frontend/node_modules/
 frontend/dist/
 frontend/package.json.md5
+.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Logs and temp
+# 4. Temporary Audio/Video & Transcode Files
+temp/
+tmp/
+*.wav
+*.mp4
+*.mkv
+*.avi
+*.webm
+
+# 5. Generated Subtitles & Test Outputs
+*.srt
+*.vtt
+
+# 6. Logs & Debug Transcripts
 *.log
 main.log
-temp/
+llama.log
+
+# 7. Go Test Binaries & Coverage
+*.test
+*.out
+profile.pprof
+
+# 8. IDE & Editor Configurations
+.vscode/
+.idea/
+*.suo
+*.user
+*.sublime-*
+
+# 9. Operating System Files
+Thumbs.db
+desktop.ini
+.DS_Store
