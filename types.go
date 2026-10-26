@@ -62,3 +62,12 @@ type SubtitleChunkPayload struct {
 	Items []SubtitleItem `json:"items"`
 	Final bool           `json:"final"`
 }
+
+// FolderNode biểu diễn một nút trong cây thư mục khóa học/video (thư mục hoặc file video)
+type FolderNode struct {
+	Name     string       `json:"name"`
+	Path     string       `json:"path"`
+	IsDir    bool         `json:"is_dir"`
+	HasCache bool         `json:"has_cache,omitempty"`
+	Children []FolderNode `json:"children,omitempty"`
+}

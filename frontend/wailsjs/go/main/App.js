@@ -22,12 +22,20 @@ export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
 }
 
+export function ScanVideoFolder(arg1) {
+  return window['go']['main']['App']['ScanVideoFolder'](arg1);
+}
+
 export function SeekTo(arg1, arg2) {
   return window['go']['main']['App']['SeekTo'](arg1, arg2);
 }
 
 export function SelectVideoFile() {
   return window['go']['main']['App']['SelectVideoFile']();
+}
+
+export function SelectVideoFolder() {
+  return window['go']['main']['App']['SelectVideoFolder']();
 }
 
 export function StartPipeline(arg1, arg2) {

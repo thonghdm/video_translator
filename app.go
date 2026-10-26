@@ -7,8 +7,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
+	"unicode"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -67,6 +71,8 @@ func (a *App) startup(ctx context.Context) {
 	if err == nil {
 		a.mediaServer = ms
 	}
+	// Dọn dẹp ngầm các thư mục cache phụ đề cũ quá 30 ngày không sử dụng
+	go CleanupOldCaches(30 * 24 * time.Hour)
 }
 
 // shutdown được gọi khi Wails đóng ứng dụng
@@ -101,6 +107,144 @@ func (a *App) SelectVideoFile() (string, error) {
 		return "", fmt.Errorf("không thể mở hộp thoại chọn file: %w", err)
 	}
 	return selected, nil
+}
+
+// SelectVideoFolder mở hộp thoại chọn thư mục khóa học/video và quét cây thư mục
+func (a *App) SelectVideoFolder() (*FolderNode, error) {
+	selected, err := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Chọn thư mục chứa video / khóa học",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("không thể mở hộp thoại chọn thư mục: %w", err)
+	}
+	if selected == "" {
+		return nil, nil
+	}
+	return a.ScanVideoFolder(selected)
+}
+
+// ScanVideoFolder quét đệ quy thư mục (hoặc file đơn lẻ) để dựng cây bài học video
+func (a *App) ScanVideoFolder(targetPath string) (*FolderNode, error) {
+	cleaned := filepath.Clean(targetPath)
+	fi, err := os.Stat(cleaned)
+	if err != nil {
+		return nil, fmt.Errorf("không thể truy cập đường dẫn: %w", err)
+	}
+
+	if !fi.IsDir() {
+		if !isSupportedVideoExt(cleaned) {
+			return nil, fmt.Errorf("tập tin không phải định dạng video hỗ trợ")
+		}
+		return &FolderNode{
+			Name:     filepath.Base(cleaned),
+			Path:     cleaned,
+			IsDir:    false,
+			HasCache: HasCachedSubtitles(cleaned),
+		}, nil
+	}
+
+	node, ok := scanDirRecursive(cleaned, 0)
+	if !ok {
+		return nil, fmt.Errorf("không tìm thấy tập tin video nào trong thư mục: %s", filepath.Base(cleaned))
+	}
+	return &node, nil
+}
+
+func isSupportedVideoExt(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".mp4", ".mkv", ".webm", ".avi", ".mov":
+		return true
+	default:
+		return false
+	}
+}
+
+func scanDirRecursive(dirPath string, depth int) (FolderNode, bool) {
+	node := FolderNode{
+		Name:  filepath.Base(dirPath),
+		Path:  dirPath,
+		IsDir: true,
+	}
+	if depth > 8 {
+		return node, false
+	}
+
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return node, false
+	}
+
+	var dirs []FolderNode
+	var files []FolderNode
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		fullPath := filepath.Join(dirPath, name)
+		if entry.IsDir() {
+			lower := strings.ToLower(name)
+			if lower == "node_modules" || lower == "$recycle.bin" || lower == "system volume information" {
+				continue
+			}
+			if childDir, hasVideo := scanDirRecursive(fullPath, depth+1); hasVideo {
+				dirs = append(dirs, childDir)
+			}
+		} else if isSupportedVideoExt(name) {
+			files = append(files, FolderNode{
+				Name:     name,
+				Path:     fullPath,
+				IsDir:    false,
+				HasCache: HasCachedSubtitles(fullPath),
+			})
+		}
+	}
+
+	sort.Slice(dirs, func(i, j int) bool {
+		return naturalLess(dirs[i].Name, dirs[j].Name)
+	})
+	sort.Slice(files, func(i, j int) bool {
+		return naturalLess(files[i].Name, files[j].Name)
+	})
+
+	node.Children = append(dirs, files...)
+	return node, len(node.Children) > 0
+}
+
+// naturalLess so sánh chuỗi theo thứ tự tự nhiên (ví dụ: "Bài 2" đứng trước "Bài 10")
+func naturalLess(a, b string) bool {
+	ra := []rune(strings.ToLower(a))
+	rb := []rune(strings.ToLower(b))
+	ia, ib := 0, 0
+
+	for ia < len(ra) && ib < len(rb) {
+		if unicode.IsDigit(ra[ia]) && unicode.IsDigit(rb[ib]) {
+			ja := ia
+			for ja < len(ra) && unicode.IsDigit(ra[ja]) {
+				ja++
+			}
+			jb := ib
+			for jb < len(rb) && unicode.IsDigit(rb[jb]) {
+				jb++
+			}
+			na, _ := strconv.ParseUint(string(ra[ia:ja]), 10, 64)
+			nb, _ := strconv.ParseUint(string(rb[ib:jb]), 10, 64)
+			if na != nb {
+				return na < nb
+			}
+			ia = ja
+			ib = jb
+			continue
+		}
+		if ra[ia] != rb[ib] {
+			return ra[ia] < rb[ib]
+		}
+		ia++
+		ib++
+	}
+	return len(ra) < len(rb)
 }
 
 // OpenVideo nạp video, lấy probe thông tin và chuẩn bị URL streaming

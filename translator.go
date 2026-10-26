@@ -25,12 +25,49 @@ type Translator interface {
 
 // LlamaServerTranslator triển khai dịch thuật qua llama-server thường trú
 type LlamaServerTranslator struct {
-	cmd      *exec.Cmd
-	baseURL  string
-	port     int
-	client   *http.Client
-	mu       sync.Mutex
-	isClosed bool
+	cmd         *exec.Cmd
+	baseURL     string
+	port        int
+	client      *http.Client
+	mu          sync.Mutex
+	cacheMu     sync.RWMutex
+	phraseCache map[string]string
+	isClosed    bool
+}
+
+func normalizePhraseKey(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+func (s *LlamaServerTranslator) getCachedPhrase(line string) (string, bool) {
+	if s.phraseCache == nil {
+		return "", false
+	}
+	key := normalizePhraseKey(line)
+	if key == "" {
+		return "", false
+	}
+	s.cacheMu.RLock()
+	val, ok := s.phraseCache[key]
+	s.cacheMu.RUnlock()
+	return val, ok
+}
+
+func (s *LlamaServerTranslator) setCachedPhrase(line, translated string) {
+	if s.phraseCache == nil || translated == "" {
+		return
+	}
+	key := normalizePhraseKey(line)
+	if key == "" {
+		return
+	}
+	s.cacheMu.Lock()
+	if len(s.phraseCache) >= 5000 {
+		// Làm mới khi đạt ngưỡng 5000 câu để giới hạn RAM < 500KB
+		s.phraseCache = make(map[string]string, 512)
+	}
+	s.phraseCache[key] = translated
+	s.cacheMu.Unlock()
 }
 
 // getFreePort tìm cổng mạng nội bộ ngẫu nhiên đang trống
@@ -72,6 +109,10 @@ func NewLlamaServerTranslator(modelPath, serverExe string, threads int) (*LlamaS
 		"--port", portStr,
 		"--host", "127.0.0.1",
 	}
+	lowerExe := strings.ToLower(serverExe)
+	if strings.Contains(lowerExe, "vulkan") || strings.Contains(lowerExe, "cuda") {
+		args = append(args, "-ngl", "99")
+	}
 
 	cmd := exec.Command(serverExe, args...)
 	prepareCmdPlatform(cmd) // Ẩn cửa sổ trên Windows
@@ -82,10 +123,11 @@ func NewLlamaServerTranslator(modelPath, serverExe string, threads int) (*LlamaS
 
 	baseURL := fmt.Sprintf("http://127.0.0.1:%s", portStr)
 	srv := &LlamaServerTranslator{
-		cmd:     cmd,
-		baseURL: baseURL,
-		port:    port,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		cmd:         cmd,
+		baseURL:     baseURL,
+		port:        port,
+		client:      &http.Client{Timeout: 30 * time.Second},
+		phraseCache: make(map[string]string, 256),
 	}
 
 	// Đợi server sẵn sàng (poll /health trong tối đa 20 giây)
@@ -121,20 +163,28 @@ func NewLlamaServerTranslator(modelPath, serverExe string, threads int) (*LlamaS
 	return srv, nil
 }
 
-// Translate dịch một dòng thoại qua HTTP endpoint /completion
+// Translate dịch một dòng thoại qua HTTP endpoint /completion (ưu tiên tra cứu Phrase Cache trong RAM)
 func (s *LlamaServerTranslator) Translate(ctx context.Context, line string, _ []string) (string, error) {
 	trimmed := strings.TrimSpace(line)
 	if isIgnoredSubtitle(trimmed) {
 		return "", nil
 	}
 
+	if cached, ok := s.getCachedPhrase(trimmed); ok {
+		return cached, nil
+	}
+
 	res, err := s.callCompletion(ctx, trimmed)
 	if err == nil && res != "" {
+		s.setCachedPhrase(trimmed, res)
 		return res, nil
 	}
 
 	// Retry đúng 1 lần nếu câu trả về rỗng hoặc lỗi
 	resRetry, _ := s.callCompletion(ctx, trimmed)
+	if resRetry != "" {
+		s.setCachedPhrase(trimmed, resRetry)
+	}
 	return resRetry, nil
 }
 
@@ -188,7 +238,7 @@ func (s *LlamaServerTranslator) callCompletion(ctx context.Context, line string)
 	return cleaned, nil
 }
 
-// TranslateBatch dịch cụm câu trong 1 lần gọi tới llama-server (với KV prefix cache và fallback từng câu nếu sót)
+// TranslateBatch dịch cụm câu trong 1 lần gọi tới llama-server (kết hợp Phrase Cache, KV prefix cache và fallback từng câu nếu sót)
 func (s *LlamaServerTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
 	if len(lines) == 0 {
 		return nil, nil
@@ -198,25 +248,54 @@ func (s *LlamaServerTranslator) TranslateBatch(ctx context.Context, lines []stri
 		return []string{single}, err
 	}
 
-	raw, err := s.callBatchCompletion(ctx, lines)
-	var parsed []string
-	if err == nil && raw != "" {
-		parsed = ParseBatchOutput(raw, len(lines), lines)
-	} else {
-		parsed = make([]string, len(lines))
+	result := make([]string, len(lines))
+	var uncachedLines []string
+	var uncachedIdx []int
+
+	for i, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if isIgnoredSubtitle(trimmed) {
+			continue
+		}
+		if cached, ok := s.getCachedPhrase(trimmed); ok {
+			result[i] = cached
+		} else {
+			uncachedLines = append(uncachedLines, trimmed)
+			uncachedIdx = append(uncachedIdx, i)
+		}
 	}
 
-	// Fallback: Nếu câu nào trong cụm chưa dịch được, dịch đơn lẻ bổ sung
-	for i := range parsed {
+	if len(uncachedLines) == 0 {
+		return result, nil
+	}
+	if len(uncachedLines) == 1 {
+		single, err := s.Translate(ctx, uncachedLines[0], nil)
+		result[uncachedIdx[0]] = single
+		return result, err
+	}
+
+	raw, err := s.callBatchCompletion(ctx, uncachedLines)
+	var parsed []string
+	if err == nil && raw != "" {
+		parsed = ParseBatchOutput(raw, len(uncachedLines), uncachedLines)
+	} else {
+		parsed = make([]string, len(uncachedLines))
+	}
+
+	// Điền kết quả và fallback nếu câu nào trong cụm bị sót
+	for j, origIdx := range uncachedIdx {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if parsed[i] == "" && !isIgnoredSubtitle(lines[i]) {
-			single, _ := s.Translate(ctx, lines[i], nil)
-			parsed[i] = single
+		if parsed[j] != "" {
+			s.setCachedPhrase(uncachedLines[j], parsed[j])
+			result[origIdx] = parsed[j]
+		} else {
+			single, _ := s.Translate(ctx, uncachedLines[j], nil)
+			result[origIdx] = single
 		}
 	}
-	return parsed, nil
+	return result, nil
 }
 
 func (s *LlamaServerTranslator) callBatchCompletion(ctx context.Context, lines []string) (string, error) {

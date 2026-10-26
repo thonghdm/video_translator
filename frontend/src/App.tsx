@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
 import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
-  FolderOpen, List, Subtitles, AlertCircle, FileText,
-  RefreshCw
+  FolderOpen, FolderPlus, Folder, ChevronRight, ChevronDown,
+  List, Subtitles, AlertCircle, FileText, RefreshCw,
+  SkipBack, SkipForward, CheckCircle2, Trash2, Search, Film,
+  PanelLeftClose, PanelLeftOpen
 } from 'lucide-react';
 import { SubtitleItem, upsertSubtitles, findSubtitleAtTime } from './lib/subtitles';
 
@@ -28,7 +30,18 @@ interface PipelineStatus {
   video: string;
 }
 
+export interface FolderNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  has_cache?: boolean;
+  children?: FolderNode[];
+}
+
 type SubtitleMode = 'off' | 'en' | 'vi' | 'bilingual';
+
+const STORAGE_FOLDERS_KEY = 'subtrans_imported_folders_v1';
+const STORAGE_COMPLETED_KEY = 'subtrans_completed_videos_v1';
 
 // Wails runtime mock/real bindings
 declare global {
@@ -40,6 +53,8 @@ declare global {
       main?: {
         App?: {
           SelectVideoFile: () => Promise<string>;
+          SelectVideoFolder: () => Promise<FolderNode | null>;
+          ScanVideoFolder: (path: string) => Promise<FolderNode | null>;
           OpenVideo: (path: string) => Promise<VideoInfo>;
           StartPipeline: (path: string, startSec: number) => Promise<void>;
           SeekTo: (path: string, startSec: number) => Promise<void>;
@@ -65,6 +80,322 @@ function formatTime(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+// Trải phẳng cây thư mục thành danh sách các file video theo thứ tự học
+function flattenVideoNodes(nodes: FolderNode[]): FolderNode[] {
+  const result: FolderNode[] = [];
+  const walk = (list: FolderNode[]) => {
+    for (const n of list) {
+      if (n.is_dir) {
+        if (n.children && n.children.length > 0) {
+          walk(n.children);
+        }
+      } else {
+        result.push(n);
+      }
+    }
+  };
+  walk(nodes);
+  return result;
+}
+
+// Lọc cây thư mục theo từ khóa tìm kiếm
+function filterFolderTree(nodes: FolderNode[], keyword: string): FolderNode[] {
+  const q = keyword.trim().toLowerCase();
+  if (!q) return nodes;
+
+  const filterNode = (node: FolderNode): FolderNode | null => {
+    if (!node.is_dir) {
+      return node.name.toLowerCase().includes(q) ? node : null;
+    }
+    const matchedChildren = (node.children || [])
+      .map(filterNode)
+      .filter((c): c is FolderNode => c !== null);
+
+    if (matchedChildren.length > 0 || node.name.toLowerCase().includes(q)) {
+      return {
+        ...node,
+        children: matchedChildren.length > 0 ? matchedChildren : node.children,
+      };
+    }
+    return null;
+  };
+
+  return nodes.map(filterNode).filter((n): n is FolderNode => n !== null);
+}
+
+// Component hiển thị đệ quy từng nhánh cây thư mục
+const FolderTreeItem = memo(({
+  node,
+  depth,
+  activeVideoPath,
+  completedVideos,
+  forceExpand,
+  onSelectVideo,
+  onRemoveRoot,
+}: {
+  node: FolderNode;
+  depth: number;
+  activeVideoPath: string | null;
+  completedVideos: Record<string, boolean>;
+  forceExpand: boolean;
+  onSelectVideo: (path: string) => void;
+  onRemoveRoot?: (path: string) => void;
+}) => {
+  const [expanded, setExpanded] = useState<boolean>(depth <= 1);
+  const activeItemRef = useRef<HTMLDivElement>(null);
+  const isExpanded = forceExpand || expanded;
+  const isCurrentVideo = !node.is_dir && node.path === activeVideoPath;
+
+  useEffect(() => {
+    if (isCurrentVideo && activeItemRef.current) {
+      activeItemRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [isCurrentVideo]);
+
+  if (node.is_dir) {
+    const childVideos = flattenVideoNodes([node]);
+    const doneCount = childVideos.filter((v) => completedVideos[v.path]).length;
+
+    return (
+      <div className="select-none">
+        <div
+          onClick={() => setExpanded((v) => !v)}
+          style={{ paddingLeft: `${depth * 12 + 8}px` }}
+          className="group flex items-center justify-between py-1.5 pr-2 rounded cursor-pointer hover:bg-neutral-800/70 text-xs text-neutral-200 transition-colors"
+        >
+          <div className="flex items-center space-x-1.5 min-w-0 flex-1">
+            {isExpanded ? (
+              <ChevronDown className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
+            ) : (
+              <ChevronRight className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
+            )}
+            {isExpanded ? (
+              <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            ) : (
+              <Folder className="w-3.5 h-3.5 text-amber-500/80 shrink-0" />
+            )}
+            <span className="font-medium truncate" title={node.path}>
+              {node.name}
+            </span>
+          </div>
+
+          <div className="flex items-center space-x-1.5 shrink-0 ml-1">
+            <span className="text-[10px] text-neutral-500 font-mono">
+              {doneCount}/{childVideos.length}
+            </span>
+            {depth === 0 && onRemoveRoot && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemoveRoot(node.path);
+                }}
+                className="opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-red-400 p-0.5 rounded transition-opacity"
+                title="Bỏ thư mục này khỏi danh sách"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {isExpanded && node.children && (
+          <div className="space-y-0.5">
+            {node.children.map((child) => (
+              <FolderTreeItem
+                key={child.path}
+                node={child}
+                depth={depth + 1}
+                activeVideoPath={activeVideoPath}
+                completedVideos={completedVideos}
+                forceExpand={forceExpand}
+                onSelectVideo={onSelectVideo}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const isCompleted = !!completedVideos[node.path];
+
+  return (
+    <div
+      ref={isCurrentVideo ? activeItemRef : null}
+      onClick={() => onSelectVideo(node.path)}
+      style={{ paddingLeft: `${depth * 12 + 12}px` }}
+      title={node.name}
+      className={`flex items-center justify-between py-1.5 pr-2 rounded cursor-pointer text-xs transition-colors ${
+        isCurrentVideo
+          ? 'bg-amber-500/20 text-amber-300 border-l-2 border-amber-400 font-semibold'
+          : 'text-neutral-300 hover:bg-neutral-800/60'
+      }`}
+    >
+      <div className="flex items-center space-x-2 min-w-0 flex-1">
+        {isCurrentVideo ? (
+          <Play className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />
+        ) : isCompleted ? (
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+        ) : (
+          <Film className="w-3 h-3 text-neutral-500 shrink-0" />
+        )}
+        <span className="truncate">{node.name}</span>
+      </div>
+
+      {node.has_cache && (
+        <span
+          className="ml-1.5 px-1 py-0.2 bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 rounded text-[9px] font-medium shrink-0"
+          title="Video này đã có sẵn phụ đề dịch trong cache"
+        >
+          SUB
+        </span>
+      )}
+    </div>
+  );
+});
+
+// Panel cây thư mục khóa học bên trái
+const CourseTreePanel = memo(({
+  roots,
+  activeVideoPath,
+  completedVideos,
+  autoCollapse,
+  onToggleAutoCollapse,
+  onSelectVideo,
+  onAddFolder,
+  onRemoveRoot,
+  onClearAll,
+  onClose,
+}: {
+  roots: FolderNode[];
+  activeVideoPath: string | null;
+  completedVideos: Record<string, boolean>;
+  autoCollapse: boolean;
+  onToggleAutoCollapse: () => void;
+  onSelectVideo: (path: string) => void;
+  onAddFolder: () => void;
+  onRemoveRoot: (path: string) => void;
+  onClearAll: () => void;
+  onClose: () => void;
+}) => {
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const allVideos = useMemo(() => flattenVideoNodes(roots), [roots]);
+  const filteredRoots = useMemo(() => filterFolderTree(roots, searchQuery), [roots, searchQuery]);
+  const completedCount = useMemo(
+    () => allVideos.filter((v) => completedVideos[v.path]).length,
+    [allVideos, completedVideos]
+  );
+
+  return (
+    <aside className="w-80 h-full bg-[#13161c] border-r border-player-border flex flex-col z-20 shrink-0">
+      {/* Header của cây thư mục */}
+      <div className="h-10 border-b border-player-border px-2.5 flex items-center justify-between">
+        <div className="flex items-center space-x-1.5 min-w-0">
+          <span className="text-xs font-semibold text-neutral-200 truncate">
+            Cây thư mục ({completedCount}/{allVideos.length})
+          </span>
+        </div>
+        <div className="flex items-center space-x-1 shrink-0">
+          <button
+            onClick={onToggleAutoCollapse}
+            className={`px-1.5 py-0.5 rounded text-[10px] border transition-colors ${
+              autoCollapse
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+            }`}
+            title="Tự động thu gọn thanh thư mục sau khi bấm chọn bài học"
+          >
+            Tự ẩn
+          </button>
+          <button
+            onClick={onAddFolder}
+            className="flex items-center space-x-1 px-1.5 py-0.5 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded text-[11px] font-medium transition-colors"
+            title="Thêm một thư mục khóa học nữa vào danh sách"
+          >
+            <FolderPlus className="w-3 h-3" />
+            <span>+</span>
+          </button>
+          {roots.length > 0 && (
+            <button
+              onClick={onClearAll}
+              className="text-neutral-500 hover:text-red-400 p-1 rounded"
+              title="Xóa toàn bộ cây thư mục"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="text-neutral-400 hover:text-white p-1 rounded hover:bg-neutral-800"
+            title="Thu gọn cây thư mục (Phím B)"
+          >
+            <PanelLeftClose className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Ô tìm kiếm nhanh bài học */}
+      {allVideos.length > 3 && (
+        <div className="p-2 border-b border-player-border">
+          <div className="relative flex items-center">
+            <Search className="w-3.5 h-3.5 text-neutral-500 absolute left-2.5 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Tìm tên video / bài học..."
+              className="w-full bg-neutral-900 text-xs text-neutral-200 pl-8 pr-6 py-1.5 rounded border border-neutral-800 focus:border-amber-500/50 focus:outline-none"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 text-neutral-500 hover:text-neutral-300 text-xs"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Nội dung cây thư mục */}
+      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        {roots.length === 0 ? (
+          <div className="text-center py-10 px-4 text-neutral-500 text-xs space-y-3">
+            <FolderOpen className="w-8 h-8 text-neutral-600 mx-auto" />
+            <div>
+              Chưa có thư mục nào. Bấm <b>"+ Thư mục"</b> hoặc kéo thả nhiều thư mục khóa học vào đây.
+            </div>
+            <button
+              onClick={onAddFolder}
+              className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-black font-semibold rounded text-xs transition-colors"
+            >
+              Chọn thư mục video
+            </button>
+          </div>
+        ) : filteredRoots.length === 0 ? (
+          <div className="text-center py-8 text-neutral-500 text-xs">
+            Không tìm thấy bài học phù hợp
+          </div>
+        ) : (
+          filteredRoots.map((root) => (
+            <FolderTreeItem
+              key={root.path}
+              node={root}
+              depth={0}
+              activeVideoPath={activeVideoPath}
+              completedVideos={completedVideos}
+              forceExpand={searchQuery.trim().length > 0}
+              onSelectVideo={onSelectVideo}
+              onRemoveRoot={onRemoveRoot}
+            />
+          ))
+        )}
+      </div>
+    </aside>
+  );
+});
+
 // Component danh sách phụ đề bên cạnh (dùng React.memo để tránh re-render liên tục khi video phát)
 const SubtitleListPanel = memo(({
   subtitles,
@@ -86,7 +417,7 @@ const SubtitleListPanel = memo(({
   }, [activeId]);
 
   return (
-    <aside className="w-80 h-full bg-[#13161c] border-l border-player-border flex flex-col z-20">
+    <aside className="w-80 h-full bg-[#13161c] border-l border-player-border flex flex-col z-20 shrink-0">
       <div className="h-10 border-b border-player-border px-3 flex items-center justify-between">
         <span className="text-xs font-semibold text-neutral-300">
           Danh sách phụ đề ({subtitles.length})
@@ -153,6 +484,20 @@ export const App: React.FC = () => {
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
+  // Course Folder Tree & Auto-Next State
+  const [courseRoots, setCourseRoots] = useState<FolderNode[]>([]);
+  const [showFolderPanel, setShowFolderPanel] = useState<boolean>(true);
+  const [autoCollapseFolder, setAutoCollapseFolder] = useState<boolean>(true);
+  const [autoNext, setAutoNext] = useState<boolean>(true);
+  const [completedVideos, setCompletedVideos] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_COMPLETED_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+
   // Subtitle State
   const [subtitles, setSubtitles] = useState<SubtitleItem[]>([]);
   const [currentSubtitle, setCurrentSubtitle] = useState<SubtitleItem | null>(null);
@@ -172,14 +517,61 @@ export const App: React.FC = () => {
   const lastPlayheadUpdateRef = useRef<number>(0);
   const lastUiTimeRef = useRef<number>(0);
 
+  // Danh sách video phẳng theo thứ tự từ cây thư mục
+  const playlistVideos = useMemo(() => flattenVideoNodes(courseRoots), [courseRoots]);
+
+  const currentPlaylistIndex = useMemo(() => {
+    if (!videoInfo?.path) return -1;
+    return playlistVideos.findIndex((v) => v.path === videoInfo.path);
+  }, [playlistVideos, videoInfo?.path]);
+
   // Hiển thị toast thông báo ngắn
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(''), 2000);
-  };
+    setTimeout(() => setToastMessage(''), 2500);
+  }, []);
+
+  // Lưu danh sách thư mục gốc vào localStorage
+  const saveFolderPaths = useCallback((roots: FolderNode[]) => {
+    try {
+      const paths = roots.map((r) => r.path);
+      localStorage.setItem(STORAGE_FOLDERS_KEY, JSON.stringify(paths));
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  // Khôi phục cây thư mục đã mở từ lần trước
+  useEffect(() => {
+    const restoreFolders = async () => {
+      if (!window.go?.main?.App?.ScanVideoFolder) return;
+      try {
+        const raw = localStorage.getItem(STORAGE_FOLDERS_KEY);
+        if (!raw) return;
+        const savedPaths: string[] = JSON.parse(raw);
+        if (!Array.isArray(savedPaths) || savedPaths.length === 0) return;
+
+        const loaded: FolderNode[] = [];
+        for (const p of savedPaths) {
+          try {
+            const node = await window.go.main.App.ScanVideoFolder(p);
+            if (node) loaded.push(node);
+          } catch {
+            // Bỏ qua thư mục đã bị xóa hoặc di chuyển
+          }
+        }
+        if (loaded.length > 0) {
+          setCourseRoots(loaded);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    restoreFolders();
+  }, []);
 
   // Mở file video
-  const handleOpenVideo = async (filePath?: string) => {
+  const handleOpenVideo = useCallback(async (filePath?: string) => {
     let selected = filePath;
     if (!selected && window.go?.main?.App) {
       try {
@@ -196,6 +588,8 @@ export const App: React.FC = () => {
       setSubtitles([]);
       setCurrentSubtitle(null);
       setDoneBlocks([]);
+      setCurrentTime(0);
+      lastUiTimeRef.current = 0;
 
       // 2. Gọi OpenVideo backend
       const info = await window.go?.main?.App?.OpenVideo(selected);
@@ -223,7 +617,88 @@ export const App: React.FC = () => {
     } catch (err: any) {
       alert(`Không thể mở video: ${err?.message || err}`);
     }
-  };
+  }, []);
+
+  // Thêm 1 thư mục khóa học vào cây thư mục
+  const handleAddFolder = useCallback(async () => {
+    if (!window.go?.main?.App?.SelectVideoFolder) return;
+    try {
+      const folderNode = await window.go.main.App.SelectVideoFolder();
+      if (!folderNode) return;
+
+      setShowFolderPanel(true);
+      setCourseRoots((prev) => {
+        const existsIdx = prev.findIndex((r) => r.path === folderNode.path);
+        let next: FolderNode[];
+        if (existsIdx >= 0) {
+          next = [...prev];
+          next[existsIdx] = folderNode;
+        } else {
+          next = [...prev, folderNode];
+        }
+        saveFolderPaths(next);
+        return next;
+      });
+
+      // Nếu chưa có video nào đang mở, tự động phát bài đầu tiên trong thư mục vừa thêm
+      const videos = flattenVideoNodes([folderNode]);
+      if (!videoInfo?.path && videos.length > 0) {
+        handleOpenVideo(videos[0].path);
+      } else {
+        showToast(`Đã thêm thư mục: ${folderNode.name} (${videos.length} video)`);
+      }
+    } catch (err: any) {
+      alert(`Không thể quét thư mục: ${err?.message || err}`);
+    }
+  }, [videoInfo?.path, handleOpenVideo, saveFolderPaths, showToast]);
+
+  // Xóa 1 thư mục gốc khỏi cây
+  const handleRemoveRootFolder = useCallback((rootPath: string) => {
+    setCourseRoots((prev) => {
+      const next = prev.filter((r) => r.path !== rootPath);
+      saveFolderPaths(next);
+      return next;
+    });
+  }, [saveFolderPaths]);
+
+  // Xóa toàn bộ cây thư mục
+  const handleClearAllFolders = useCallback(() => {
+    setCourseRoots([]);
+    saveFolderPaths([]);
+  }, [saveFolderPaths]);
+
+  // Chuyển sang bài trước / bài tiếp theo trong cây thư mục
+  const handlePlayAdjacentVideo = useCallback((offset: number) => {
+    if (currentPlaylistIndex < 0) return;
+    const nextIdx = currentPlaylistIndex + offset;
+    if (nextIdx >= 0 && nextIdx < playlistVideos.length) {
+      const target = playlistVideos[nextIdx];
+      showToast(`⏭ Chuyển bài (${nextIdx + 1}/${playlistVideos.length}): ${target.name}`);
+      handleOpenVideo(target.path);
+    }
+  }, [currentPlaylistIndex, playlistVideos, handleOpenVideo, showToast]);
+
+  // Xử lý khi video kết thúc: đánh dấu hoàn thành & tự động nhảy sang bài tiếp theo
+  const handleVideoEnded = useCallback(() => {
+    setIsPlaying(false);
+    if (videoInfo?.path) {
+      setCompletedVideos((prev) => {
+        const next = { ...prev, [videoInfo.path]: true };
+        try {
+          localStorage.setItem(STORAGE_COMPLETED_KEY, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+        return next;
+      });
+    }
+
+    if (autoNext && currentPlaylistIndex >= 0 && currentPlaylistIndex + 1 < playlistVideos.length) {
+      const nextVideo = playlistVideos[currentPlaylistIndex + 1];
+      showToast(`⏭ Tự động phát bài kế tiếp: ${nextVideo.name}`);
+      handleOpenVideo(nextVideo.path);
+    }
+  }, [videoInfo?.path, autoNext, currentPlaylistIndex, playlistVideos, handleOpenVideo, showToast]);
 
   // Đăng ký lắng nghe sự kiện từ Wails backend
   useEffect(() => {
@@ -330,12 +805,13 @@ export const App: React.FC = () => {
     }
   };
 
-  // Tua video an toàn với Debounce 250ms chống dồn lệnh SeekTo
+  // Tua video an toàn với Debounce 200ms chống dồn lệnh SeekTo
   const seekVideo = useCallback((targetSec: number) => {
     if (!videoRef.current || !videoInfo) return;
 
     const clamped = Math.max(0, Math.min(targetSec, duration));
     videoRef.current.currentTime = clamped;
+    lastUiTimeRef.current = clamped;
     setCurrentTime(clamped);
 
     const blockSec = videoInfo.block_sec || 30;
@@ -350,7 +826,7 @@ export const App: React.FC = () => {
     seekDebounceTimerRef.current = setTimeout(() => {
       window.go?.main?.App?.SeekTo(videoInfo.path, clamped);
     }, 200);
-  }, [videoInfo, duration, doneBlocks]);
+  }, [videoInfo, duration, doneBlocks, showToast]);
 
   // Phím tắt điều khiển
   useEffect(() => {
@@ -371,6 +847,14 @@ export const App: React.FC = () => {
           e.preventDefault();
           seekVideo(currentTime + (e.shiftKey ? 30 : 5));
           break;
+        case 'PageUp':
+          e.preventDefault();
+          handlePlayAdjacentVideo(-1);
+          break;
+        case 'PageDown':
+          e.preventDefault();
+          handlePlayAdjacentVideo(1);
+          break;
         case 'ArrowUp':
           e.preventDefault();
           setVolume((v) => Math.min(1.0, v + 0.05));
@@ -386,6 +870,10 @@ export const App: React.FC = () => {
         case 'KeyF':
           e.preventDefault();
           toggleFullscreen();
+          break;
+        case 'KeyB':
+          e.preventDefault();
+          setShowFolderPanel((v) => !v);
           break;
         case 'KeyV':
           e.preventDefault();
@@ -428,7 +916,7 @@ export const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentTime, seekVideo]);
+  }, [currentTime, seekVideo, handlePlayAdjacentVideo, handleOpenVideo, showToast]);
 
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
@@ -459,36 +947,118 @@ export const App: React.FC = () => {
     window.go?.main?.App?.SeekTo(videoInfo.path, currentTime);
   };
 
+  // Xử lý kéo thả 1 hoặc nhiều thư mục / tập tin video vào cửa sổ ứng dụng
+  const handleDropItems = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length === 0) return;
+
+    const newNodes: FolderNode[] = [];
+    let firstSingleVideo: string | null = null;
+
+    for (const f of files) {
+      const fullPath = (f as any).path;
+      if (!fullPath) continue;
+      if (window.go?.main?.App?.ScanVideoFolder) {
+        try {
+          const scanned = await window.go.main.App.ScanVideoFolder(fullPath);
+          if (scanned) {
+            if (scanned.is_dir) {
+              newNodes.push(scanned);
+            } else if (!firstSingleVideo) {
+              firstSingleVideo = scanned.path;
+            }
+          }
+        } catch {
+          // ignore invalid items
+        }
+      } else if (!firstSingleVideo) {
+        firstSingleVideo = fullPath;
+      }
+    }
+
+    if (newNodes.length > 0) {
+      setShowFolderPanel(true);
+      setCourseRoots((prev) => {
+        const merged = [...prev];
+        for (const node of newNodes) {
+          const idx = merged.findIndex((r) => r.path === node.path);
+          if (idx >= 0) {
+            merged[idx] = node;
+          } else {
+            merged.push(node);
+          }
+        }
+        saveFolderPaths(merged);
+        return merged;
+      });
+      const videos = flattenVideoNodes(newNodes);
+      if (!videoInfo?.path && videos.length > 0) {
+        handleOpenVideo(videos[0].path);
+      } else {
+        showToast(`Đã nạp ${newNodes.length} thư mục (${videos.length} video)`);
+      }
+    } else if (firstSingleVideo) {
+      handleOpenVideo(firstSingleVideo);
+    }
+  };
+
   return (
     <div
       ref={containerRef}
       className="flex flex-col h-screen w-screen bg-[#0d0f12] text-[#f1f2f6] select-none overflow-hidden"
       onDragOver={(e) => e.preventDefault()}
-      onDrop={(e) => {
-        e.preventDefault();
-        const file = e.dataTransfer.files[0];
-        if (file && (file as any).path) {
-          handleOpenVideo((file as any).path);
-        }
-      }}
+      onDrop={handleDropItems}
     >
       {/* 1. Header Bar */}
       <header className="h-12 border-b border-player-border px-4 flex items-center justify-between bg-player-surface z-10">
-        <div className="flex items-center space-x-3 truncate">
+        <div className="flex items-center space-x-2 truncate">
+          {/* Nút ẩn/hiện cây thư mục khóa học */}
+          <button
+            onClick={() => setShowFolderPanel((v) => !v)}
+            className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded text-xs font-medium border transition-colors ${
+              showFolderPanel
+                ? 'bg-neutral-800 text-amber-400 border-amber-500/40'
+                : 'bg-neutral-900 text-neutral-300 border-neutral-800 hover:bg-neutral-800'
+            }`}
+            title="Ẩn/hiện cây thư mục khóa học"
+          >
+            <Folder className="w-3.5 h-3.5" />
+            <span>Thư mục ({playlistVideos.length})</span>
+          </button>
+
+          {/* Nút thêm thư mục khóa học */}
+          <button
+            onClick={handleAddFolder}
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-black font-semibold text-xs rounded transition-colors shadow"
+            title="Import thêm thư mục chứa nhiều video bài học"
+          >
+            <FolderPlus className="w-3.5 h-3.5" />
+            <span>Thêm thư mục</span>
+          </button>
+
+          {/* Nút mở 1 file video lẻ */}
           <button
             onClick={() => handleOpenVideo()}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-black font-semibold text-xs rounded transition-colors shadow"
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-medium text-xs rounded border border-neutral-700 transition-colors"
+            title="Mở 1 tập tin video lẻ (Ctrl+O)"
           >
-            <FolderOpen className="w-3.5 h-3.5" />
-            <span>Mở video</span>
+            <FolderOpen className="w-3.5 h-3.5 text-amber-400" />
+            <span>Mở file lẻ</span>
           </button>
-          <span className="text-xs font-medium text-neutral-300 truncate max-w-sm">
+
+          <span className="text-xs font-medium text-neutral-300 truncate max-w-xs pl-1">
             {videoInfo?.path ? videoInfo.path.split(/[\\/]/).pop() : 'Chưa mở file'}
           </span>
+          {currentPlaylistIndex >= 0 && (
+            <span className="text-[11px] text-amber-400/90 font-mono bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+              Bài {currentPlaylistIndex + 1}/{playlistVideos.length}
+            </span>
+          )}
         </div>
 
         {/* Right Header Controls */}
-        <div className="flex items-center space-x-3 text-xs">
+        <div className="flex items-center space-x-2.5 text-xs">
           {/* Dynamic Pipeline Status Label */}
           {pipelineStatus && (
             <div className="flex items-center space-x-2 px-2.5 py-1 bg-neutral-800/80 rounded-full border border-neutral-700">
@@ -498,14 +1068,33 @@ export const App: React.FC = () => {
                 pipelineStatus.state === 'done' ? 'bg-emerald-400' : 'bg-blue-400 animate-pulse'
               }`} />
               <span className="text-neutral-300 text-[11px]">
-                {pipelineStatus.state === 'ahead' && `Đón đầu phía trước (${Math.round(pipelineStatus.ahead_sec)}s)`}
+                {pipelineStatus.state === 'ahead' && `Đón đầu (${Math.round(pipelineStatus.ahead_sec)}s)`}
                 {pipelineStatus.state === 'catching_up' && 'Đang đuổi kịp playhead...'}
-                {pipelineStatus.state === 'processing' && `Đang xử lý đoạn ${pipelineStatus.done_blocks}/${pipelineStatus.total_blocks}`}
+                {pipelineStatus.state === 'processing' && `Đang dịch đoạn ${pipelineStatus.done_blocks}/${pipelineStatus.total_blocks}`}
                 {pipelineStatus.state === 'backfill' && `Bù phụ đề đoạn trước...`}
-                {pipelineStatus.state === 'done' && 'Đã hoàn tất toàn bộ video'}
+                {pipelineStatus.state === 'done' && 'Đã dịch xong toàn bộ video'}
               </span>
             </div>
           )}
+
+          {/* Nút bật/tắt Tự động chuyển bài khi hết video */}
+          <button
+            onClick={() => {
+              setAutoNext((v) => {
+                const next = !v;
+                showToast(next ? 'Đã BẬT tự động chuyển bài' : 'Đã TẮT tự động chuyển bài');
+                return next;
+              });
+            }}
+            className={`px-2.5 py-1 rounded border text-xs transition-colors ${
+              autoNext
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+            }`}
+            title="Tự động nhảy sang video tiếp theo trong cây thư mục khi xem hết bài"
+          >
+            Tự chuyển bài: {autoNext ? 'BẬT' : 'TẮT'}
+          </button>
 
           {/* Nút dịch đón đầu trước 1 khúc */}
           <button
@@ -535,7 +1124,7 @@ export const App: React.FC = () => {
             </span>
           </button>
 
-          {/* Panel danh sách toggle */}
+          {/* Panel danh sách phụ đề toggle */}
           <button
             onClick={() => setShowSubPanel((v) => !v)}
             className={`p-1.5 rounded text-neutral-300 hover:bg-neutral-800 ${showSubPanel ? 'bg-neutral-800 text-amber-400' : ''}`}
@@ -557,6 +1146,42 @@ export const App: React.FC = () => {
 
       {/* 2. Main Content Area */}
       <div className="flex-1 flex relative overflow-hidden bg-black">
+        {/* Sidebar Trái: Cây thư mục khóa học */}
+        {showFolderPanel ? (
+          <CourseTreePanel
+            roots={courseRoots}
+            activeVideoPath={videoInfo?.path ?? null}
+            completedVideos={completedVideos}
+            autoCollapse={autoCollapseFolder}
+            onToggleAutoCollapse={() => {
+              setAutoCollapseFolder((v) => {
+                const next = !v;
+                showToast(next ? 'Đã BẬT tự ẩn thư mục khi chọn bài' : 'Đã TẮT tự ẩn thư mục khi chọn bài');
+                return next;
+              });
+            }}
+            onSelectVideo={(path) => {
+              handleOpenVideo(path);
+              if (autoCollapseFolder) {
+                setShowFolderPanel(false);
+              }
+            }}
+            onAddFolder={handleAddFolder}
+            onRemoveRoot={handleRemoveRootFolder}
+            onClearAll={handleClearAllFolders}
+            onClose={() => setShowFolderPanel(false)}
+          />
+        ) : (
+          /* Nút tai nhỏ ở sát mép trái để bật nhanh lại Cây thư mục khi đang ẩn */
+          <button
+            onClick={() => setShowFolderPanel(true)}
+            className="absolute left-0 top-1/2 -translate-y-1/2 z-30 bg-neutral-900/75 hover:bg-amber-500 text-neutral-300 hover:text-black border border-l-0 border-neutral-700 hover:border-amber-400 rounded-r-md py-3 px-1 shadow-lg transition-all opacity-50 hover:opacity-100"
+            title="Mở cây thư mục bài học (Phím B)"
+          >
+            <PanelLeftOpen className="w-4 h-4" />
+          </button>
+        )}
+
         {/* Toast thông báo phím tắt */}
         {toastMessage && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-3 py-1.5 bg-black/80 text-amber-300 border border-amber-500/50 rounded text-xs shadow-lg backdrop-blur">
@@ -565,13 +1190,13 @@ export const App: React.FC = () => {
         )}
 
         {/* Video Player Box */}
-        <div className="flex-1 flex items-center justify-center relative">
+        <div className="flex-1 flex items-center justify-center relative overflow-hidden">
           <video
             ref={videoRef}
             className="max-h-full max-w-full object-contain"
             onClick={togglePlay}
             muted={isMuted}
-            onEnded={() => setIsPlaying(false)}
+            onEnded={handleVideoEnded}
           />
 
           {/* Codec cảnh báo không tương thích */}
@@ -615,7 +1240,7 @@ export const App: React.FC = () => {
           )}
         </div>
 
-        {/* Side Panel danh sách phụ đề */}
+        {/* Side Panel Phải: Danh sách phụ đề */}
         {showSubPanel && (
           <SubtitleListPanel
             subtitles={subtitles}
@@ -669,7 +1294,17 @@ export const App: React.FC = () => {
 
         {/* Control Buttons */}
         <div className="flex items-center justify-between text-xs text-neutral-300">
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-2">
+            {/* Nút Bài trước */}
+            <button
+              onClick={() => handlePlayAdjacentVideo(-1)}
+              disabled={currentPlaylistIndex <= 0}
+              className="p-1.5 hover:text-white disabled:opacity-30 disabled:pointer-events-none rounded"
+              title="Bài trước (PageUp)"
+            >
+              <SkipBack className="w-4 h-4" />
+            </button>
+
             <button
               onClick={togglePlay}
               className="p-1.5 hover:text-white rounded"
@@ -678,8 +1313,18 @@ export const App: React.FC = () => {
               {isPlaying ? <Pause className="w-4 h-4 text-amber-400" /> : <Play className="w-4 h-4" />}
             </button>
 
+            {/* Nút Bài tiếp theo */}
+            <button
+              onClick={() => handlePlayAdjacentVideo(1)}
+              disabled={currentPlaylistIndex < 0 || currentPlaylistIndex >= playlistVideos.length - 1}
+              className="p-1.5 hover:text-white disabled:opacity-30 disabled:pointer-events-none rounded"
+              title="Bài tiếp theo (PageDown)"
+            >
+              <SkipForward className="w-4 h-4" />
+            </button>
+
             {/* Volume Control */}
-            <div className="flex items-center space-x-1.5">
+            <div className="flex items-center space-x-1.5 pl-1">
               <button onClick={() => setIsMuted((m) => !m)} className="hover:text-white">
                 {isMuted || volume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               </button>
@@ -698,7 +1343,7 @@ export const App: React.FC = () => {
             </div>
 
             {/* Time Display */}
-            <span className="text-[11px] text-neutral-400 font-mono">
+            <span className="text-[11px] text-neutral-400 font-mono pl-1">
               {formatTime(currentTime)} / {formatTime(duration)}
             </span>
           </div>

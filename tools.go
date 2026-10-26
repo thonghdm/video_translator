@@ -52,13 +52,23 @@ func GetToolsPaths() *ToolsPaths {
 		// Xác định thư mục tạm ASCII an toàn
 		tempDir := getSafeASCIITempDir()
 
+		// Ưu tiên bản llama GPU (llama_cuda / llama_vulkan) nếu tồn tại
+		llamaDir := filepath.Join(baseDir, "tools", "llama")
+		for _, gpuFolder := range []string{"llama_cuda", "llama_vulkan"} {
+			cand := filepath.Join(baseDir, "tools", gpuFolder)
+			if _, err := os.Stat(filepath.Join(cand, "llama-server.exe")); err == nil {
+				llamaDir = cand
+				break
+			}
+		}
+
 		globalTools = &ToolsPaths{
 			BaseDir:      baseDir,
 			FFmpeg:       filepath.Join(baseDir, "tools", "ffmpeg", "ffmpeg.exe"),
 			FFprobe:      filepath.Join(baseDir, "tools", "ffmpeg", "ffprobe.exe"),
 			WhisperCLI:   filepath.Join(baseDir, "tools", "whisper", "whisper-cli.exe"),
-			LlamaCLI:     filepath.Join(baseDir, "tools", "llama", "llama-cli.exe"),
-			LlamaServer:  filepath.Join(baseDir, "tools", "llama", "llama-server.exe"),
+			LlamaCLI:     filepath.Join(llamaDir, "llama-cli.exe"),
+			LlamaServer:  filepath.Join(llamaDir, "llama-server.exe"),
 			WhisperModel: filepath.Join(baseDir, "models", "ggml-base.bin"),
 			LlamaModel:   filepath.Join(baseDir, "models", "qwen2.5-1.5b-instruct-q4_k_m.gguf"),
 			TempDir:      tempDir,

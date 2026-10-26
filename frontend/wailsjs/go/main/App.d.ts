@@ -12,9 +12,13 @@ export function OpenVideo(arg1:string):Promise<main.VideoInfo>;
 
 export function SaveSettings(arg1:main.Settings):Promise<void>;
 
+export function ScanVideoFolder(arg1:string):Promise<main.FolderNode>;
+
 export function SeekTo(arg1:string,arg2:number):Promise<void>;
 
 export function SelectVideoFile():Promise<string>;
+
+export function SelectVideoFolder():Promise<main.FolderNode>;
 
 export function StartPipeline(arg1:string,arg2:number):Promise<void>;
 

@@ -172,7 +172,47 @@ func FilterAndDeduplicateSegments(raw []WhisperSegment, bRange BlockRange) []Whi
 		filtered = append(filtered, splitSegments...)
 	}
 
-	return filtered
+	return MergeBrokenSegments(filtered)
+}
+
+// MergeBrokenSegments gộp các mảnh câu ngắn bị Whisper ngắt lửng giữa chừng để dịch nhanh và mượt hơn
+func MergeBrokenSegments(segments []WhisperSegment) []WhisperSegment {
+	if len(segments) == 0 {
+		return segments
+	}
+
+	var merged []WhisperSegment
+	for _, seg := range segments {
+		cleanText := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(seg.Text), "- "))
+		if cleanText == "" {
+			continue
+		}
+		seg.Text = cleanText
+
+		if len(merged) > 0 {
+			prev := &merged[len(merged)-1]
+			gap := seg.StartSec - prev.EndSec
+			combinedDur := seg.EndSec - prev.StartSec
+			combinedLen := len(prev.Text) + 1 + len(seg.Text)
+
+			if !endsWithSentencePunct(prev.Text) && gap <= 0.8 && combinedDur <= 6.5 && combinedLen <= 82 {
+				prev.Text = prev.Text + " " + seg.Text
+				prev.EndSec = seg.EndSec
+				continue
+			}
+		}
+		merged = append(merged, seg)
+	}
+	return merged
+}
+
+func endsWithSentencePunct(s string) bool {
+	trimmed := strings.TrimRight(s, `"'”’)] `)
+	if trimmed == "" {
+		return false
+	}
+	last := trimmed[len(trimmed)-1]
+	return last == '.' || last == '?' || last == '!' || last == ';' || last == ':'
 }
 
 // SplitLongSegmentIfNeeded tách câu dài theo dấu câu và chia tỷ lệ thời gian

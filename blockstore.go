@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 // CacheMeta lưu thông tin kiểm tra tính hợp lệ của cache
@@ -227,4 +228,61 @@ func (bs *BlockStore) GetAllItemsSorted() []SubtitleItem {
 	})
 
 	return all
+}
+
+// HasCachedSubtitles kiểm tra nhanh xem video đã có ít nhất 1 block phụ đề trong cache đĩa chưa
+func HasCachedSubtitles(videoPath string) bool {
+	hashStr, _, _, err := ComputeVideoHash(videoPath)
+	if err != nil {
+		return false
+	}
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		localAppData = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local")
+	}
+	blocksDir := filepath.Join(localAppData, "SubTrans", "cache", hashStr, "blocks")
+	entries, err := os.ReadDir(blocksDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			return true
+		}
+	}
+	return false
+}
+
+// CleanupOldCaches tự động xóa các thư mục cache của các video đã quá hạn maxAge không sử dụng
+func CleanupOldCaches(maxAge time.Duration) {
+	if maxAge <= 0 {
+		return
+	}
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		localAppData = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local")
+	}
+	cacheRoot := filepath.Join(localAppData, "SubTrans", "cache")
+	entries, err := os.ReadDir(cacheRoot)
+	if err != nil {
+		return
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dirPath := filepath.Join(cacheRoot, entry.Name())
+		metaFile := filepath.Join(dirPath, "meta.json")
+		if fi, err := os.Stat(metaFile); err == nil {
+			if fi.ModTime().Before(cutoff) {
+				_ = os.RemoveAll(dirPath)
+			}
+		} else if fiDir, err := entry.Info(); err == nil {
+			if fiDir.ModTime().Before(cutoff) {
+				_ = os.RemoveAll(dirPath)
+			}
+		}
+	}
 }

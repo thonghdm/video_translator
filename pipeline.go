@@ -54,12 +54,13 @@ type Pipeline struct {
 	wg           sync.WaitGroup
 
 	// Pipeline state
-	playheadSec  float64
-	playing      bool
-	state        string
-	wakeSched    chan struct{}
-	failedBlocks map[int]int // blockIdx -> retryCount
-	activeJobs   map[int]bool
+	playheadSec      float64
+	playing          bool
+	state            string
+	wakeSched        chan struct{}
+	failedBlocks     map[int]int // blockIdx -> retryCount
+	activeJobs       map[int]bool
+	externalSegments []WhisperSegment
 
 	// Custom runners hỗ trợ Mock trong Test tự động
 	MockSliceAudio func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error
@@ -92,18 +93,26 @@ func NewPipeline(
 		settings.TranslateWorkers = 1
 	}
 
+	var extSegs []WhisperSegment
+	if subFile := FindExternalSubtitleFile(videoPath); subFile != "" {
+		if loaded, err := LoadExternalSubtitles(subFile); err == nil && len(loaded) > 0 {
+			extSegs = loaded
+		}
+	}
+
 	return &Pipeline{
-		videoPath:    videoPath,
-		durationSec:  durationSec,
-		settings:     settings,
-		tools:        tools,
-		blockStore:   blockStore,
-		translator:   translator,
-		callbacks:    callbacks,
-		state:        "idle",
-		wakeSched:    make(chan struct{}, 1),
-		failedBlocks: make(map[int]int),
-		activeJobs:   make(map[int]bool),
+		videoPath:        videoPath,
+		durationSec:      durationSec,
+		settings:         settings,
+		tools:            tools,
+		blockStore:       blockStore,
+		translator:       translator,
+		callbacks:        callbacks,
+		state:            "idle",
+		wakeSched:        make(chan struct{}, 1),
+		failedBlocks:     make(map[int]int),
+		activeJobs:       make(map[int]bool),
+		externalSegments: extSegs,
 	}
 }
 
@@ -411,7 +420,9 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan int, outChan 
 
 			tSlice0 := time.Now()
 			var err error
-			if p.MockSliceAudio != nil {
+			if len(p.externalSegments) > 0 && p.MockSliceAudio == nil {
+				// Đã có sẵn file phụ đề gốc (.srt/.vtt) -> bỏ qua cắt WAV bằng ffmpeg
+			} else if p.MockSliceAudio != nil {
 				err = p.MockSliceAudio(ctx, p.videoPath, bRange, wavPath)
 			} else {
 				// Cắt audio bằng ffmpeg với seek nhanh trước -i:
@@ -472,7 +483,14 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 			var segments []WhisperSegment
 			var err error
 
-			if p.MockRunSTT != nil {
+			if len(p.externalSegments) > 0 && p.MockRunSTT == nil {
+				// Trích xuất trực tiếp từ file phụ đề .srt/.vtt đi kèm (0ms STT, không tốn CPU/RAM)
+				for _, seg := range p.externalSegments {
+					if seg.EndSec >= job.Range.ExtractStart && seg.StartSec <= job.Range.ExtractEnd {
+						segments = append(segments, seg)
+					}
+				}
+			} else if p.MockRunSTT != nil {
 				segments, err = p.MockRunSTT(ctx, job.WavPath, job.Range)
 			} else {
 				// whisper-cli gọi với greedy decoding (-bs 1 -bo 1 -nf -np) để tối ưu tốc độ gấp 3 lần và giảm RAM
