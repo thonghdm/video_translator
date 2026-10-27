@@ -37,6 +37,7 @@ import {
   Languages,
   Cloud,
   Link2,
+  GripHorizontal,
 } from "lucide-react";
 import {
   SubtitleItem,
@@ -677,6 +678,7 @@ export const App: React.FC = () => {
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const playerContainerRef = useRef<HTMLDivElement>(null);
   const seekDebounceTimerRef = useRef<any>(null);
   const lastPlayheadUpdateRef = useRef<number>(0);
   const lastUiTimeRef = useRef<number>(0);
@@ -697,6 +699,144 @@ export const App: React.FC = () => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(""), 2500);
   }, []);
+
+  // Vị trí tùy biến của thanh phụ đề (người dùng có thể kéo thả tự do)
+  const [subPos, setSubPos] = useState<{ xPct: number; yPct: number } | null>(
+    () => {
+      try {
+        const saved = localStorage.getItem("sub_overlay_pos");
+        if (saved) return JSON.parse(saved);
+      } catch {}
+      return null;
+    },
+  );
+
+  const isDraggingSubRef = useRef<boolean>(false);
+  const subHasMovedRef = useRef<boolean>(false);
+  const dragStartSubRef = useRef<{
+    pointerStartX: number;
+    pointerStartY: number;
+    initialCenterX: number;
+    initialCenterY: number;
+    containerWidth: number;
+    containerHeight: number;
+    boxWidth: number;
+    boxHeight: number;
+  } | null>(null);
+
+  const handleSubPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      const container = playerContainerRef.current;
+      if (!container) return;
+
+      e.stopPropagation();
+      const containerRect = container.getBoundingClientRect();
+      const boxRect = e.currentTarget.getBoundingClientRect();
+
+      const initialCenterX =
+        boxRect.left + boxRect.width / 2 - containerRect.left;
+      const initialCenterY =
+        boxRect.top + boxRect.height / 2 - containerRect.top;
+
+      dragStartSubRef.current = {
+        pointerStartX: e.clientX,
+        pointerStartY: e.clientY,
+        initialCenterX,
+        initialCenterY,
+        containerWidth: containerRect.width,
+        containerHeight: containerRect.height,
+        boxWidth: boxRect.width,
+        boxHeight: boxRect.height,
+      };
+      isDraggingSubRef.current = true;
+      subHasMovedRef.current = false;
+      try {
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      } catch {}
+    },
+    [],
+  );
+
+  const handleSubPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isDraggingSubRef.current || !dragStartSubRef.current) return;
+      e.stopPropagation();
+
+      const {
+        pointerStartX,
+        pointerStartY,
+        initialCenterX,
+        initialCenterY,
+        containerWidth,
+        containerHeight,
+        boxWidth,
+        boxHeight,
+      } = dragStartSubRef.current;
+
+      const deltaX = e.clientX - pointerStartX;
+      const deltaY = e.clientY - pointerStartY;
+
+      if (!subHasMovedRef.current && Math.hypot(deltaX, deltaY) < 3) {
+        return;
+      }
+      subHasMovedRef.current = true;
+
+      const newCenterX = initialCenterX + deltaX;
+      const newCenterY = initialCenterY + deltaY;
+
+      // Giới hạn để thanh phụ đề nằm trọn trong player
+      const halfW = boxWidth / 2;
+      const halfH = boxHeight / 2;
+      const clampedCenterX = Math.max(
+        halfW,
+        Math.min(containerWidth - halfW, newCenterX),
+      );
+      const clampedCenterY = Math.max(
+        halfH,
+        Math.min(containerHeight - halfH, newCenterY),
+      );
+
+      const xPct =
+        Math.round(((clampedCenterX / containerWidth) * 100) * 10) / 10;
+      const yPct =
+        Math.round(((clampedCenterY / containerHeight) * 100) * 10) / 10;
+
+      setSubPos({ xPct, yPct });
+    },
+    [],
+  );
+
+  const handleSubPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isDraggingSubRef.current) return;
+      e.stopPropagation();
+      isDraggingSubRef.current = false;
+      try {
+        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+      } catch {}
+
+      if (subHasMovedRef.current) {
+        setSubPos((current) => {
+          if (current) {
+            localStorage.setItem("sub_overlay_pos", JSON.stringify(current));
+          }
+          return current;
+        });
+      }
+    },
+    [],
+  );
+
+  const handleSubDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      setSubPos(null);
+      localStorage.removeItem("sub_overlay_pos");
+      showToast("Đã đưa vị trí phụ đề về mặc định (dưới cùng)");
+    },
+    [showToast],
+  );
 
   // Lưu danh sách thư mục gốc vào localStorage
   const saveFolderPaths = useCallback((roots: FolderNode[]) => {
@@ -1904,7 +2044,10 @@ export const App: React.FC = () => {
         )}
 
         {/* Video Player Box */}
-        <div className="flex-1 flex items-center justify-center relative overflow-hidden">
+        <div
+          ref={playerContainerRef}
+          className="flex-1 flex items-center justify-center relative overflow-hidden"
+        >
           <video
             ref={videoRef}
             className="max-h-full max-w-full object-contain"
@@ -1978,27 +2121,56 @@ export const App: React.FC = () => {
             </div>
           )}
 
-          {/* Overlay phụ đề phong cách VLC (pointer-events-none) */}
+          {/* Overlay phụ đề phong cách VLC (Hỗ trợ kéo thả tự do bất kỳ vị trí nào) */}
           {currentSubtitle && subtitleMode !== "off" && (
-            <div className="absolute bottom-16 left-0 right-0 pointer-events-none flex flex-col items-center px-8 z-20">
-              <div className="bg-black/75 px-4 py-2 rounded-lg max-w-3xl text-center shadow-lg backdrop-blur-sm border border-white/5 space-y-1">
-                {(subtitleMode === "en" || subtitleMode === "bilingual") && (
-                  <div className="text-neutral-300 text-sm md:text-base font-medium drop-shadow leading-relaxed">
-                    {currentSubtitle.source_text}
-                  </div>
-                )}
-                {(subtitleMode === "vi" || subtitleMode === "bilingual") &&
-                  (currentSubtitle.target_text ? (
-                    <div className="text-amber-300 text-base md:text-lg font-bold drop-shadow leading-relaxed">
-                      {currentSubtitle.target_text}
-                    </div>
-                  ) : subtitleMode === "vi" ? (
-                    <div className="text-neutral-400 text-sm md:text-base italic drop-shadow flex items-center justify-center gap-1.5">
-                      <span className="inline-block w-2 h-2 rounded-full bg-amber-400/60 animate-pulse" />
-                      <span>{currentSubtitle.source_text}</span>
-                    </div>
-                  ) : null)}
+            <div
+              onPointerDown={handleSubPointerDown}
+              onPointerMove={handleSubPointerMove}
+              onPointerUp={handleSubPointerUp}
+              onPointerCancel={handleSubPointerUp}
+              onDoubleClick={handleSubDoubleClick}
+              style={
+                subPos
+                  ? {
+                      position: "absolute",
+                      left: `${subPos.xPct}%`,
+                      top: `${subPos.yPct}%`,
+                      transform: "translate(-50%, -50%)",
+                      maxWidth: "min(48rem, calc(100% - 2rem))",
+                    }
+                  : {
+                      position: "absolute",
+                      left: "50%",
+                      bottom: "4rem",
+                      transform: "translateX(-50%)",
+                      maxWidth: "min(48rem, calc(100% - 2rem))",
+                    }
+              }
+              className="group/sub z-20 bg-black/80 hover:bg-black/90 px-5 py-2.5 rounded-xl text-center shadow-2xl backdrop-blur-md border border-white/10 hover:border-amber-400/40 transition-colors cursor-grab active:cursor-grabbing select-none pointer-events-auto touch-none space-y-1"
+              title="Kéo thả để di chuyển vị trí phụ đề • Nhấp đúp để đặt lại vị trí mặc định"
+            >
+              {/* Drag Handle Tooltip */}
+              <div className="absolute -top-3 left-1/2 -translate-x-1/2 opacity-0 group-hover/sub:opacity-100 transition-opacity flex items-center justify-center bg-neutral-900/95 border border-white/20 rounded-full px-2.5 py-0.5 text-[10px] text-neutral-300 pointer-events-none shadow-md whitespace-nowrap gap-1">
+                <GripHorizontal className="w-3.5 h-3.5 text-amber-400" />
+                <span>Kéo thả vị trí • Nhấp đúp đặt lại</span>
               </div>
+
+              {(subtitleMode === "en" || subtitleMode === "bilingual") && (
+                <div className="text-neutral-300 text-sm md:text-base font-medium drop-shadow leading-relaxed pointer-events-none">
+                  {currentSubtitle.source_text}
+                </div>
+              )}
+              {(subtitleMode === "vi" || subtitleMode === "bilingual") &&
+                (currentSubtitle.target_text ? (
+                  <div className="text-amber-300 text-base md:text-lg font-bold drop-shadow leading-relaxed pointer-events-none">
+                    {currentSubtitle.target_text}
+                  </div>
+                ) : subtitleMode === "vi" ? (
+                  <div className="text-neutral-400 text-sm md:text-base italic drop-shadow flex items-center justify-center gap-1.5 pointer-events-none">
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400/60 animate-pulse" />
+                    <span>{currentSubtitle.source_text}</span>
+                  </div>
+                ) : null)}
             </div>
           )}
         </div>
