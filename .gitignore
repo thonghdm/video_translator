@@ -45,6 +45,9 @@ tmp/
 *.log
 main.log
 llama.log
+telemetry/runs/
+telemetry/runs_s1/
+telemetry/*.jsonl
 
 # 7. Go Test Binaries & Coverage
 *.test

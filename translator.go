@@ -68,8 +68,7 @@ func SplitLinesIntoControlledBatches(lines []string, maxLines int, maxChars int)
 // FastHybridTranslator kết hợp dịch siêu tốc (~120ms/block, 0MB RAM LLM) và tự động fallback sang Local LLM (llama-server) khi offline
 type FastHybridTranslator struct {
 	client      *http.Client
-	cacheMu     sync.RWMutex
-	phraseCache map[string]string
+	phraseCache *LRUCache
 	fallbackMu  sync.Mutex
 	fallback    Translator
 	modelPath   string
@@ -84,7 +83,7 @@ func NewFastHybridTranslator(modelPath, serverExe, cliExe string) *FastHybridTra
 			Timeout:   5 * time.Second,
 			Transport: sharedHTTPTransport,
 		},
-		phraseCache: make(map[string]string, 512),
+		phraseCache: NewLRUCache(8000),
 		modelPath:   modelPath,
 		serverExe:   serverExe,
 		cliExe:      cliExe,
@@ -93,26 +92,33 @@ func NewFastHybridTranslator(modelPath, serverExe, cliExe string) *FastHybridTra
 
 func (f *FastHybridTranslator) getCached(line string) (string, bool) {
 	key := normalizePhraseKey(line)
-	if key == "" {
+	if key == "" || f.phraseCache == nil {
 		return "", false
 	}
-	f.cacheMu.RLock()
-	val, ok := f.phraseCache[key]
-	f.cacheMu.RUnlock()
-	return val, ok
+	return f.phraseCache.Get(key)
 }
 
 func (f *FastHybridTranslator) setCached(line, trans string) {
 	key := normalizePhraseKey(line)
-	if key == "" || trans == "" {
+	if key == "" || trans == "" || f.phraseCache == nil {
 		return
 	}
-	f.cacheMu.Lock()
-	if len(f.phraseCache) >= 8000 {
-		f.phraseCache = make(map[string]string, 512)
+	f.phraseCache.Set(key, trans)
+}
+
+// FallbackLoaded cho biết fallback Local LLM đã được khởi động hay chưa
+func (f *FastHybridTranslator) FallbackLoaded() bool {
+	f.fallbackMu.Lock()
+	defer f.fallbackMu.Unlock()
+	return f.fallback != nil
+}
+
+// CacheStats trả về thống kê cache hit, miss, evict, size
+func (f *FastHybridTranslator) CacheStats() (hits, misses, evicts int64, size int) {
+	if f.phraseCache == nil {
+		return 0, 0, 0, 0
 	}
-	f.phraseCache[key] = trans
-	f.cacheMu.Unlock()
+	return f.phraseCache.Stats()
 }
 
 func (f *FastHybridTranslator) getOrInitFallback() (Translator, error) {
@@ -308,8 +314,7 @@ type LlamaServerTranslator struct {
 	port        int
 	client      *http.Client
 	mu          sync.Mutex
-	cacheMu     sync.RWMutex
-	phraseCache map[string]string
+	phraseCache *LRUCache
 	isClosed    bool
 }
 
@@ -325,10 +330,7 @@ func (s *LlamaServerTranslator) getCachedPhrase(line string) (string, bool) {
 	if key == "" {
 		return "", false
 	}
-	s.cacheMu.RLock()
-	val, ok := s.phraseCache[key]
-	s.cacheMu.RUnlock()
-	return val, ok
+	return s.phraseCache.Get(key)
 }
 
 func (s *LlamaServerTranslator) setCachedPhrase(line, translated string) {
@@ -339,13 +341,7 @@ func (s *LlamaServerTranslator) setCachedPhrase(line, translated string) {
 	if key == "" {
 		return
 	}
-	s.cacheMu.Lock()
-	if len(s.phraseCache) >= 5000 {
-		// Làm mới khi đạt ngưỡng 5000 câu để giới hạn RAM < 500KB
-		s.phraseCache = make(map[string]string, 512)
-	}
-	s.phraseCache[key] = translated
-	s.cacheMu.Unlock()
+	s.phraseCache.Set(key, translated)
 }
 
 // getFreePort tìm cổng mạng nội bộ ngẫu nhiên đang trống
@@ -408,7 +404,7 @@ func NewLlamaServerTranslator(modelPath, serverExe string, threads int) (*LlamaS
 			Timeout:   30 * time.Second,
 			Transport: sharedHTTPTransport,
 		},
-		phraseCache: make(map[string]string, 256),
+		phraseCache: NewLRUCache(5000),
 	}
 
 	// Đợi server sẵn sàng (poll /health trong tối đa 20 giây)

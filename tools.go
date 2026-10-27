@@ -117,7 +117,6 @@ func (t *ToolsPaths) RefreshModelPaths() {
 	}
 }
 
-
 // getSafeASCIITempDir tìm kiếm thư mục tạm có đường dẫn ASCII an toàn
 func getSafeASCIITempDir() string {
 	candidates := []string{
@@ -173,9 +172,10 @@ func CheckTools() []string {
 
 // RunCommandResult lưu kết quả thực thi
 type RunCommandResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
+	Stdout     string
+	Stderr     string
+	FullStderr string
+	ExitCode   int
 }
 
 // splitCRLF là SplitFunc cho bufio.Scanner để tách theo cả \r và \n (cần thiết cho ffmpeg)
@@ -243,6 +243,7 @@ func RunCommand(ctx context.Context, bin string, args []string, timeout time.Dur
 
 	// Đọc stderr real-time và lưu lại vài dòng cuối
 	var recentStderrLines []string
+	var fullStderrBuf bytes.Buffer
 	var recentMu sync.Mutex
 
 	scanner := bufio.NewScanner(stderrPipe)
@@ -258,6 +259,8 @@ func RunCommand(ctx context.Context, bin string, args []string, timeout time.Dur
 				onStderrLine(line)
 			}
 			recentMu.Lock()
+			fullStderrBuf.WriteString(line)
+			fullStderrBuf.WriteByte('\n')
 			recentStderrLines = append(recentStderrLines, line)
 			if len(recentStderrLines) > 10 {
 				recentStderrLines = recentStderrLines[1:]
@@ -270,6 +273,7 @@ func RunCommand(ctx context.Context, bin string, args []string, timeout time.Dur
 
 	recentMu.Lock()
 	recentStderr := strings.Join(recentStderrLines, "\n")
+	fullStderr := fullStderrBuf.String()
 	recentMu.Unlock()
 
 	exitCode := 0
@@ -282,29 +286,33 @@ func RunCommand(ctx context.Context, bin string, args []string, timeout time.Dur
 
 		if cmdCtx.Err() == context.DeadlineExceeded {
 			return &RunCommandResult{
-				Stdout:   stdoutBuf.String(),
-				Stderr:   recentStderr,
-				ExitCode: exitCode,
+				Stdout:     stdoutBuf.String(),
+				Stderr:     recentStderr,
+				FullStderr: fullStderr,
+				ExitCode:   exitCode,
 			}, fmt.Errorf("tiến trình %s bị timeout sau %v: %s", filepath.Base(bin), timeout, recentStderr)
 		}
 		if cmdCtx.Err() == context.Canceled {
 			return &RunCommandResult{
-				Stdout:   stdoutBuf.String(),
-				Stderr:   recentStderr,
-				ExitCode: exitCode,
+				Stdout:     stdoutBuf.String(),
+				Stderr:     recentStderr,
+				FullStderr: fullStderr,
+				ExitCode:   exitCode,
 			}, fmt.Errorf("tiến trình %s bị hủy: %w", filepath.Base(bin), context.Canceled)
 		}
 
 		return &RunCommandResult{
-			Stdout:   stdoutBuf.String(),
-			Stderr:   recentStderr,
-			ExitCode: exitCode,
+			Stdout:     stdoutBuf.String(),
+			Stderr:     recentStderr,
+			FullStderr: fullStderr,
+			ExitCode:   exitCode,
 		}, fmt.Errorf("tiến trình %s thoát mã lỗi %d: %s", filepath.Base(bin), exitCode, recentStderr)
 	}
 
 	return &RunCommandResult{
-		Stdout:   stdoutBuf.String(),
-		Stderr:   recentStderr,
-		ExitCode: 0,
+		Stdout:     stdoutBuf.String(),
+		Stderr:     recentStderr,
+		FullStderr: fullStderr,
+		ExitCode:   0,
 	}, nil
 }
