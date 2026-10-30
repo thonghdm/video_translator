@@ -200,13 +200,14 @@ func (p *Pipeline) emitStatus(block int) {
 	aheadSec := p.computeAheadSecLocked()
 
 	status := PipelineStatus{
-		State:       p.state,
-		Message:     fmt.Sprintf("Trạng thái: %s", p.state),
-		Block:       block,
-		DoneBlocks:  doneBlocks,
-		TotalBlocks: totalBlocks,
-		AheadSec:    aheadSec,
-		Video:       p.videoPath,
+		State:          p.state,
+		Message:        fmt.Sprintf("Trạng thái: %s", p.state),
+		Block:          block,
+		DoneBlocks:     doneBlocks,
+		TotalBlocks:    totalBlocks,
+		AheadSec:       aheadSec,
+		Video:          p.videoPath,
+		TranslatorMode: p.currentTranslatorMode(),
 	}
 
 	if p.callbacks.OnStatus != nil {
@@ -390,6 +391,14 @@ func (p *Pipeline) stopCurrentSessionLocked() (int64, int64) {
 	// Xóa danh sách activeJobs
 	p.activeJobs = make(map[int]bool)
 	return computeDrainMs, wgDrainMs
+}
+
+// currentTranslatorMode trả về "api" hoặc "local_ai" để báo cáo lên giao diện người dùng
+func (p *Pipeline) currentTranslatorMode() string {
+	if m, ok := p.translator.(interface{ CurrentMode() string }); ok {
+		return m.CurrentMode()
+	}
+	return "api"
 }
 
 // translatorLabel cho biết bộ dịch đang dùng: "fastgtx" hoặc "fastgtx+llama_loaded" nếu fallback LLM đã được khởi động
@@ -987,26 +996,23 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 
 			okCount := 0
 			if p.translator != nil && len(job.Items) > 0 {
-				batches := BuildTwoTierBatches(job.Items, curPlayhead, isTier1Block)
+				batches, nTier1 := BuildTwoTierBatches(job.Items, curPlayhead, isTier1Block)
 
 				for bIdx, indices := range batches {
 					if ctx.Err() != nil {
 						return
 					}
 
-					// Ở Tier 2 (Low Priority), nhường nhịp nhỏ giữa các batch nền để tránh dồn request (dùng timer có drain sạch)
-					if !isTier1Block && bIdx > 0 && p.MockRunSTT == nil {
-						timer := time.NewTimer(25 * time.Millisecond)
-						select {
-						case <-ctx.Done():
-							if !timer.Stop() {
-								select {
-								case <-timer.C:
-								default:
-								}
+					// Pacing theo từng batch: các batch Tier-2 (bIdx >= nTier1) nhường nhịp nghỉ có jitter để chống burst
+					if bIdx >= nTier1 {
+						// Nếu đang ở chế độ local_ai: bỏ qua Tier-2 để dành 100% tài nguyên CPU/GPU cho Whisper STT và phụ đề Tier-1
+						if p.currentTranslatorMode() == "local_ai" {
+							break
+						}
+						if bIdx > 0 && p.MockRunSTT == nil {
+							if !sleepCtx(ctx, jitter(300*time.Millisecond)) {
+								return
 							}
-							return
-						case <-timer.C:
 						}
 					}
 
@@ -1016,7 +1022,7 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 					}
 
 					tBatch0 := time.Now()
-					targets, err := p.translator.TranslateBatch(ctx, batchLines)
+					targets, _ := p.translator.TranslateBatch(ctx, batchLines)
 					batchMs := time.Since(tBatch0).Milliseconds()
 
 					if ctx.Err() != nil {
@@ -1030,7 +1036,8 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 					updatedSlice := make([]SubtitleItem, 0, len(indices))
 					batchOnTime := int64(0)
 					for k, itemIdx := range indices {
-						if err == nil && k < len(targets) && targets[k] != "" {
+						// Giữ kết quả dịch ngay cả khi err != nil (targets vẫn chứa các dòng lấy từ cache)
+						if k < len(targets) && targets[k] != "" {
 							translatedItems[itemIdx].TargetText = targets[k]
 							translatedItems[itemIdx].Translated = true
 							okCount++
@@ -1163,65 +1170,47 @@ func (p *Pipeline) handleBlockFailure(blockIdx int, stage string, err error) {
 
 // BuildTwoTierBatches chia danh sách câu trong block theo mô hình Two-Tier Lookahead:
 // - Tier 1 (High Priority): Ưu tiên gom cụm nhỏ (tối đa 3 câu / 240 ký tự) cho các câu nằm trong vùng [playheadSec - 1s, playheadSec + 15s] để hiển thị tức thì.
-// - Tier 2 (Low Priority): Gom các câu còn lại thành các batch lớn (tối đa 8 câu / 600 ký tự) để tối ưu số lượng request HTTP.
-func BuildTwoTierBatches(items []SubtitleItem, playheadSec float64, isTier1Block bool) [][]int {
+// - Tier 2 (Low Priority): Các câu phía trước (ahead) dịch trước, các câu đã qua (behind) dịch sau. Giảm batch còn 5 câu / 400 ký tự để giảm tỉ lệ lệch dòng.
+// Trả về: danh sách batches và nTier1 (số lượng batch Tier-1 đầu tiên).
+func BuildTwoTierBatches(items []SubtitleItem, playheadSec float64, isTier1Block bool) (batches [][]int, nTier1 int) {
 	if len(items) == 0 {
-		return nil
+		return nil, 0
 	}
 
-	var tier1Indices []int
-	var tier2Indices []int
+	var tier1, ahead, behind []int
+	for i, it := range items {
+		switch {
+		case isTier1Block && it.EndSec >= playheadSec-1.0 && it.StartSec <= playheadSec+15.0:
+			tier1 = append(tier1, i)
+		case isTier1Block && it.EndSec < playheadSec-1.0:
+			behind = append(behind, i)
+		default:
+			ahead = append(ahead, i)
+		}
+	}
+	tier2 := append(ahead, behind...)
 
-	if isTier1Block {
-		for i, it := range items {
-			// Các câu sắp phát trong vòng 15 giây tới tính từ playhead được đưa vào Tier 1
-			if it.EndSec >= playheadSec-1.0 && it.StartSec <= playheadSec+15.0 {
-				tier1Indices = append(tier1Indices, i)
-			} else {
-				tier2Indices = append(tier2Indices, i)
+	pack := func(idxs []int, maxLines, maxChars int) {
+		if len(idxs) == 0 {
+			return
+		}
+		lines := make([]string, len(idxs))
+		for k, i := range idxs {
+			lines[k] = items[i].SourceText
+		}
+		for _, sb := range SplitLinesIntoControlledBatches(lines, maxLines, maxChars) {
+			real := make([]int, len(sb))
+			for k, local := range sb {
+				real[k] = idxs[local]
 			}
-		}
-	} else {
-		for i := range items {
-			tier2Indices = append(tier2Indices, i)
+			batches = append(batches, real)
 		}
 	}
 
-	var result [][]int
-
-	// 1. Chia batch cho Tier 1: batch đầu tiên cực gọn (tối đa 3 câu / 240 ký tự) để trả kết quả nhanh nhất
-	if len(tier1Indices) > 0 {
-		tier1Lines := make([]string, len(tier1Indices))
-		for k, idx := range tier1Indices {
-			tier1Lines[k] = items[idx].SourceText
-		}
-		subBatches := SplitLinesIntoControlledBatches(tier1Lines, 3, 240)
-		for _, sb := range subBatches {
-			mapped := make([]int, len(sb))
-			for k, relIdx := range sb {
-				mapped[k] = tier1Indices[relIdx]
-			}
-			result = append(result, mapped)
-		}
-	}
-
-	// 2. Chia batch cho Tier 2: gom tối đa 8 câu hoặc 600 ký tự mỗi request
-	if len(tier2Indices) > 0 {
-		tier2Lines := make([]string, len(tier2Indices))
-		for k, idx := range tier2Indices {
-			tier2Lines[k] = items[idx].SourceText
-		}
-		subBatches := SplitLinesIntoControlledBatches(tier2Lines, 8, 600)
-		for _, sb := range subBatches {
-			mapped := make([]int, len(sb))
-			for k, relIdx := range sb {
-				mapped[k] = tier2Indices[relIdx]
-			}
-			result = append(result, mapped)
-		}
-	}
-
-	return result
+	pack(tier1, 3, 240)
+	nTier1 = len(batches)
+	pack(tier2, 5, 400)
+	return batches, nTier1
 }
 
 func (p *Pipeline) recordBatchMetrics(latencyMs int64, onTime int64, total int64) {

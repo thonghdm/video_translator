@@ -70,6 +70,7 @@ interface PipelineStatus {
   total_blocks: number;
   ahead_sec: number;
   video: string;
+  translator_mode?: "api" | "local_ai";
 }
 
 export interface FolderNode {
@@ -2153,6 +2154,35 @@ export const App: React.FC = () => {
               <div className="absolute -top-3 left-1/2 -translate-x-1/2 opacity-0 group-hover/sub:opacity-100 transition-opacity flex items-center justify-center bg-neutral-900/95 border border-white/20 rounded-full px-2.5 py-0.5 text-[10px] text-neutral-300 pointer-events-none shadow-md whitespace-nowrap gap-1">
                 <GripHorizontal className="w-3.5 h-3.5 text-amber-400" />
                 <span>Kéo thả vị trí • Nhấp đúp đặt lại</span>
+              </div>
+
+              {/* Indicator loại dịch: Chấm màu nhỏ báo hiệu API vs Local AI */}
+              <div
+                className="absolute -top-2 right-2.5 flex items-center gap-1 bg-black/85 border border-white/10 rounded-full px-1.5 py-0.5 text-[9px] pointer-events-none shadow-sm"
+                title={
+                  pipelineStatus?.translator_mode === "local_ai"
+                    ? "Dịch bằng Local AI Qwen 2.5 (Offline)"
+                    : "Dịch bằng API Google Cloud siêu tốc"
+                }
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    pipelineStatus?.translator_mode === "local_ai"
+                      ? "bg-purple-400 shadow-[0_0_6px_rgba(192,132,252,0.9)] animate-pulse"
+                      : "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]"
+                  }`}
+                />
+                <span
+                  className={`font-semibold text-[8px] uppercase tracking-wider ${
+                    pipelineStatus?.translator_mode === "local_ai"
+                      ? "text-purple-300"
+                      : "text-emerald-300"
+                  }`}
+                >
+                  {pipelineStatus?.translator_mode === "local_ai"
+                    ? "Local AI"
+                    : "API"}
+                </span>
               </div>
 
               {(subtitleMode === "en" || subtitleMode === "bilingual") && (

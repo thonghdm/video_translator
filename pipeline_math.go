@@ -1,12 +1,35 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// sleepCtx ngủ có hủy theo ctx
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// jitter thêm độ trễ ngẫu nhiên 0..50% để chống dồn sóng nhịp request
+func jitter(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	return base + time.Duration(rand.Int63n(int64(base/2)))
+}
 
 // BlockRange định nghĩa khoảng sở hữu và khoảng audio cắt của một block
 type BlockRange struct {

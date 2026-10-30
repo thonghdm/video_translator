@@ -170,9 +170,9 @@ func Test_TwoTierLookaheadBatches_And_Metrics(t *testing.T) {
 	}
 
 	// Giả sử người dùng vừa tua tới giây thứ 16.0 trong block [0..30s]
-	batches := BuildTwoTierBatches(items, 16.0, true)
-	if len(batches) != 2 {
-		t.Fatalf("Kỳ vọng 2 batch (Tier 1 trước, Tier 2 sau), nhận được %d", len(batches))
+	batches, nTier1 := BuildTwoTierBatches(items, 16.0, true)
+	if len(batches) != 2 || nTier1 != 1 {
+		t.Fatalf("Kỳ vọng 2 batch (Tier 1 trước, Tier 2 sau), nhận được len=%d, nTier1=%d", len(batches), nTier1)
 	}
 	// Batch đầu tiên phải là các câu tại Playhead (chỉ số 2, 3, 4)
 	if len(batches[0]) != 3 || batches[0][0] != 2 || batches[0][1] != 3 || batches[0][2] != 4 {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,7 +15,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+)
+
+var (
+	ErrRateLimited      = errors.New("gtx rate limited")
+	errEmptyTranslation = errors.New("empty translation")
 )
 
 // Translator là giao diện chuẩn cho các engine dịch thuật
@@ -67,13 +74,21 @@ func SplitLinesIntoControlledBatches(lines []string, maxLines int, maxChars int)
 
 // FastHybridTranslator kết hợp dịch siêu tốc (~120ms/block, 0MB RAM LLM) và tự động fallback sang Local LLM (llama-server) khi offline
 type FastHybridTranslator struct {
-	client      *http.Client
-	phraseCache *LRUCache
-	fallbackMu  sync.Mutex
-	fallback    Translator
-	modelPath   string
-	serverExe   string
-	cliExe      string
+	client          *http.Client
+	phraseCache     *LRUCache
+	fallbackMu      sync.Mutex
+	fallback        Translator
+	modelPath       string
+	serverExe       string
+	cliExe          string
+	modeMu          sync.RWMutex
+	currentMode     string // "api" | "local_ai"
+	gtxBlockedUntil atomic.Int64 // unix nano; 0 = không bị khóa
+	gtxProbing      atomic.Bool  // half-open: chỉ 1 request được thử lại
+	gtxFails        atomic.Int32 // số lỗi thường liên tiếp
+	gtxBackoffStep  atomic.Int32 // số lần bị rate limit liên tiếp để tăng dần cooldown (10m, 20m, 40m, max 1h)
+	fbFailUntil     atomic.Int64 // không thử init Qwen lại trước mốc này
+	mismatchCount   atomic.Int64 // số lần batch bị lệch dòng phải dịch từng dòng
 }
 
 // NewFastHybridTranslator khởi tạo bộ dịch lai siêu tốc (tiết kiệm 1.2GB RAM khi có mạng, tự bật Local LLM khi offline)
@@ -87,7 +102,27 @@ func NewFastHybridTranslator(modelPath, serverExe, cliExe string) *FastHybridTra
 		modelPath:   modelPath,
 		serverExe:   serverExe,
 		cliExe:      cliExe,
+		currentMode: "api",
 	}
+}
+
+// CurrentMode trả về loại dịch đang hoạt động: "api" (Google GTX) hoặc "local_ai" (Qwen Local LLM)
+func (f *FastHybridTranslator) CurrentMode() string {
+	if !f.gtxAllowed() {
+		return "local_ai"
+	}
+	f.modeMu.RLock()
+	defer f.modeMu.RUnlock()
+	if f.currentMode == "" {
+		return "api"
+	}
+	return f.currentMode
+}
+
+func (f *FastHybridTranslator) setMode(m string) {
+	f.modeMu.Lock()
+	f.currentMode = m
+	f.modeMu.Unlock()
 }
 
 func (f *FastHybridTranslator) getCached(line string) (string, bool) {
@@ -128,6 +163,10 @@ func (f *FastHybridTranslator) getOrInitFallback() (Translator, error) {
 	if f.fallback != nil {
 		return f.fallback, nil
 	}
+	// Kiểm tra cooldown lỗi ngay sau khi lấy lock (chống đàn goroutine cùng thử load)
+	if time.Now().UnixNano() < f.fbFailUntil.Load() {
+		return nil, errors.New("fallback unavailable (init failed recently)")
+	}
 
 	var trans Translator
 	var err error
@@ -140,6 +179,7 @@ func (f *FastHybridTranslator) getOrInitFallback() (Translator, error) {
 		trans, err = NewLlamaCliTranslator(f.modelPath, f.cliExe)
 	}
 	if err != nil {
+		f.fbFailUntil.Store(time.Now().Add(2 * time.Minute).UnixNano())
 		return nil, err
 	}
 	f.fallback = trans
@@ -159,17 +199,21 @@ func (f *FastHybridTranslator) translateFastGTX(ctx context.Context, text string
 		return "", err
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case 429, 403, 503:
+		return "", fmt.Errorf("%w: HTTP %d", ErrRateLimited, resp.StatusCode)
+	default:
 		return "", fmt.Errorf("fast translate HTTP %d", resp.StatusCode)
 	}
 
 	var raw []interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: non-JSON response: %v", ErrRateLimited, err)
 	}
 	if len(raw) == 0 {
 		return "", fmt.Errorf("empty response")
@@ -191,25 +235,124 @@ func (f *FastHybridTranslator) translateFastGTX(ctx context.Context, text string
 	return strings.TrimSpace(sb.String()), nil
 }
 
-func (f *FastHybridTranslator) Translate(ctx context.Context, line string, prevContext []string) (string, error) {
-	trimmed := strings.TrimSpace(line)
-	if isIgnoredSubtitle(trimmed) {
-		return "", nil
+func (f *FastHybridTranslator) gtxAllowed() bool {
+	until := f.gtxBlockedUntil.Load()
+	if until == 0 {
+		return true
 	}
-	if cached, ok := f.getCached(trimmed); ok {
-		return cached, nil
+	if time.Now().UnixNano() < until {
+		return false
+	}
+	// Hết cooldown: chỉ 1 goroutine được thử lại (half-open)
+	return f.gtxProbing.CompareAndSwap(false, true)
+}
+
+func (f *FastHybridTranslator) gtxReport(err error) {
+	f.gtxProbing.Store(false)
+	switch {
+	case err == nil:
+		f.gtxFails.Store(0)
+		f.gtxBlockedUntil.Store(0)
+		f.gtxBackoffStep.Store(0)
+	case errors.Is(err, context.Canceled), errors.Is(err, errEmptyTranslation):
+		// Tua video hoặc câu dịch rỗng: không phải lỗi của Google
+	case errors.Is(err, ErrRateLimited):
+		// Bị Google rate limit / captcha: Khóa Google với exponential backoff (10m -> 20m -> 40m -> max 1h)
+		step := f.gtxBackoffStep.Add(1)
+		dur := 10 * time.Minute * time.Duration(1<<(step-1))
+		if dur > 1*time.Hour || dur <= 0 {
+			dur = 1 * time.Hour
+		}
+		f.gtxBlockedUntil.Store(time.Now().Add(dur).UnixNano())
+	default: // Lỗi mạng/timeout: 3 lần liên tiếp mới khóa ngắn 2 phút
+		if f.gtxFails.Add(1) >= 3 {
+			f.gtxBlockedUntil.Store(time.Now().Add(2 * time.Minute).UnixNano())
+			f.gtxFails.Store(0)
+		}
+	}
+}
+
+func (f *FastHybridTranslator) viaGoogle(ctx context.Context, lines []string) ([]string, error) {
+	if !f.gtxAllowed() {
+		return nil, fmt.Errorf("%w: breaker open", ErrRateLimited)
+	}
+	out, err := f.googleBatchOrPerLine(ctx, lines)
+	f.gtxReport(err)
+	return out, err
+}
+
+func (f *FastHybridTranslator) googleBatchOrPerLine(ctx context.Context, lines []string) ([]string, error) {
+	batchOut, err := f.translateFastGTX(ctx, strings.Join(lines, "\n"))
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Split(batchOut, "\n")
+	if len(parts) == len(lines) {
+		ok := true
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+			if parts[i] == "" {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return parts, nil
+		}
 	}
 
-	if out, err := f.translateFastGTX(ctx, trimmed); err == nil && out != "" {
-		f.setCached(trimmed, out)
-		return out, nil
-	}
+	// Đo tỉ lệ lệch dòng
+	f.mismatchCount.Add(1)
 
+	// Lệch dòng: dịch từng dòng có nhịp nghỉ (chống burst)
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		if i > 0 && !sleepCtx(ctx, jitter(150*time.Millisecond)) {
+			return nil, ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s, err := f.translateFastGTX(ctx, l)
+		if err != nil {
+			return nil, err
+		}
+		if s == "" {
+			return nil, errEmptyTranslation
+		}
+		out[i] = s
+	}
+	return out, nil
+}
+
+func (f *FastHybridTranslator) viaFallback(ctx context.Context, lines []string) ([]string, error) {
+	if time.Now().UnixNano() < f.fbFailUntil.Load() {
+		return nil, errors.New("fallback unavailable (init failed recently)")
+	}
 	fb, err := f.getOrInitFallback()
+	if err != nil {
+		f.fbFailUntil.Store(time.Now().Add(2 * time.Minute).UnixNano())
+		return nil, err
+	}
+	out, err := fb.TranslateBatch(ctx, lines)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) != len(lines) { // Tránh lệch phụ đề
+		return nil, fmt.Errorf("fallback returned %d lines, want %d", len(out), len(lines))
+	}
+	return out, nil
+}
+
+func (f *FastHybridTranslator) Translate(ctx context.Context, line string, _ []string) (string, error) {
+	out, err := f.TranslateBatch(ctx, []string{line})
 	if err != nil {
 		return "", err
 	}
-	return fb.Translate(ctx, trimmed, prevContext)
+	if len(out) > 0 {
+		return out[0], nil
+	}
+	return "", nil
 }
 
 func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
@@ -218,84 +361,59 @@ func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []strin
 	}
 
 	results := make([]string, len(lines))
-	var uncachedLines []string
-	var uncachedIdx []int
+	var todo []string
+	var idx []int
 
 	for i, l := range lines {
-		trimmed := strings.TrimSpace(l)
-		if isIgnoredSubtitle(trimmed) {
+		t := strings.Join(strings.Fields(l), " ") // Bỏ "\n" nội bộ để không phá ánh xạ
+		if t == "" || isIgnoredSubtitle(t) {
 			continue
 		}
-		if cached, ok := f.getCached(trimmed); ok {
-			results[i] = cached
-		} else {
-			uncachedLines = append(uncachedLines, trimmed)
-			uncachedIdx = append(uncachedIdx, i)
+		if c, ok := f.getCached(t); ok {
+			results[i] = c
+			continue
 		}
+		todo = append(todo, t)
+		idx = append(idx, i)
 	}
-
-	if len(uncachedLines) == 0 {
+	if len(todo) == 0 {
 		return results, nil
 	}
 
-	// Gộp toàn bộ câu trong batch bằng ký tự xuống dòng \n (Google Translate bảo toàn \n giữa các đoạn 100%, không bị biến dạng như ký tự đặc biệt)
-	joined := strings.Join(uncachedLines, "\n")
-	if batchOut, err := f.translateFastGTX(ctx, joined); err == nil && batchOut != "" {
-		splitOut := strings.Split(batchOut, "\n")
-		if len(splitOut) == len(uncachedLines) {
-			valid := true
-			for _, part := range splitOut {
-				if strings.TrimSpace(part) == "" {
-					valid = false
-					break
-				}
+	fill := func(out []string) {
+		for j, i := range idx {
+			if out[j] == "" {
+				continue
 			}
-			if valid {
-				for j, origIdx := range uncachedIdx {
-					cleaned := strings.TrimSpace(splitOut[j])
-					f.setCached(uncachedLines[j], cleaned)
-					results[origIdx] = cleaned
-				}
-				return results, nil
-			}
-		}
-
-		// Fallback dòng-bởi-dòng nếu delimiter bị nuốt hoặc lệch
-		// Nếu phát hiện HTTP 429 hoặc lỗi mạng, chuyển ngay sang Local LLM không spam API
-		allOk := true
-		for j, origIdx := range uncachedIdx {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			singleOut, sErr := f.translateFastGTX(ctx, uncachedLines[j])
-			if sErr == nil && singleOut != "" {
-				f.setCached(uncachedLines[j], singleOut)
-				results[origIdx] = singleOut
-			} else {
-				allOk = false
-				break
-			}
-		}
-		if allOk {
-			return results, nil
+			results[i] = out[j]
+			f.setCached(todo[j], out[j])
 		}
 	}
 
-	// Fallback sang Local LLM (llama-server / llama-cli) nếu mất kết nối mạng
-	fb, err := f.getOrInitFallback()
-	if err != nil {
-		return results, err
-	}
-	fbRes, err := fb.TranslateBatch(ctx, uncachedLines)
+	out, err := f.viaGoogle(ctx, todo)
 	if err == nil {
-		for j, origIdx := range uncachedIdx {
-			if j < len(fbRes) && fbRes[j] != "" {
-				f.setCached(uncachedLines[j], fbRes[j])
-				results[origIdx] = fbRes[j]
-			}
+		f.setMode("api")
+		fill(out)
+		return results, nil
+	}
+
+	// QUAN TRỌNG: tua video / hủy context thì dừng ngay, không đánh thức Qwen vô ích
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, cerr
+	}
+
+	out, ferr := f.viaFallback(ctx, todo)
+	if ferr != nil {
+		return results, ferr // results vẫn chứa các dòng lấy từ cache
+	}
+	f.setMode("local_ai")
+	for j, i := range idx {
+		if j < len(out) && out[j] != "" {
+			results[i] = out[j]
+			// Không cache kết quả Qwen vào phraseCache vĩnh viễn để khi Google hồi phục có thể dịch lại chất lượng cao hơn
 		}
 	}
-	return results, err
+	return results, nil
 }
 
 func (f *FastHybridTranslator) Close() error {
@@ -319,7 +437,7 @@ type LlamaServerTranslator struct {
 }
 
 func normalizePhraseKey(s string) string {
-	return strings.ToLower(strings.TrimSpace(s))
+	return strings.TrimSpace(s)
 }
 
 func (s *LlamaServerTranslator) getCachedPhrase(line string) (string, bool) {
