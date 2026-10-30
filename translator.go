@@ -83,6 +83,8 @@ type FastHybridTranslator struct {
 	cliExe          string
 	modeMu          sync.RWMutex
 	currentMode     string // "api" | "local_ai"
+	fallbackReady   atomic.Bool  // true khi Qwen fallback đã nạp thành công
+	modelOK         bool         // true nếu file model tồn tại trên đĩa (tính 1 lần khi khởi tạo)
 	gtxBlockedUntil atomic.Int64 // unix nano; 0 = không bị khóa
 	gtxProbing      atomic.Bool  // half-open: chỉ 1 request được thử lại
 	gtxFails        atomic.Int32 // số lỗi thường liên tiếp
@@ -93,6 +95,13 @@ type FastHybridTranslator struct {
 
 // NewFastHybridTranslator khởi tạo bộ dịch lai siêu tốc (tiết kiệm 1.2GB RAM khi có mạng, tự bật Local LLM khi offline)
 func NewFastHybridTranslator(modelPath, serverExe, cliExe string) *FastHybridTranslator {
+	modelOK := false
+	if modelPath != "" && (serverExe != "" || cliExe != "") {
+		if _, err := os.Stat(modelPath); err == nil {
+			modelOK = true
+		}
+	}
+
 	return &FastHybridTranslator{
 		client: &http.Client{
 			Timeout:   5 * time.Second,
@@ -102,14 +111,32 @@ func NewFastHybridTranslator(modelPath, serverExe, cliExe string) *FastHybridTra
 		modelPath:   modelPath,
 		serverExe:   serverExe,
 		cliExe:      cliExe,
+		modelOK:     modelOK,
 		currentMode: "api",
 	}
 }
 
-// CurrentMode trả về loại dịch đang hoạt động: "api" (Google GTX) hoặc "local_ai" (Qwen Local LLM)
+// isGtxBlocked chỉ đọc cờ khóa bằng atomic, tuyệt đối không dùng CAS làm tiêu tốn lượt probe
+func (f *FastHybridTranslator) isGtxBlocked() bool {
+	until := f.gtxBlockedUntil.Load()
+	return until != 0 && time.Now().UnixNano() < until
+}
+
+// isFallbackAvailable kiểm tra fallback Qwen đã sẵn sàng hoặc có file model hợp lệ để tải không (không lấy lock, không đụng disk I/O)
+func (f *FastHybridTranslator) isFallbackAvailable() bool {
+	if f.fallbackReady.Load() {
+		return true
+	}
+	return f.modelOK && time.Now().UnixNano() >= f.fbFailUntil.Load()
+}
+
+// CurrentMode trả về loại dịch đang hoạt động: "api" (Google GTX), "local_ai" (Qwen Local LLM), hoặc "offline"
 func (f *FastHybridTranslator) CurrentMode() string {
-	if !f.gtxAllowed() {
-		return "local_ai"
+	if f.isGtxBlocked() {
+		if f.isFallbackAvailable() {
+			return "local_ai"
+		}
+		return "offline"
 	}
 	f.modeMu.RLock()
 	defer f.modeMu.RUnlock()
@@ -183,6 +210,7 @@ func (f *FastHybridTranslator) getOrInitFallback() (Translator, error) {
 		return nil, err
 	}
 	f.fallback = trans
+	f.fallbackReady.Store(true)
 	return f.fallback, nil
 }
 
@@ -235,37 +263,59 @@ func (f *FastHybridTranslator) translateFastGTX(ctx context.Context, text string
 	return strings.TrimSpace(sb.String()), nil
 }
 
-func (f *FastHybridTranslator) gtxAllowed() bool {
+// allowGtxRequest kiểm tra và cấp quyền gọi Google.
+// Trả về: (allowed bool, isProbe bool).
+// Khi half-open (hết cooldown), duy nhất 1 goroutine nhận isProbe=true qua CAS.
+func (f *FastHybridTranslator) allowGtxRequest() (bool, bool) {
 	until := f.gtxBlockedUntil.Load()
 	if until == 0 {
-		return true
+		return true, false
 	}
 	if time.Now().UnixNano() < until {
-		return false
+		return false, false
 	}
-	// Hết cooldown: chỉ 1 goroutine được thử lại (half-open)
-	return f.gtxProbing.CompareAndSwap(false, true)
+	// Hết cooldown: chỉ đúng 1 goroutine nhận cờ probe thử lại (half-open)
+	if f.gtxProbing.CompareAndSwap(false, true) {
+		return true, true
+	}
+	return false, false
 }
 
-func (f *FastHybridTranslator) gtxReport(err error) {
-	f.gtxProbing.Store(false)
+// gtxReport cập nhật trạng thái breaker sau khi gọi Google.
+// Luôn giải phóng cờ probe (f.gtxProbing) ở mọi đường thoát qua defer.
+func (f *FastHybridTranslator) gtxReport(err error, isProbe bool) {
+	if isProbe {
+		defer f.gtxProbing.Store(false)
+	}
 	switch {
 	case err == nil:
 		f.gtxFails.Store(0)
-		f.gtxBlockedUntil.Store(0)
-		f.gtxBackoffStep.Store(0)
+		if isProbe {
+			// Chỉ reset breaker và backoff khi request probe thành công
+			// Tránh request cũ về muộn vô tình mở breaker sớm
+			f.gtxBlockedUntil.Store(0)
+			f.gtxBackoffStep.Store(0)
+		}
 	case errors.Is(err, context.Canceled), errors.Is(err, errEmptyTranslation):
 		// Tua video hoặc câu dịch rỗng: không phải lỗi của Google
 	case errors.Is(err, ErrRateLimited):
-		// Bị Google rate limit / captcha: Khóa Google với exponential backoff (10m -> 20m -> 40m -> max 1h)
+		// Bị Google rate limit / captcha: Khóa Google với exponential backoff 1m -> 2m -> 4m -> 8m -> max 10m
 		step := f.gtxBackoffStep.Add(1)
-		dur := 10 * time.Minute * time.Duration(1<<(step-1))
-		if dur > 1*time.Hour || dur <= 0 {
-			dur = 1 * time.Hour
+		if step > 6 {
+			f.gtxBackoffStep.Store(6)
+			step = 6
+		}
+		dur := 1 * time.Minute * time.Duration(1<<(step-1))
+		if dur > 10*time.Minute || dur <= 0 {
+			dur = 10 * time.Minute
 		}
 		f.gtxBlockedUntil.Store(time.Now().Add(dur).UnixNano())
-	default: // Lỗi mạng/timeout: 3 lần liên tiếp mới khóa ngắn 2 phút
-		if f.gtxFails.Add(1) >= 3 {
+	default: // Lỗi mạng/timeout
+		if isProbe {
+			// Probe thất bại: tiếp tục khóa 1 phút
+			f.gtxBlockedUntil.Store(time.Now().Add(1 * time.Minute).UnixNano())
+		} else if f.gtxFails.Add(1) >= 3 {
+			// 3 lần liên tiếp lỗi mạng khi chạy bình thường: khóa ngắn 2 phút
 			f.gtxBlockedUntil.Store(time.Now().Add(2 * time.Minute).UnixNano())
 			f.gtxFails.Store(0)
 		}
@@ -273,11 +323,12 @@ func (f *FastHybridTranslator) gtxReport(err error) {
 }
 
 func (f *FastHybridTranslator) viaGoogle(ctx context.Context, lines []string) ([]string, error) {
-	if !f.gtxAllowed() {
+	allowed, isProbe := f.allowGtxRequest()
+	if !allowed {
 		return nil, fmt.Errorf("%w: breaker open", ErrRateLimited)
 	}
 	out, err := f.googleBatchOrPerLine(ctx, lines)
-	f.gtxReport(err)
+	f.gtxReport(err, isProbe)
 	return out, err
 }
 
@@ -417,6 +468,7 @@ func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []strin
 }
 
 func (f *FastHybridTranslator) Close() error {
+	f.fallbackReady.Store(false)
 	f.fallbackMu.Lock()
 	defer f.fallbackMu.Unlock()
 	if f.fallback != nil {

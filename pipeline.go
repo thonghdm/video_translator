@@ -100,6 +100,7 @@ type Pipeline struct {
 	wakeSched        chan struct{}
 	failedBlocks     map[int]int // blockIdx -> retryCount
 	activeJobs       map[int]bool
+	tier2Deferred    map[int]bool // blockIdx -> đã xong Tier-1, tạm hoãn Tier-2 khi local_ai/offline
 	externalSegments []WhisperSegment
 
 	// Metrics đo p50/p95 latency và tỷ lệ phụ đề sẵn sàng trước thời điểm phát
@@ -178,6 +179,7 @@ func NewPipeline(
 		wakeSched:        make(chan struct{}, 1),
 		failedBlocks:     make(map[int]int),
 		activeJobs:       make(map[int]bool),
+		tier2Deferred:    make(map[int]bool),
 		externalSegments: extSegs,
 	}
 }
@@ -223,7 +225,7 @@ func (p *Pipeline) computeAheadSecLocked() float64 {
 	continuousDoneEnd := p.playheadSec
 
 	for b := curBlock; b < totalBlocks; b++ {
-		if p.blockStore.IsBlockDone(b) {
+		if p.blockStore.IsBlockDone(b) || (p.tier2Deferred[b] && p.isTier2PostponedMode()) {
 			bEnd := float64(b+1) * p.settings.BlockSec
 			if bEnd > p.durationSec {
 				bEnd = p.durationSec
@@ -306,6 +308,7 @@ func (p *Pipeline) SeekTo(startSec float64) error {
 
 	newSessionID := atomic.AddInt64(&p.sessionID, 1)
 	p.sessionBlockCount = 0
+	p.tier2Deferred = make(map[int]bool)
 	p.sessionCtx, p.cancelFunc = context.WithCancel(context.Background())
 	p.state = "seeking"
 
@@ -393,12 +396,24 @@ func (p *Pipeline) stopCurrentSessionLocked() (int64, int64) {
 	return computeDrainMs, wgDrainMs
 }
 
-// currentTranslatorMode trả về "api" hoặc "local_ai" để báo cáo lên giao diện người dùng
+// currentTranslatorMode trả về "api", "local_ai", hoặc "offline" để báo cáo lên giao diện người dùng
 func (p *Pipeline) currentTranslatorMode() string {
 	if m, ok := p.translator.(interface{ CurrentMode() string }); ok {
 		return m.CurrentMode()
 	}
 	return "api"
+}
+
+func (p *Pipeline) isTier2PostponedMode() bool {
+	m := p.currentTranslatorMode()
+	return m == "local_ai" || m == "offline"
+}
+
+func (p *Pipeline) isTranslatorBlocked() bool {
+	if h, ok := p.translator.(*FastHybridTranslator); ok {
+		return h.isGtxBlocked()
+	}
+	return false
 }
 
 // translatorLabel cho biết bộ dịch đang dùng: "fastgtx" hoặc "fastgtx+llama_loaded" nếu fallback LLM đã được khởi động
@@ -493,6 +508,10 @@ func (p *Pipeline) schedulerLoop(ctx context.Context, slicerChan chan<- SlicerJo
 		nextBlock := -1
 		for b := playheadBlock; b < totalBlocks; b++ {
 			if !p.blockStore.IsBlockDone(b) && !p.activeJobs[b] && p.failedBlocks[b] < 2 {
+				// Nếu block đã hoàn thành Tier-1 và đang hoãn Tier-2: không lặp vô tận khi vẫn ở chế độ hoãn
+				if p.tier2Deferred[b] && p.isTier2PostponedMode() {
+					continue
+				}
 				nextBlock = b
 				break
 			}
@@ -519,6 +538,9 @@ func (p *Pipeline) schedulerLoop(ctx context.Context, slicerChan chan<- SlicerJo
 		if nextBlock == -1 {
 			for b := 0; b < playheadBlock; b++ {
 				if !p.blockStore.IsBlockDone(b) && !p.activeJobs[b] && p.failedBlocks[b] < 2 {
+					if p.tier2Deferred[b] && p.isTier2PostponedMode() {
+						continue
+					}
 					nextBlock = b
 					isBackfill = true
 					break
@@ -1005,8 +1027,8 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 
 					// Pacing theo từng batch: các batch Tier-2 (bIdx >= nTier1) nhường nhịp nghỉ có jitter để chống burst
 					if bIdx >= nTier1 {
-						// Nếu đang ở chế độ local_ai: bỏ qua Tier-2 để dành 100% tài nguyên CPU/GPU cho Whisper STT và phụ đề Tier-1
-						if p.currentTranslatorMode() == "local_ai" {
+						// Nếu đang ở chế độ local_ai/offline: hoãn Tier-2 để dành 100% tài nguyên CPU/GPU cho Whisper STT và Tier-1
+						if p.isTier2PostponedMode() {
 							break
 						}
 						if bIdx > 0 && p.MockRunSTT == nil {
@@ -1069,10 +1091,31 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			}
 			transMs := time.Since(tTrans0).Milliseconds()
 
+			// Đếm tổng số câu có văn bản cần dịch trong block
+			hasTextCount := 0
+			for _, it := range job.Items {
+				if strings.TrimSpace(it.SourceText) != "" && !isIgnoredSubtitle(it.SourceText) {
+					hasTextCount++
+				}
+			}
+
+			// Nếu chưa dịch xong toàn bộ các câu có text VÀ đang ở chế độ hoãn (local_ai/offline):
+			// Đánh dấu hoãn block để scheduler không lặp lại vô ích (áp dụng cho cả hoãn Tier-2 lẫn lỗi Tier-1)
+			if okCount < hasTextCount && p.isTier2PostponedMode() {
+				p.mu.Lock()
+				p.tier2Deferred[job.BlockIdx] = true
+				p.mu.Unlock()
+			}
+
 			p50, p95, onTimePct := p.getMetricsSummary()
 			totalMs := job.SliceMs + job.SttMs + transMs
 			fmt.Printf("[BLOCK %d | %s] Slice: %dms | STT: %dms (%d lines) | Trans: %dms (%d/%d ok) | Batch p50=%dms p95=%dms | On-time: %.0f%% | Total: %dms\n",
 				job.BlockIdx, tierLabel, job.SliceMs, job.SttMs, len(job.Items), transMs, okCount, len(job.Items), p50, p95, onTimePct, totalMs)
+
+			if okCount == 0 && len(job.Items) > 0 {
+				log.Printf("[WARN] [BLOCK %d] Translation produced 0 successful lines out of %d items (mode=%s, blocked=%v)",
+					job.BlockIdx, len(job.Items), p.currentTranslatorMode(), p.isTranslatorBlocked())
+			}
 
 			// Lưu vào cache
 			_ = p.blockStore.SaveBlock(job.BlockIdx, translatedItems)
@@ -1127,6 +1170,9 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			})
 
 			p.mu.Lock()
+			if p.blockStore.IsBlockDone(job.BlockIdx) {
+				delete(p.tier2Deferred, job.BlockIdx)
+			}
 			delete(p.activeJobs, job.BlockIdx)
 			p.mu.Unlock()
 
