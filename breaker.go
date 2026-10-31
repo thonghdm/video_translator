@@ -142,11 +142,38 @@ func (cb *CircuitBreaker) Report(err error, isProbe bool) {
 		var rlErr *RateLimitError
 		if errors.As(err, &rlErr) && rlErr.RetryAfter > 0 {
 			dur := rlErr.RetryAfter
+			// Đặt sàn tối thiểu 15s để tránh breaker bị đóng-mở liên tục nếu Retry-After quá ngắn
+			if dur < 15*time.Second {
+				dur = 15 * time.Second
+			}
 			if dur > cb.config.MaxBackoff {
 				dur = cb.config.MaxBackoff
 			}
+
+			// Nếu là probe thất bại: bắt buộc tăng bậc backoff để không bị kẹt ở Retry-After ngắn
+			if isProbe {
+				step := cb.backoffStep.Add(1)
+				maxStep := cb.config.MaxBackoffStep
+				if step > maxStep {
+					cb.backoffStep.Store(maxStep)
+					step = maxStep
+				}
+				expDur := cb.config.BaseBackoff * time.Duration(1<<(step-1))
+				if expDur > cb.config.MaxBackoff || expDur <= 0 {
+					expDur = cb.config.MaxBackoff
+				}
+				if expDur > dur {
+					dur = expDur
+				}
+				cb.blockedUntil.Store(time.Now().Add(dur).UnixNano())
+				log.Printf("[CircuitBreaker] Probe thất bại theo Retry-After: bậc %d, thời lượng %v", step, dur)
+				return
+			}
+
+			// Khi bị khóa lần đầu từ trạng thái bình thường (closed)
+			cb.backoffStep.Store(1)
 			cb.blockedUntil.Store(time.Now().Add(dur).UnixNano())
-			log.Printf("[CircuitBreaker] Khóa breaker theo Retry-After: thời lượng %v", dur)
+			log.Printf("[CircuitBreaker] Khóa breaker theo Retry-After: bậc 1, thời lượng %v", dur)
 			return
 		}
 

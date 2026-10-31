@@ -194,7 +194,8 @@ type geminiCandidateContent struct {
 }
 
 type geminiCandidate struct {
-	Content geminiCandidateContent `json:"content"`
+	Content      geminiCandidateContent `json:"content"`
+	FinishReason string                 `json:"finishReason"`
 }
 
 type geminiResponse struct {
@@ -252,6 +253,7 @@ func (c *GeminiClient) Blocked() bool {
 }
 
 // TranslateLines dịch một danh sách câu qua Gemini Cloud.
+// Nếu số câu vượt quá MaxItemsPerCall, tự động chia nhỏ thành các chunk để không bao giờ cắt bỏ câu.
 // Tự động validate ID, retry 1 lần với riêng các ID thiếu, và trả về mảng kết quả đúng thứ tự.
 func (c *GeminiClient) TranslateLines(ctx context.Context, lines []string, contextLines []string, isTier1 bool) ([]string, error) {
 	if !c.cfg.Enabled || c.cfg.APIKey == "" {
@@ -261,6 +263,42 @@ func (c *GeminiClient) TranslateLines(ctx context.Context, lines []string, conte
 		return []string{}, nil
 	}
 
+	maxChunk := c.cfg.MaxItemsPerCall
+	if maxChunk <= 0 {
+		maxChunk = 10
+	}
+
+	if len(lines) > maxChunk {
+		res := make([]string, len(lines))
+		for start := 0; start < len(lines); start += maxChunk {
+			end := start + maxChunk
+			if end > len(lines) {
+				end = len(lines)
+			}
+			chunkLines := lines[start:end]
+			var chunkContext []string
+			if start == 0 {
+				chunkContext = contextLines
+			} else {
+				prevCount := 2
+				if start < prevCount {
+					prevCount = start
+				}
+				chunkContext = lines[start-prevCount : start]
+			}
+			chunkRes, err := c.translateChunk(ctx, chunkLines, chunkContext, isTier1)
+			if err != nil {
+				return nil, err
+			}
+			copy(res[start:end], chunkRes)
+		}
+		return res, nil
+	}
+
+	return c.translateChunk(ctx, lines, contextLines, isTier1)
+}
+
+func (c *GeminiClient) translateChunk(ctx context.Context, lines []string, contextLines []string, isTier1 bool) ([]string, error) {
 	timeout := c.cfg.TimeoutTier2
 	if isTier1 {
 		timeout = c.cfg.TimeoutTier1
@@ -469,11 +507,20 @@ func (c *GeminiClient) doRequest(ctx context.Context, items []GeminiItem, contex
 		return nil, fmt.Errorf("gemini API error: %s", c.sanitize(gResp.Error.Message))
 	}
 
-	if len(gResp.Candidates) == 0 || len(gResp.Candidates[0].Content.Parts) == 0 {
+	if len(gResp.Candidates) == 0 {
 		return nil, errors.New("gemini: empty candidates in response")
 	}
 
-	candidateText := cleanJSONText(gResp.Candidates[0].Content.Parts[0].Text)
+	cand := gResp.Candidates[0]
+	if cand.FinishReason != "" && cand.FinishReason != "STOP" {
+		return nil, fmt.Errorf("gemini: generation stopped abnormally (finishReason=%s)", cand.FinishReason)
+	}
+
+	if len(cand.Content.Parts) == 0 || strings.TrimSpace(cand.Content.Parts[0].Text) == "" {
+		return nil, errors.New("gemini: empty candidate text parts")
+	}
+
+	candidateText := cleanJSONText(cand.Content.Parts[0].Text)
 	var outputItems []GeminiResponseItem
 	if err := json.Unmarshal([]byte(candidateText), &outputItems); err != nil {
 		return nil, fmt.Errorf("gemini invalid JSON array output: %w", err)
@@ -519,14 +566,18 @@ func parseRetryAfter(h string) time.Duration {
 		return 0
 	}
 	h = strings.TrimSpace(h)
-	if secs, err := strconv.Atoi(h); err == nil && secs > 0 {
+	if secs, err := strconv.Atoi(h); err == nil {
+		if secs <= 0 {
+			return 0
+		}
 		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(h); err == nil {
 		d := time.Until(t)
-		if d > 0 {
-			return d
+		if d <= 0 {
+			return 0
 		}
+		return d
 	}
 	return 0
 }

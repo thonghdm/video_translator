@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -435,5 +436,148 @@ func TestGemini_DisabledOrEmptyKey(t *testing.T) {
 	_, err2 := g2.TranslateLines(context.Background(), []string{"Line 0"}, nil, true)
 	if !errors.Is(err2, ErrGeminiDisabled) {
 		t.Fatalf("kỳ vọng ErrGeminiDisabled khi APIKey='', nhận: %v", err2)
+	}
+}
+
+// 13. Test parse Retry-After với định dạng HTTP Date và các trường hợp biên
+func TestGemini_RetryAfter_HTTPDate(t *testing.T) {
+	// Dạng số giây chuẩn
+	if d := parseRetryAfter("30"); d != 30*time.Second {
+		t.Fatalf("kỳ vọng 30s, nhận: %v", d)
+	}
+	// Dạng âm / 0
+	if d := parseRetryAfter("0"); d != 0 {
+		t.Fatalf("kỳ vọng 0s, nhận: %v", d)
+	}
+	if d := parseRetryAfter("-5"); d != 0 {
+		t.Fatalf("kỳ vọng 0s, nhận: %v", d)
+	}
+	// Dạng rỗng
+	if d := parseRetryAfter(""); d != 0 {
+		t.Fatalf("kỳ vọng 0s, nhận: %v", d)
+	}
+	// Dạng HTTP Date trong tương lai (~60s tới)
+	futureDate := time.Now().Add(60 * time.Second).UTC().Format(http.TimeFormat)
+	dFuture := parseRetryAfter(futureDate)
+	if dFuture < 55*time.Second || dFuture > 65*time.Second {
+		t.Fatalf("kỳ vọng parse HTTP date ~60s, nhận: %v", dFuture)
+	}
+	// Dạng HTTP Date đã hết hạn (trong quá khứ)
+	pastDate := time.Now().Add(-60 * time.Second).UTC().Format(http.TimeFormat)
+	if d := parseRetryAfter(pastDate); d != 0 {
+		t.Fatalf("kỳ vọng 0s cho date đã hết hạn, nhận: %v", d)
+	}
+}
+
+// 14. Test Retry-After ngắn bị chặn sàn 15s và probe thất bại vẫn tăng bậc
+func TestGemini_RetryAfter_FloorAndProbeIncrement(t *testing.T) {
+	cb := NewCircuitBreaker(DefaultBreakerConfig())
+
+	// Lần 1: nhận 429 với Retry-After chỉ 5 giây (quá ngắn)
+	// Bắt buộc được đặt sàn tối thiểu 15 giây
+	rlErrShort := &RateLimitError{RetryAfter: 5 * time.Second}
+	cb.Report(rlErrShort, false)
+	if !cb.Blocked() {
+		t.Fatalf("kỳ vọng breaker bị khóa")
+	}
+	if step := cb.backoffStep.Load(); step != 1 {
+		t.Fatalf("kỳ vọng bậc 1 sau lần khóa đầu, nhận: %d", step)
+	}
+
+	// Giả lập cooldown kết thúc, thử probe lại (half-open)
+	cb.blockedUntil.Store(time.Now().Add(-1 * time.Second).UnixNano())
+	allowed, isProbe := cb.Allow()
+	if !allowed || !isProbe {
+		t.Fatalf("kỳ vọng nhận probe khi cooldown hết")
+	}
+
+	// Lần 2 (probe): tiếp tục nhận 429 kèm Retry-After 5s
+	// Bắt buộc phải tăng lên bậc 2 và thời gian khóa phải là max(15s, 2m) = 2 phút!
+	cb.Report(rlErrShort, true)
+	if step := cb.backoffStep.Load(); step != 2 {
+		t.Fatalf("probe thất bại bắt buộc phải tăng lên bậc 2, nhận: %d", step)
+	}
+}
+
+// 15. Test finishReason != STOP (ví dụ SAFETY) trả về lỗi rõ ràng
+func TestGemini_FinishReasonSafety_Rejected(t *testing.T) {
+	client := &http.Client{
+		Transport: geminiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			respPayload := geminiResponse{
+				Candidates: []geminiCandidate{
+					{
+						FinishReason: "SAFETY",
+						Content: geminiCandidateContent{
+							Parts: []geminiCandidatePart{{Text: ""}},
+						},
+					},
+				},
+			}
+			bodyBytes, _ := json.Marshal(respPayload)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+			}, nil
+		}),
+	}
+
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+
+	g := NewGeminiClient(cfg, client)
+	_, err := g.TranslateLines(context.Background(), []string{"Suspicious line"}, nil, true)
+	if err == nil {
+		t.Fatalf("kỳ vọng nhận lỗi khi finishReason = SAFETY")
+	}
+	if !strings.Contains(err.Error(), "finishReason=SAFETY") {
+		t.Fatalf("lỗi phải chỉ rõ finishReason=SAFETY, nhận: %v", err)
+	}
+}
+
+// 16. Test Chunking khi số câu vượt quá MaxItemsPerCall: không câu nào bị cắt bỏ
+func TestGemini_Chunking_MoreThanMaxItemsPerCall(t *testing.T) {
+	var chunkCalls atomic.Int32
+
+	client := &http.Client{
+		Transport: geminiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cnt := chunkCalls.Add(1)
+			var respItems []GeminiResponseItem
+			if cnt == 1 {
+				respItems = []GeminiResponseItem{
+					{ID: 0, VI: "Dịch 0"},
+					{ID: 1, VI: "Dịch 1"},
+				}
+			} else {
+				respItems = []GeminiResponseItem{
+					{ID: 0, VI: "Dịch 2"},
+				}
+			}
+			respJSON, _ := json.Marshal(respItems)
+			return mockGeminiJSONResponse(http.StatusOK, string(respJSON), nil), nil
+		}),
+	}
+
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+	cfg.MaxItemsPerCall = 2 // Mỗi chunk tối đa 2 câu
+
+	g := NewGeminiClient(cfg, client)
+	// Gửi 3 câu -> phải chia thành 2 chunk (2 câu + 1 câu)
+	lines := []string{"Line 0", "Line 1", "Line 2"}
+	res, err := g.TranslateLines(context.Background(), lines, nil, true)
+	if err != nil {
+		t.Fatalf("kỳ vọng dịch 3 câu qua chunking thành công, nhận lỗi: %v", err)
+	}
+	if chunkCalls.Load() != 2 {
+		t.Fatalf("kỳ vọng gọi 2 chunk HTTP, nhận: %d", chunkCalls.Load())
+	}
+	if len(res) != 3 {
+		t.Fatalf("kỳ vọng đủ 3 kết quả, nhận: %d", len(res))
+	}
+	if res[0] != "Dịch 0" || res[1] != "Dịch 1" || res[2] != "Dịch 2" {
+		t.Fatalf("kết quả dịch sau chunking không đúng: %v", res)
 	}
 }

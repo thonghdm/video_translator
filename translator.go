@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -86,6 +87,7 @@ type FastHybridTranslator struct {
 	fallbackReady   atomic.Bool  // true khi Qwen fallback đã nạp thành công
 	modelOK         bool         // true nếu file model tồn tại trên đĩa (tính 1 lần khi khởi tạo)
 	gtxBreaker      *CircuitBreaker
+	gemini          *GeminiClient // Tầng Gemini Cloud (dự phòng khi GTX bị rate limit)
 	fbFailUntil     atomic.Int64 // không thử init Qwen lại trước mốc này
 	mismatchCount   atomic.Int64 // số lần batch bị lệch dòng phải dịch từng dòng
 }
@@ -130,9 +132,19 @@ func (f *FastHybridTranslator) isFallbackAvailable() bool {
 	return f.modelOK && time.Now().UnixNano() >= f.fbFailUntil.Load()
 }
 
-// CurrentMode trả về loại dịch đang hoạt động: "api" (Google GTX), "local_ai" (Qwen Local LLM), hoặc "offline"
+// SetGemini gắn GeminiClient vào bộ dịch lai
+func (f *FastHybridTranslator) SetGemini(g *GeminiClient) {
+	f.gemini = g
+}
+
+// CurrentMode trả về loại dịch đang hoạt động: "api" (Google GTX), "cloud" (Gemini Cloud), "local_ai" (Qwen Local LLM), hoặc "offline"
 func (f *FastHybridTranslator) CurrentMode() string {
 	if f.isGtxBlocked() {
+		// GTX bị khóa: Kiểm tra Gemini Cloud trước
+		if f.gemini != nil && f.gemini.cfg.Enabled && f.gemini.cfg.APIKey != "" && !f.gemini.Blocked() {
+			return "cloud"
+		}
+		// Gemini không khả dụng hoặc bị khóa: Kiểm tra Local AI
 		if f.isFallbackAvailable() {
 			return "local_ai"
 		}
@@ -406,21 +418,38 @@ type tier struct {
 	fillGaps  bool                                                // true nếu cho phép tầng sau bù dòng rỗng của tầng này (chỉ dùng cho cloud)
 }
 
+func (f *FastHybridTranslator) viaGemini(ctx context.Context, lines []string) ([]string, error) {
+	if f.gemini == nil {
+		return nil, ErrGeminiDisabled
+	}
+	// Batch nhỏ (<= 3 câu) coi là Tier-1 (hiển thị gấp), lớn hơn là Tier-2
+	isTier1 := len(lines) <= 3
+	return f.gemini.TranslateLines(ctx, lines, nil, isTier1)
+}
+
 func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
 	tiers := []tier{
 		{
 			name:      "api",
 			translate: f.viaGoogle,
 			cache:     true,
-			fillGaps:  false, // GTX ở P1: nếu thành công thì không đánh thức Qwen vì dòng rỗng
-		},
-		{
-			name:      "local_ai",
-			translate: f.viaFallback,
-			cache:     false,
-			fillGaps:  false,
+			fillGaps:  false, // GTX ở P1/P2: nếu thành công thì không đánh thức Qwen vì dòng rỗng
 		},
 	}
+	if f.gemini != nil && f.gemini.cfg.Enabled && f.gemini.cfg.APIKey != "" {
+		tiers = append(tiers, tier{
+			name:      "cloud",
+			translate: f.viaGemini,
+			cache:     true,
+			fillGaps:  true, // Gemini Cloud: cho phép tầng sau bù các câu còn thiếu
+		})
+	}
+	tiers = append(tiers, tier{
+		name:      "local_ai",
+		translate: f.viaFallback,
+		cache:     false,
+		fillGaps:  false,
+	})
 	return f.translateWithTiers(ctx, lines, tiers)
 }
 
@@ -456,10 +485,15 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 	}
 
 	var lastErr error
+	skipCloud := false
 
 	for _, t := range tiers {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if skipCloud && t.name == "cloud" {
+			// GTX bị lỗi mạng thật: bỏ qua Cloud, xuống thẳng Local AI (Qwen)
+			continue
 		}
 		if len(pendingIndices) == 0 {
 			break
@@ -478,18 +512,22 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 
 		if err != nil {
 			lastErr = err
-			// Ở P1: mọi lỗi không phải hủy context thì xuống tầng tiếp theo
+			// Phân loại lỗi của GTX: nếu là errKindNetwork (mất mạng Internet),
+			// bỏ qua tầng Cloud (Gemini) vì cả hai cùng cần mạng, xuống thẳng Qwen (Local AI)
+			if t.name == "api" && classifyErr(err) == errKindNetwork {
+				skipCloud = true
+			}
 			continue
 		}
 
-		f.setMode(t.name)
-
+		translatedCount := 0
 		var remaining []int
 		for j, pIdx := range pendingIndices {
 			// j < len(out) bảo vệ chống out ngắn hơn tierInput (không panic)
 			if j < len(out) && out[j] != "" {
 				origIdx := idx[pIdx]
 				results[origIdx] = out[j]
+				translatedCount++
 				if t.cache {
 					f.setCached(todo[pIdx], out[j])
 				}
@@ -497,6 +535,12 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 				// Chỉ đẩy dòng rỗng xuống tầng sau khi tầng này cho phép fillGaps
 				remaining = append(remaining, pIdx)
 			}
+		}
+
+		// Chỉ đặt mode khi tầng dịch thành công ít nhất một câu (không đặt khi trả rỗng hoàn toàn)
+		if translatedCount > 0 {
+			f.setMode(t.name)
+			log.Printf("[Translator] Dịch %d câu thành công qua tầng: %s", translatedCount, t.name)
 		}
 
 		if !t.fillGaps {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -744,5 +745,273 @@ func TestFastHybrid_ConcurrentProbingAndMode(t *testing.T) {
 	}
 	if q := modeQueries.Load(); q != 2000 {
 		t.Fatalf("kỳ vọng 2000 lượt query mode thành công, nhận: %d", q)
+	}
+}
+
+// TestTranslateBatch_GTX429_GeminiSuccess_CachedAndModeCloud kiểm tra khi GTX 429, Gemini dịch thành công:
+// kết quả đúng, mode chuyển sang 'cloud', và kết quả được lưu vào cache
+func TestTranslateBatch_GTX429_GeminiSuccess_CachedAndModeCloud(t *testing.T) {
+	gtxClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			return mockResponse(http.StatusTooManyRequests, "Google Rate Limited")
+		}),
+	}
+
+	geminiClientMock := &http.Client{
+		Transport: geminiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return mockGeminiJSONResponse(http.StatusOK, `[{"id": 0, "vi": "Bản dịch từ Gemini Cloud"}]`, nil), nil
+		}),
+	}
+
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+	gemini := NewGeminiClient(cfg, geminiClientMock)
+
+	fb := &dummyFallbackTranslator{}
+	f := &FastHybridTranslator{
+		client:      gtxClient,
+		phraseCache: NewLRUCache(100),
+		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+		gemini:      gemini,
+	}
+
+	lines := []string{"Hello Cloud"}
+	res, err := f.TranslateBatch(context.Background(), lines)
+	if err != nil {
+		t.Fatalf("kỳ vọng thành công qua Gemini, nhận lỗi: %v", err)
+	}
+	if len(res) != 1 || res[0] != "Bản dịch từ Gemini Cloud" {
+		t.Fatalf("kết quả dịch không đúng: %v", res)
+	}
+	if mode := f.CurrentMode(); mode != "cloud" {
+		t.Fatalf("kỳ vọng mode là 'cloud', nhận: %q", mode)
+	}
+
+	// Xác nhận kết quả Gemini ĐƯỢC lưu vào phraseCache
+	if c, ok := f.getCached("Hello Cloud"); !ok || c != "Bản dịch từ Gemini Cloud" {
+		t.Fatalf("kỳ vọng phraseCache lưu kết quả của Gemini, nhận: %q", c)
+	}
+}
+
+// TestTranslateBatch_GTXNetworkError_BypassesGemini_DirectToQwen kiểm tra khi GTX rớt mạng thật (errKindNetwork),
+// Gemini Cloud TUYỆT ĐỐI KHÔNG ĐƯỢC GỌI, nhảy thẳng xuống Qwen (local_ai)
+func TestTranslateBatch_GTXNetworkError_BypassesGemini_DirectToQwen(t *testing.T) {
+	gtxClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			// Giả lập lỗi DNS / mất mạng Internet
+			return nil
+		}),
+	}
+	// Dùng RoundTrip trả về net.Error
+	gtxClient.Transport = roundTripFuncWithErr(func(req *http.Request) (*http.Response, error) {
+		return nil, &net.DNSError{IsTimeout: true, Err: "no such host"}
+	})
+
+	var geminiCalled atomic.Bool
+	geminiMock := &http.Client{
+		Transport: geminiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			geminiCalled.Store(true)
+			return mockGeminiJSONResponse(http.StatusOK, `[{"id": 0, "vi": "Gemini không nên được gọi"}]`, nil), nil
+		}),
+	}
+
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+	gemini := NewGeminiClient(cfg, geminiMock)
+
+	var qwenCalled atomic.Bool
+	fb := &dummyFallbackTranslator{}
+	f := &FastHybridTranslator{
+		client:      gtxClient,
+		phraseCache: NewLRUCache(100),
+		fallback: &tierRecordingFallback{
+			inner:    fb,
+			onCalled: func() { qwenCalled.Store(true) },
+		},
+		gtxBreaker: NewCircuitBreaker(DefaultBreakerConfig()),
+		gemini:     gemini,
+	}
+
+	lines := []string{"Sentence needing translation"}
+	res, err := f.TranslateBatch(context.Background(), lines)
+	if err != nil {
+		t.Fatalf("kỳ vọng thành công qua Qwen fallback, nhận lỗi: %v", err)
+	}
+	if len(res) != 1 || res[0] != "fb: Sentence needing translation" {
+		t.Fatalf("kỳ vọng nhận kết quả từ Qwen fallback, nhận: %v", res)
+	}
+	if geminiCalled.Load() {
+		t.Fatalf("Lỗi mạng của GTX phải BỎ QUA Gemini và nhảy thẳng xuống Qwen!")
+	}
+	if !qwenCalled.Load() {
+		t.Fatalf("kỳ vọng Qwen fallback đã được gọi")
+	}
+}
+
+type roundTripFuncWithErr func(req *http.Request) (*http.Response, error)
+
+func (f roundTripFuncWithErr) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type tierRecordingFallback struct {
+	inner    Translator
+	onCalled func()
+}
+
+func (tr *tierRecordingFallback) Translate(ctx context.Context, line string, ctxLines []string) (string, error) {
+	if tr.onCalled != nil {
+		tr.onCalled()
+	}
+	return tr.inner.Translate(ctx, line, ctxLines)
+}
+
+func (tr *tierRecordingFallback) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	if tr.onCalled != nil {
+		tr.onCalled()
+	}
+	return tr.inner.TranslateBatch(ctx, lines)
+}
+
+func (tr *tierRecordingFallback) Close() error { return nil }
+
+// TestTranslateBatch_GeminiMissingLines_FilledByQwen kiểm tra khi Gemini trả thiếu câu,
+// nhờ fillGaps: true các câu thiếu được tự động đẩy xuống Qwen bù đắp
+func TestTranslateBatch_GeminiMissingLines_FilledByQwen(t *testing.T) {
+	gtxClient := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			return mockResponse(http.StatusTooManyRequests, "GTX 429")
+		}),
+	}
+
+	geminiClientMock := &http.Client{
+		Transport: geminiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			// Chỉ trả câu 0, thiếu câu 1
+			return mockGeminiJSONResponse(http.StatusOK, `[{"id": 0, "vi": "Câu 0 từ Gemini"}]`, nil), nil
+		}),
+	}
+
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+	gemini := NewGeminiClient(cfg, geminiClientMock)
+
+	fb := &dummyFallbackTranslator{}
+	f := &FastHybridTranslator{
+		client:      gtxClient,
+		phraseCache: NewLRUCache(100),
+		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+		gemini:      gemini,
+	}
+
+	lines := []string{"Line 0", "Line 1"}
+	res, err := f.TranslateBatch(context.Background(), lines)
+	if err != nil {
+		t.Fatalf("kỳ vọng thành công, nhận lỗi: %v", err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("kỳ vọng res đủ 2 phần tử, nhận: %d", len(res))
+	}
+	if res[0] != "Câu 0 từ Gemini" {
+		t.Fatalf("kỳ vọng câu 0 từ Gemini, nhận: %q", res[0])
+	}
+	if res[1] != "fb: Line 1" {
+		t.Fatalf("kỳ vọng câu 1 được Qwen bù đắp, nhận: %q", res[1])
+	}
+
+	// Câu 0 (Gemini) được cache, câu 1 (Qwen) KHÔNG được cache
+	if c, ok := f.getCached("Line 0"); !ok || c != "Câu 0 từ Gemini" {
+		t.Fatalf("kỳ vọng câu của Gemini được cache")
+	}
+	if _, ok := f.getCached("Line 1"); ok {
+		t.Fatalf("kết quả từ Qwen không được phép lưu vào cache")
+	}
+}
+
+// TestTranslateBatch_GeminiReturnsAllEmpty_DoesNotSetModeCloud kiểm tra khi Gemini trả toàn câu rỗng thì setMode KHÔNG được đặt 'cloud'
+func TestTranslateBatch_GeminiReturnsAllEmpty_DoesNotSetModeCloud(t *testing.T) {
+	f := &FastHybridTranslator{
+		phraseCache: NewLRUCache(100),
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+		currentMode: "api",
+	}
+
+	tierGeminiEmpty := tier{
+		name: "cloud",
+		translate: func(ctx context.Context, lines []string) ([]string, error) {
+			// Trả về toàn chuỗi rỗng
+			return []string{"", ""}, nil
+		},
+		cache:    true,
+		fillGaps: true,
+	}
+
+	lines := []string{"Line 0", "Line 1"}
+	res, err := f.translateWithTiers(context.Background(), lines, []tier{tierGeminiEmpty})
+	if err != nil {
+		t.Fatalf("kỳ vọng nil error, nhận: %v", err)
+	}
+	if len(res) != 2 || res[0] != "" || res[1] != "" {
+		t.Fatalf("kỳ vọng các câu rỗng được giữ nguyên, nhận: %v", res)
+	}
+	f.modeMu.RLock()
+	mode := f.currentMode
+	f.modeMu.RUnlock()
+	if mode == "cloud" {
+		t.Fatalf("setMode KHÔNG được phép đặt 'cloud' khi Gemini chỉ trả về toàn câu rỗng!")
+	}
+}
+
+// TestTranslateBatch_BothGTXAndGeminiBlocked_NoQwen_ModeOffline kiểm tra khi cả GTX và Gemini cùng bị khóa breaker, và không có Qwen: mode là 'offline'
+func TestTranslateBatch_BothGTXAndGeminiBlocked_NoQwen_ModeOffline(t *testing.T) {
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+	gemini := NewGeminiClient(cfg, nil)
+	// Khóa breaker Gemini
+	gemini.breaker.blockedUntil.Store(time.Now().Add(10 * time.Minute).UnixNano())
+
+	f := &FastHybridTranslator{
+		phraseCache: NewLRUCache(100),
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+		gemini:      gemini,
+		modelOK:     false, // Không có Qwen
+	}
+	// Khóa breaker GTX
+	f.gtxBreaker.blockedUntil.Store(time.Now().Add(10 * time.Minute).UnixNano())
+
+	if mode := f.CurrentMode(); mode != "offline" {
+		t.Fatalf("kỳ vọng CurrentMode là 'offline' khi cả hai tầng cùng khóa và không có Qwen, nhận: %q", mode)
+	}
+}
+
+// TestPipeline_Tier2NotPostponed_InCloudMode kiểm tra isTier2PostponedMode trả về false khi mode là 'cloud'
+func TestPipeline_Tier2NotPostponed_InCloudMode(t *testing.T) {
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+	gemini := NewGeminiClient(cfg, nil)
+
+	f := &FastHybridTranslator{
+		phraseCache: NewLRUCache(100),
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+		gemini:      gemini,
+	}
+	// Khóa breaker GTX để CurrentMode chuyển sang 'cloud'
+	f.gtxBreaker.blockedUntil.Store(time.Now().Add(10 * time.Minute).UnixNano())
+
+	if mode := f.CurrentMode(); mode != "cloud" {
+		t.Fatalf("kỳ vọng CurrentMode là 'cloud', nhận: %q", mode)
+	}
+
+	p := &Pipeline{
+		translator: f,
+	}
+	if p.isTier2PostponedMode() {
+		t.Fatalf("kỳ vọng isTier2PostponedMode() = false khi mode là 'cloud' (không được hoãn Tier-2 trên Cloud)!")
 	}
 }
