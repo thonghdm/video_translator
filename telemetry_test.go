@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 const variantSample = `whisper_print_timings: load time = 120 ms
@@ -84,5 +88,96 @@ func TestParseWhisperTimings_InvalidSample(t *testing.T) {
 	}
 	if timings.TotalMs != nil {
 		t.Errorf("expected nil TotalMs, got %v", timings.TotalMs)
+	}
+}
+
+func Test_BUG01_MeasureDetectOnce(t *testing.T) {
+	src := os.Getenv("VT_HARNESS_VIDEO")
+	if src == "" {
+		src = filepath.Join(os.Getenv("LOCALAPPDATA"), "SubTrans", "youtube", "Advanced_Golang_-_Channels_Context_and_Interfaces_Explained_[VkGQFFl66X4].mp4")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Skipf("không tìm thấy video mẫu: %v", err)
+	}
+
+	repoRoot, _ := os.Getwd()
+	binDir := filepath.Join(repoRoot, "build", "bin")
+	tools := &ToolsPaths{
+		BaseDir:      binDir,
+		FFmpeg:       filepath.Join(binDir, "tools", "ffmpeg", "ffmpeg.exe"),
+		FFprobe:      filepath.Join(binDir, "tools", "ffmpeg", "ffprobe.exe"),
+		WhisperCLI:   filepath.Join(binDir, "tools", "whisper", "whisper-cli.exe"),
+		WhisperModel: filepath.Join(binDir, "models", "ggml-base.bin"),
+	}
+
+	workDir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(workDir, "appdata"))
+	t.Setenv("VT_TELEMETRY", "1")
+
+	runDir := filepath.Join(workDir, "telemetry_out")
+	prevDir := telemetryOutputDir
+	telemetryOutputDir = runDir
+	defer func() { telemetryOutputDir = prevDir }()
+
+	probe, err := ProbeMedia(tools, src)
+	if err != nil {
+		t.Fatalf("ffprobe error: %v", err)
+	}
+
+	meta := CacheMeta{
+		BlockSec:     30.0,
+		OverlapSec:   2.0,
+		DurationSec:  probe.DurationSec,
+		WhisperModel: "ggml-base.bin",
+	}
+	bs, err := NewBlockStore(src, meta)
+	if err != nil {
+		t.Fatalf("NewBlockStore error: %v", err)
+	}
+
+	settings := Settings{
+		BlockSec:         30.0,
+		OverlapSec:       2.0,
+		LookaheadMinSec:  45.0,
+		LookaheadMaxSec:  300.0,
+		TranslateWorkers: 1,
+		WhisperThreads:   4,
+		SourceLang:       "auto",
+	}
+
+	mockTrans := &MockTranslator{}
+	pipe := NewPipeline(src, probe.DurationSec, settings, tools, bs, mockTrans, PipelineEventCallbacks{})
+	if err := pipe.Start(0); err != nil {
+		t.Fatalf("pipe.Start error: %v", err)
+	}
+
+	// Chờ hoàn thành 3 block (block 0, 1, 2)
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(bs.GetDoneBlocks()) >= 3 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	pipe.Stop()
+
+	// Đọc blocks.jsonl
+	data, err := os.ReadFile(filepath.Join(runDir, "blocks.jsonl"))
+	if err != nil {
+		t.Fatalf("không đọc được blocks.jsonl: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var r BlockTelemetryRecord
+		if err := json.Unmarshal([]byte(line), &r); err == nil {
+			encMs := 0.0
+			if r.WhisperEncodeMs != nil {
+				encMs = *r.WhisperEncodeMs
+			}
+			t.Logf("[MEASURE] Block=%d LangArg=%s WallMs=%d EncodeMs=%.1f Runs=%d",
+				r.BlockIndex, r.WhisperLangArg, r.WhisperWallMs, encMs, r.WhisperEncodeRuns)
+		}
 	}
 }

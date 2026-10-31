@@ -941,7 +941,17 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 					lang = "en"
 					detectedLang = "en"
 				default:
-					lang = "auto"
+					// "auto" (mặc định): áp dụng cơ chế detect-once
+					// Sau khi block đầu tiên phát hiện được ngôn ngữ, truyền thẳng mã ngôn ngữ đó
+					// cho các block tiếp theo để loại bỏ bước chạy encode nhận diện ngôn ngữ dư thừa.
+					p.mu.Lock()
+					if p.detectedOnceLang != "" {
+						lang = p.detectedOnceLang
+						detectedLang = p.detectedOnceLang
+					} else {
+						lang = "auto"
+					}
+					p.mu.Unlock()
 				}
 
 				if envLang := strings.ToLower(strings.TrimSpace(os.Getenv("VT_WHISPER_LANG"))); envLang != "" {
@@ -1008,6 +1018,11 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 						segments, parsedLang, err = ParseWhisperJSONResult(data, job.Range.ExtractStart)
 						if parsedLang != "" {
 							detectedLang = parsedLang
+							p.mu.Lock()
+							if p.detectedOnceLang == "" {
+								p.detectedOnceLang = parsedLang
+							}
+							p.mu.Unlock()
 						}
 						_ = os.Remove(jsonOutPath)
 					} else {
