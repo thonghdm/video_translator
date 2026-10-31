@@ -724,6 +724,16 @@ func (dm *DriveManager) GetDuration(fileID string) float64 {
 	return dm.durations[fileID]
 }
 
+// SetDuration ghi nhận thời lượng thật (vd. từ <video>.duration) đè lên giá trị ước lượng theo dung lượng file.
+func (dm *DriveManager) SetDuration(fileID string, sec float64) {
+	if fileID == "" || sec <= 0 {
+		return
+	}
+	dm.mu.Lock()
+	dm.durations[fileID] = sec
+	dm.mu.Unlock()
+}
+
 // SubtitleIDFor trả về ID phụ đề đi kèm đã biết của video (từ lúc quét cây thư mục)
 func (dm *DriveManager) SubtitleIDFor(videoID string) string {
 	dm.mu.Lock()

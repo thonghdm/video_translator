@@ -66,4 +66,6 @@ export function StartPipeline(arg1:string,arg2:number):Promise<void>;
 
 export function StopPipeline():Promise<void>;
 
+export function UpdateVideoDuration(arg1:string,arg2:number):Promise<void>;
+
 export function UpdatePlayhead(arg1:string,arg2:number,arg3:boolean):Promise<void>;

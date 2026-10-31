@@ -44,6 +44,7 @@ import {
   upsertSubtitles,
   findSubtitleAtTime,
 } from "./lib/subtitles";
+import { shouldReportDuration } from "./lib/duration";
 import { LandingPage } from "./components/LandingPage";
 import { countRender } from "./lib/renderProbe";
 import { SetupWizard } from "./components/SetupWizard";
@@ -130,6 +131,7 @@ declare global {
             sec: number,
             playing: boolean,
           ) => Promise<void>;
+          UpdateVideoDuration?: (path: string, sec: number) => Promise<void>;
           StopPipeline: () => Promise<void>;
           LoadCachedSubtitles: (path: string) => Promise<SubtitleItem[]>;
           ExportSRT: (path: string, mode: string) => Promise<string>;
@@ -751,6 +753,21 @@ export const App: React.FC = () => {
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const seekDebounceTimerRef = useRef<any>(null);
   const lastPlayheadUpdateRef = useRef<number>(0);
+  // BUG-08: đồng bộ thời lượng thật của <video> về backend (video Drive mở với giá trị ước lượng)
+  const videoInfoRef = useRef<VideoInfo | null>(null);
+  videoInfoRef.current = videoInfo;
+  const reportedDurationRef = useRef<{ path: string; sec: number } | null>(null);
+  const reportRealDuration = useCallback((real: number) => {
+    const info = videoInfoRef.current;
+    if (!info?.path) return;
+    const last =
+      reportedDurationRef.current?.path === info.path
+        ? reportedDurationRef.current.sec
+        : undefined;
+    if (!shouldReportDuration(real, info.duration_sec, last)) return;
+    reportedDurationRef.current = { path: info.path, sec: real };
+    void window.go?.main?.App?.UpdateVideoDuration?.(info.path, real);
+  }, []);
   const lastUiTimeRef = useRef<number>(0);
 
   // Danh sách video phẳng theo thứ tự từ cây thư mục
@@ -2210,12 +2227,14 @@ export const App: React.FC = () => {
               const d = e.currentTarget.duration;
               if (d && !isNaN(d) && isFinite(d) && d > 0) {
                 setDuration(d);
+                reportRealDuration(d);
               }
             }}
             onDurationChange={(e) => {
               const d = e.currentTarget.duration;
               if (d && !isNaN(d) && isFinite(d) && d > 0) {
                 setDuration(d);
+                reportRealDuration(d);
               }
             }}
           />

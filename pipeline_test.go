@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1093,5 +1094,69 @@ func Test_BUG13_EmitStatus_CallbackRunsOutsideLock(t *testing.T) {
 		t.Fatalf("OnStatus không được gọi")
 	case 2:
 		t.Fatalf("BUG-13: OnStatus chạy khi vẫn giữ p.mu")
+	}
+}
+
+// BUG-08: thời lượng ước lượng (Drive) sai → UpdateDuration phải làm scheduler dừng đúng block cuối.
+func Test_BUG08_UpdateDuration_StopsSchedulingBeyondRealEnd(t *testing.T) {
+	run := func(update bool) (maxBlock int, total int) {
+		t.Helper()
+		p, _ := newComputeProbePipeline(t, "google")
+		p.settings.LookaheadMinSec, p.settings.LookaheadMaxSec = 1e6, 1e6 // lập lịch hết video
+		p.durationBits.Store(math.Float64bits(3600)) // ước lượng mặc định 3600s = 120 block
+		var mu sync.Mutex
+		maxBlock = -1
+		p.MockSliceAudio = func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error {
+			mu.Lock()
+			if bRange.Index > maxBlock {
+				maxBlock = bRange.Index
+			}
+			mu.Unlock()
+			return nil
+		}
+		var st PipelineStatus
+		p.callbacks.OnStatus = func(s PipelineStatus) { mu.Lock(); st = s; mu.Unlock() }
+		if update {
+			if !p.UpdateDuration(90) {
+				t.Fatalf("UpdateDuration(90) phải báo thay đổi")
+			}
+		}
+		_ = p.Start(0)
+		time.Sleep(1500 * time.Millisecond)
+		p.Stop()
+		mu.Lock()
+		defer mu.Unlock()
+		return maxBlock, st.TotalBlocks
+	}
+
+	beforeMax, _ := run(false)
+	afterMax, afterTotal := run(true)
+	t.Logf("BUG-08: không cập nhật → block lớn nhất được lập lịch=%d; sau UpdateDuration(90) → %d, TotalBlocks=%d", beforeMax, afterMax, afterTotal)
+	if beforeMax <= 2 {
+		t.Fatalf("điều kiện đối chứng: không cập nhật thì phải lập lịch vượt block 2, got %d", beforeMax)
+	}
+	if afterMax > 2 {
+		t.Fatalf("BUG-08: vẫn lập lịch block %d vượt hết video 90s (3 block)", afterMax)
+	}
+	if afterTotal != 3 {
+		t.Fatalf("TotalBlocks=%d, want 3", afterTotal)
+	}
+}
+
+func Test_BUG08_UpdateDuration_Validation(t *testing.T) {
+	p, _ := newComputeProbePipeline(t, "google")
+	for _, bad := range []float64{0, -5, math.NaN(), math.Inf(1)} {
+		if p.UpdateDuration(bad) {
+			t.Errorf("UpdateDuration(%v) phải bị từ chối", bad)
+		}
+	}
+	if p.duration() != 30 {
+		t.Errorf("duration bị đổi bởi giá trị xấu: %v", p.duration())
+	}
+	if p.UpdateDuration(30.0004) {
+		t.Errorf("chênh lệch <1ms không được coi là thay đổi")
+	}
+	if !p.UpdateDuration(120) || p.duration() != 120 {
+		t.Errorf("UpdateDuration(120) không có hiệu lực")
 	}
 }

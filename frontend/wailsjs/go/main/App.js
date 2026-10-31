@@ -130,6 +130,10 @@ export function StopPipeline() {
   return window['go']['main']['App']['StopPipeline']();
 }
 
+export function UpdateVideoDuration(arg1, arg2) {
+  return window['go']['main']['App']['UpdateVideoDuration'](arg1, arg2);
+}
+
 export function UpdatePlayhead(arg1, arg2, arg3) {
   return window['go']['main']['App']['UpdatePlayhead'](arg1, arg2, arg3);
 }

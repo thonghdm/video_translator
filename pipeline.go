@@ -80,7 +80,7 @@ type Pipeline struct {
 	mu          sync.Mutex
 	computeMu   sync.Mutex // Điều phối CPU giữa Whisper và LLM tránh tranh chấp core
 	videoPath   string
-	durationSec float64
+	durationBits atomic.Uint64 // float64 bits; đọc qua duration(), cập nhật qua UpdateDuration()
 	settings    Settings
 	tools       *ToolsPaths
 	blockStore  *BlockStore
@@ -184,7 +184,6 @@ func NewPipeline(
 
 	p := &Pipeline{
 		videoPath:        videoPath,
-		durationSec:      durationSec,
 		settings:         settings,
 		tools:            tools,
 		blockStore:       blockStore,
@@ -199,6 +198,7 @@ func NewPipeline(
 		externalSegments: extSegs,
 	}
 	p.pendingSeek.Store(noPendingSeek)
+	p.durationBits.Store(math.Float64bits(durationSec))
 	return p
 }
 
@@ -210,10 +210,34 @@ func (p *Pipeline) triggerSchedule() {
 	}
 }
 
+// duration trả về thời lượng video hiện tại (an toàn đa luồng).
+func (p *Pipeline) duration() float64 {
+	return math.Float64frombits(p.durationBits.Load())
+}
+
+// UpdateDuration cập nhật thời lượng thật của video (vd. từ <video>.duration của frontend
+// khi nguồn là Google Drive và backend chỉ có giá trị ước lượng). Bỏ qua giá trị không hợp lệ.
+// Trả về true nếu giá trị thực sự thay đổi.
+func (p *Pipeline) UpdateDuration(sec float64) bool {
+	if math.IsNaN(sec) || math.IsInf(sec, 0) || sec <= 0 {
+		return false
+	}
+	old := p.duration()
+	if math.Abs(old-sec) < 0.001 {
+		return false
+	}
+	p.durationBits.Store(math.Float64bits(sec))
+	select {
+	case p.wakeSched <- struct{}{}:
+	default:
+	}
+	return true
+}
+
 func (p *Pipeline) emitStatus(block int) {
 	p.mu.Lock()
 
-	totalBlocks := int(math.Ceil(p.durationSec / p.settings.BlockSec))
+	totalBlocks := int(math.Ceil(p.duration() / p.settings.BlockSec))
 	doneBlocks := len(p.blockStore.GetDoneBlocks())
 
 	aheadSec := p.computeAheadSecLocked()
@@ -240,15 +264,15 @@ func (p *Pipeline) emitStatus(block int) {
 // computeAheadSecLocked tính toán khoảng thời gian đã xong liên tục phía trước playhead
 func (p *Pipeline) computeAheadSecLocked() float64 {
 	curBlock := int(p.playheadSec / p.settings.BlockSec)
-	totalBlocks := int(math.Ceil(p.durationSec / p.settings.BlockSec))
+	totalBlocks := int(math.Ceil(p.duration() / p.settings.BlockSec))
 
 	continuousDoneEnd := p.playheadSec
 
 	for b := curBlock; b < totalBlocks; b++ {
 		if p.blockStore.IsBlockDone(b) || (p.tier2Deferred[b] && p.isTier2PostponedMode()) {
 			bEnd := float64(b+1) * p.settings.BlockSec
-			if bEnd > p.durationSec {
-				bEnd = p.durationSec
+			if bEnd > p.duration() {
+				bEnd = p.duration()
 			}
 			continuousDoneEnd = bEnd
 		} else {
@@ -312,8 +336,8 @@ func (p *Pipeline) RequestSeek(sec float64) {
 	if sec < 0 {
 		sec = 0
 	}
-	if sec > p.durationSec {
-		sec = p.durationSec
+	if sec > p.duration() {
+		sec = p.duration()
 	}
 
 	p.mu.Lock()
@@ -367,8 +391,8 @@ func (p *Pipeline) doSeek(startSec float64) {
 	if startSec < 0 {
 		startSec = 0
 	}
-	if startSec > p.durationSec {
-		startSec = p.durationSec
+	if startSec > p.duration() {
+		startSec = p.duration()
 	}
 
 	p.mu.Lock()
@@ -416,7 +440,7 @@ func (p *Pipeline) doSeek(startSec float64) {
 	tier2WasRunning := false
 	tier2BlockIdx := -1
 	for b := range p.activeJobs {
-		bRange := ComputeBlockRange(b, p.settings.BlockSec, p.settings.OverlapSec, p.durationSec)
+		bRange := ComputeBlockRange(b, p.settings.BlockSec, p.settings.OverlapSec, p.duration())
 		isTier1 := bRange.OwnerStart <= startSec+15.0 && bRange.OwnerEnd >= startSec
 		if !isTier1 {
 			tier2WasRunning = true
@@ -488,8 +512,8 @@ func (p *Pipeline) doSeek(startSec float64) {
 		if startSec < 0 {
 			startSec = 0
 		}
-		if startSec > p.durationSec {
-			startSec = p.durationSec
+		if startSec > p.duration() {
+			startSec = p.duration()
 		}
 	}
 
@@ -731,8 +755,6 @@ func (p *Pipeline) startSessionWorkers(sess *PipelineSession) {
 
 // schedulerLoop chọn block tiếp theo theo quy tắc lookahead và backfill
 func (p *Pipeline) schedulerLoop(ctx context.Context, slicerChan chan<- SlicerJob, sessionID int64) {
-	totalBlocks := int(math.Ceil(p.durationSec / p.settings.BlockSec))
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -740,6 +762,9 @@ func (p *Pipeline) schedulerLoop(ctx context.Context, slicerChan chan<- SlicerJo
 		case <-p.wakeSched:
 		case <-time.After(500 * time.Millisecond):
 		}
+
+		// BUG-08: thời lượng có thể được cập nhật giữa chừng (UpdateDuration) → tính lại mỗi vòng
+		totalBlocks := int(math.Ceil(p.duration() / p.settings.BlockSec))
 
 		p.mu.Lock()
 		playheadBlock := int(p.playheadSec / p.settings.BlockSec)
@@ -846,7 +871,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			blockIdx := sJob.BlockIdx
 			queueWaitMs := time.Since(sJob.ScheduledAt).Milliseconds()
 
-			bRange := ComputeBlockRange(blockIdx, p.settings.BlockSec, p.settings.OverlapSec, p.durationSec)
+			bRange := ComputeBlockRange(blockIdx, p.settings.BlockSec, p.settings.OverlapSec, p.duration())
 			wavPath := filepath.Join(p.tools.TempDir, fmt.Sprintf("block_%d_%d.wav", sJob.SessionID, blockIdx))
 
 			tSlice0 := time.Now()

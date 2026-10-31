@@ -480,6 +480,35 @@ func (a *App) UpdatePlayhead(path string, sec float64, playing bool) {
 	pipe.UpdatePlayhead(sec, playing)
 }
 
+// UpdateVideoDuration nhận thời lượng thật của video từ frontend (<video>.duration).
+// Video Google Drive được mở với thời lượng ước lượng (3600s hoặc theo dung lượng) nên
+// backend cần sửa lại để không lập lịch/hiển thị các block nằm ngoài video.
+func (a *App) UpdateVideoDuration(path string, sec float64) {
+	if math.IsNaN(sec) || math.IsInf(sec, 0) || sec <= 0 {
+		return
+	}
+	a.mu.Lock()
+	pipe := a.currentPipe
+	if a.currentVideo != path {
+		a.mu.Unlock()
+		return
+	}
+	if a.currentInfo != nil {
+		a.currentInfo.DurationSec = sec
+		if bs := a.currentInfo.BlockSec; bs > 0 {
+			a.currentInfo.TotalBlocks = int(math.Ceil(sec / bs))
+		}
+	}
+	a.mu.Unlock()
+
+	if IsDrivePath(path) {
+		GetDriveManager().SetDuration(DriveFileIDFromPath(path), sec)
+	}
+	if pipe != nil {
+		pipe.UpdateDuration(sec)
+	}
+}
+
 // StopPipeline dừng xử lý video hiện tại
 func (a *App) StopPipeline() error {
 	a.mu.Lock()
