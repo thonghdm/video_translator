@@ -458,6 +458,9 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 	var lastErr error
 
 	for _, t := range tiers {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if len(pendingIndices) == 0 {
 			break
 		}

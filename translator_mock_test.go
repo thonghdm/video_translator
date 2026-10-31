@@ -465,6 +465,56 @@ func TestTranslateBatch_AllTiersFail_PreservesCacheAndReturnsError(t *testing.T)
 	}
 }
 
+// TestTranslateBatch_ContextCanceledAfterTier1Error_Tier2NotCalled kiểm tra khi tầng 1 lỗi và context bị hủy thì dừng ngay, tầng 2 không bao giờ được gọi
+func TestTranslateBatch_ContextCanceledAfterTier1Error_Tier2NotCalled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	f := &FastHybridTranslator{
+		phraseCache: NewLRUCache(100),
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+	}
+
+	var tier1Called atomic.Bool
+	tier1 := tier{
+		name: "api",
+		translate: func(c context.Context, lines []string) ([]string, error) {
+			tier1Called.Store(true)
+			// Giả lập tầng 1 lỗi đồng thời người dùng tua video làm hủy context
+			cancel()
+			return nil, errors.New("temporary server error")
+		},
+		cache:    true,
+		fillGaps: false,
+	}
+
+	var tier2Called atomic.Bool
+	tier2 := tier{
+		name: "local_ai",
+		translate: func(c context.Context, lines []string) ([]string, error) {
+			tier2Called.Store(true)
+			return []string{"dịch từ tầng 2"}, nil
+		},
+		cache:    false,
+		fillGaps: false,
+	}
+
+	lines := []string{"Line needing translation"}
+	res, err := f.translateWithTiers(ctx, lines, []tier{tier1, tier2})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("kỳ vọng lỗi context.Canceled, nhận: %v", err)
+	}
+	if res != nil {
+		t.Fatalf("kỳ vọng res là nil khi context bị hủy, nhận: %v", res)
+	}
+	if !tier1Called.Load() {
+		t.Fatalf("kỳ vọng tầng 1 đã được gọi")
+	}
+	if tier2Called.Load() {
+		t.Fatalf("kỳ vọng tầng 2 KHÔNG được gọi khi context đã bị hủy sau tầng 1!")
+	}
+}
+
 // TestTranslateBatch_QwenOutput_NeverCached kiểm tra kết quả dịch từ Qwen fallback tuyệt đối không được ghi vào phraseCache
 func TestTranslateBatch_QwenOutput_NeverCached(t *testing.T) {
 	// Giả lập Google bị rate limit
