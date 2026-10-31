@@ -585,6 +585,7 @@ func (m *modeSwitchTranslator) Close() error {
 // - Chiều 1: Khi ở local_ai/offline, block đã hoàn tất Tier-1 không bị scheduler đẩy lại lặp vòng vô tận.
 // - Chiều 2: Khi chuyển về api, block được scheduler đẩy lại để dịch nốt các câu Tier-2 còn lại.
 func TestScheduler_Tier2Postpone_TwoWay(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tmpDir := t.TempDir()
 	store, err := NewBlockStore(tmpDir, CacheMeta{BlockSec: 30, OverlapSec: 2, DurationSec: 60})
 	if err != nil {

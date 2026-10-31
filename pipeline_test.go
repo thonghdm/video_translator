@@ -33,6 +33,7 @@ func (m *MockTranslator) Close() error {
 
 // Test_Pipeline_LookaheadAndBackfill kiểm tra chuyển đổi trạng thái lookahead và backfill
 func Test_Pipeline_LookaheadAndBackfill(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -103,6 +104,7 @@ func Test_Pipeline_LookaheadAndBackfill(t *testing.T) {
 // Test_Pipeline_RapidSeekTo kiểm tra tua dồn dập nhiều lần không gây race condition hoặc deadlock
 // và đo lường thời gian drain computeMu và drain WaitGroup theo session
 func Test_Pipeline_RapidSeekTo(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_seek.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -155,6 +157,7 @@ func Test_Pipeline_RapidSeekTo(t *testing.T) {
 // Test_Pipeline_CoalescingSeek kiểm tra bắn 20 lệnh RequestSeek dồn dập:
 // Bộ điều phối coalescing phải gom các lệnh lại và chỉ hội tụ xử lý vị trí đích cuối cùng.
 func Test_Pipeline_CoalescingSeek(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_coalesce.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -242,6 +245,7 @@ func Test_Pipeline_CoalescingSeek(t *testing.T) {
 // 1. context.DeadlineExceeded (lệnh ngoài timeout khi session còn sống) phải xóa activeJobs và tăng failedBlocks
 // 2. context.Canceled (session bị hủy) KHÔNG được tăng failedBlocks
 func Test_Pipeline_HandleBlockFailure_DeadlineExceeded(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_timeout.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -295,6 +299,7 @@ func Test_Pipeline_HandleBlockFailure_DeadlineExceeded(t *testing.T) {
 // nếu lệnh tua tiếp theo trúng block đã xong trong cache, hệ thống KHÔNG được return chay
 // mà phải tạo session mới để worker sống tiếp tục xử lý các block phía sau.
 func Test_Pipeline_FastPath_RequiresLiveSession(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_fastpath.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -338,6 +343,7 @@ func Test_Pipeline_FastPath_RequiresLiveSession(t *testing.T) {
 // Hệ thống PHẢI hủy session cũ, tạo session mới để ưu tiên dịch Tier-1 mốc thời gian vừa tua,
 // đồng thời xóa failedBlocks của block đích về 0.
 func Test_Pipeline_SeekUnfinishedBlock_AlwaysRestartsSessionAndClearsFailures(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_restart.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -397,6 +403,7 @@ func (m *modeAwareTranslator) CurrentMode() string {
 // và block chưa bị hoãn Tier-2, hệ thống PHẢI giữ nguyên session (không hủy Whisper)
 // và chỉ dịch chuyển playheadSec.
 func Test_Pipeline_SmartFastPath2_ApiMode_PreservesSession(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_fastpath2.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -443,6 +450,7 @@ func Test_Pipeline_SmartFastPath2_ApiMode_PreservesSession(t *testing.T) {
 // Khi ở mode "local_ai", dù tua trong cùng block đang active, hệ thống BẮT BUỘC phải tạo session mới
 // để tránh việc các câu tại mốc tua mới bị coi là Tier-2 và bị lệnh break bỏ rơi.
 func Test_Pipeline_SmartFastPath2_LocalAiMode_ForcesRestart(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_localai_restart.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -480,6 +488,7 @@ func Test_Pipeline_SmartFastPath2_LocalAiMode_ForcesRestart(t *testing.T) {
 // Khi ở mode "api", nhưng block đích đã từng bị hoãn Tier-2 (tier2Deferred[targetBlock] == true),
 // hệ thống BẮT BUỘC phải tạo session mới để dịch bù toàn bộ câu còn thiếu.
 func Test_Pipeline_SmartFastPath2_Tier2Deferred_ForcesRestart(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_tier2def_restart.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -516,6 +525,7 @@ func Test_Pipeline_SmartFastPath2_Tier2Deferred_ForcesRestart(t *testing.T) {
 // Khi RunCommand gặp timeout và trả về lỗi tiến trình timeout (trong khi session vẫn sống),
 // worker phải kích hoạt handleBlockFailure, tăng failedBlocks và giải phóng activeJobs.
 func Test_Pipeline_WorkerTimeout_TriggersFailure(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_timeout_real.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
@@ -569,6 +579,7 @@ func Test_Pipeline_WorkerTimeout_TriggersFailure(t *testing.T) {
 // Test_Pipeline_RealFFmpeg_RapidSeek sử dụng ffmpeg thật (không mock slice):
 // Sinh video mẫu và đo lường computeDrainMs và wgDrainMs thực tế khi tua dồn dập trong lúc ffmpeg thật đang chạy cắt âm thanh.
 func Test_Pipeline_RealFFmpeg_RapidSeek(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	repoRoot, _ := os.Getwd()
 	binDir := filepath.Join(repoRoot, "build", "bin")
 	ffmpegPath := filepath.Join(binDir, "tools", "ffmpeg", "ffmpeg.exe")
@@ -619,6 +630,7 @@ func Test_Pipeline_RealFFmpeg_RapidSeek(t *testing.T) {
 // - Kịch bản 2: Tua ngắn 5s trong cùng block đang chạy ở mode "api" (Smart Fast-Path 2)
 // - Kịch bản 3: Tua nhảy xa sang block chưa xử lý (Slow-Path: hủy session cũ, drain, tạo session mới)
 func Test_Pipeline_Benchmark_ThreeSeekScenarios(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	dummyVideo := filepath.Join(tempDir, "video_scenarios.mp4")
 	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
