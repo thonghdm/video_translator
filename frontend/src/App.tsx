@@ -70,7 +70,7 @@ interface PipelineStatus {
   total_blocks: number;
   ahead_sec: number;
   video: string;
-  translator_mode?: "api" | "local_ai";
+  translator_mode?: "api" | "cloud" | "local_ai";
 }
 
 export interface FolderNode {
@@ -2160,12 +2160,14 @@ export const App: React.FC = () => {
                 <span>Kéo thả vị trí • Nhấp đúp đặt lại</span>
               </div>
 
-              {/* Indicator loại dịch: Chấm màu nhỏ báo hiệu API vs Local AI */}
+              {/* Indicator loại dịch: Chấm màu nhỏ báo hiệu API vs Cloud vs Local AI */}
               <div
                 className="absolute -top-2 right-2.5 flex items-center gap-1 bg-black/85 border border-white/10 rounded-full px-1.5 py-0.5 text-[9px] pointer-events-none shadow-sm"
                 title={
                   pipelineStatus?.translator_mode === "local_ai"
                     ? "Dịch bằng Local AI Qwen 2.5 (Offline)"
+                    : pipelineStatus?.translator_mode === "cloud"
+                    ? "Dịch bằng Gemini Cloud (Dự phòng)"
                     : "Dịch bằng API Google Cloud siêu tốc"
                 }
               >
@@ -2173,6 +2175,8 @@ export const App: React.FC = () => {
                   className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                     pipelineStatus?.translator_mode === "local_ai"
                       ? "bg-purple-400 shadow-[0_0_6px_rgba(192,132,252,0.9)] animate-pulse"
+                      : pipelineStatus?.translator_mode === "cloud"
+                      ? "bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.9)]"
                       : "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]"
                   }`}
                 />
@@ -2180,11 +2184,15 @@ export const App: React.FC = () => {
                   className={`font-semibold text-[8px] uppercase tracking-wider ${
                     pipelineStatus?.translator_mode === "local_ai"
                       ? "text-purple-300"
+                      : pipelineStatus?.translator_mode === "cloud"
+                      ? "text-cyan-300"
                       : "text-emerald-300"
                   }`}
                 >
                   {pipelineStatus?.translator_mode === "local_ai"
                     ? "Local AI"
+                    : pipelineStatus?.translator_mode === "cloud"
+                    ? "Cloud"
                     : "API"}
                 </span>
               </div>

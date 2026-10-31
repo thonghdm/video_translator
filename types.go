@@ -45,7 +45,7 @@ type PipelineStatus struct {
 	TotalBlocks int     `json:"total_blocks"`
 	AheadSec       float64 `json:"ahead_sec"`
 	Video          string  `json:"video"`
-	TranslatorMode string  `json:"translator_mode,omitempty"` // "api" | "local_ai"
+	TranslatorMode string  `json:"translator_mode,omitempty"` // "api" | "cloud" | "local_ai"
 }
 
 // PipelineError payload cho sự kiện pipeline_error
