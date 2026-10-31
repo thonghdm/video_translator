@@ -675,6 +675,7 @@ export const App: React.FC = () => {
     null,
   );
   const [doneBlocks, setDoneBlocks] = useState<number[]>([]);
+  const doneBlocksRef = useRef<number[]>([]);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -913,6 +914,7 @@ export const App: React.FC = () => {
         // 1. Reset state cũ
         setSubtitles([]);
         setCurrentSubtitle(null);
+        doneBlocksRef.current = [];
         setDoneBlocks([]);
         setCurrentTime(0);
         lastUiTimeRef.current = 0;
@@ -929,7 +931,9 @@ export const App: React.FC = () => {
 
         setVideoInfo(info);
         setDuration(info.duration_sec);
-        setDoneBlocks(info.done_blocks || []);
+        const initialDone = info.done_blocks || [];
+        doneBlocksRef.current = initialDone;
+        setDoneBlocks(initialDone);
         setViewMode("player");
 
         // 3. Nạp cache phụ đề nếu có (bao gồm cả phụ đề gốc _en.srt đi kèm)
@@ -1227,6 +1231,7 @@ export const App: React.FC = () => {
             if (!prev.includes(chunk.block)) {
               const next = [...prev, chunk.block];
               next.sort((a, b) => a - b);
+              doneBlocksRef.current = next;
               return next;
             }
             return prev;
@@ -1333,7 +1338,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Tua video an toàn với Debounce 200ms chống dồn lệnh SeekTo
+  // Tua video với Debounce nhẹ 50ms chống rung thanh trượt (backend gom lệnh bằng Coalescing Seek)
   const seekVideo = useCallback(
     (targetSec: number) => {
       if (!videoRef.current || !videoInfo) return;
@@ -1346,17 +1351,16 @@ export const App: React.FC = () => {
       const blockSec = videoInfo.block_sec || 30;
       const targetBlock = Math.floor(clamped / blockSec);
 
-      // Nếu tua vào block chưa dịch xong, báo toast cho người dùng biết
-      if (!doneBlocks.includes(targetBlock)) {
-        showToast("⚡ Đang xử lý phụ đề đoạn này...");
-      }
-
       clearTimeout(seekDebounceTimerRef.current);
       seekDebounceTimerRef.current = setTimeout(() => {
+        // Chỉ báo toast khi đã dừng chuột tại block chưa dịch xong (đọc trực tiếp từ doneBlocksRef, tránh stale closure)
+        if (!doneBlocksRef.current.includes(targetBlock)) {
+          showToast("⚡ Đang xử lý phụ đề đoạn này...");
+        }
         window.go?.main?.App?.SeekTo(videoInfo.path, clamped);
-      }, 200);
+      }, 50);
     },
-    [videoInfo, duration, doneBlocks, showToast],
+    [videoInfo, duration, showToast],
   );
 
   // Phím tắt điều khiển
