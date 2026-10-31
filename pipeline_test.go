@@ -1034,3 +1034,19 @@ func Test_BUG03_ReusesStoredSTT_NoSliceNoWhisper_OnlyTranslatesMissing(t *testin
 		t.Fatalf("kết quả cuối không đúng: %+v", items)
 	}
 }
+
+func Test_BUG12_ShouldParseWhisperTimings(t *testing.T) {
+	t.Setenv("VT_TELEMETRY", "")
+	if !shouldParseWhisperTimings("auto") {
+		t.Fatalf("-l auto cần parse để lấy ngôn ngữ cho detect-once")
+	}
+	for _, l := range []string{"en", "vi", "ja"} {
+		if shouldParseWhisperTimings(l) {
+			t.Fatalf("ngôn ngữ cố định %q + telemetry tắt thì không cần parse", l)
+		}
+	}
+	t.Setenv("VT_TELEMETRY", "1")
+	if !shouldParseWhisperTimings("en") {
+		t.Fatalf("bật telemetry thì luôn phải parse")
+	}
+}

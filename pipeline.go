@@ -914,6 +914,13 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 	}
 }
 
+// shouldParseWhisperTimings: stderr của Whisper chỉ cần phân tích (9 regexp) khi bật telemetry
+// hoặc khi còn đang tự nhận diện ngôn ngữ (-l auto) để lấy ngôn ngữ + xác suất cho detect-once.
+// Khi đã chốt ngôn ngữ cố định, bỏ qua bước này ở mọi block.
+func shouldParseWhisperTimings(lang string) bool {
+	return IsTelemetryEnabled() || lang == "auto"
+}
+
 // sttWorker chạy Whisper CLI
 func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outChan chan<- TextJob) {
 	defer func() {
@@ -1051,7 +1058,7 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 				p.computeMu.Unlock()
 
 				err = cmdErr
-				if runRes != nil && runRes.FullStderr != "" {
+				if runRes != nil && runRes.FullStderr != "" && shouldParseWhisperTimings(lang) {
 					whisperTimings = ParseWhisperTimings(runRes.FullStderr)
 					SaveWhisperStderrSample(runRes.FullStderr)
 					if whisperTimings.DetectedLang != "" && (detectedLang == "" || detectedLang == "auto") {
