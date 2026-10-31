@@ -317,28 +317,30 @@ func TestTranslateBatch_TruncatedOutput_NoPanic(t *testing.T) {
 		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
 	}
 
-	mockTier1Called := false
+	var mockTier1Called atomic.Bool
 	mockTier1 := tier{
 		name: "mock_partial",
 		translate: func(ctx context.Context, lines []string) ([]string, error) {
-			mockTier1Called = true
+			mockTier1Called.Store(true)
 			return []string{"Dòng 1 hoàn tất"}, nil // Chỉ trả 1 phần tử cho 3 dòng
 		},
-		cache: true,
+		cache:    true,
+		fillGaps: true, // Cho phép tầng sau bù dòng thiếu
 	}
 
-	mockTier2Called := false
+	var mockTier2Called atomic.Bool
 	mockTier2 := tier{
 		name: "mock_fallback",
 		translate: func(ctx context.Context, lines []string) ([]string, error) {
-			mockTier2Called = true
+			mockTier2Called.Store(true)
 			res := make([]string, len(lines))
 			for i, l := range lines {
 				res[i] = "fb: " + l
 			}
 			return res, nil
 		},
-		cache: false,
+		cache:    false,
+		fillGaps: false,
 	}
 
 	lines := []string{"Line 1", "Line 2", "Line 3"}
@@ -349,7 +351,7 @@ func TestTranslateBatch_TruncatedOutput_NoPanic(t *testing.T) {
 	if len(res) != 3 {
 		t.Fatalf("kỳ vọng res đủ 3 phần tử, nhận: %d", len(res))
 	}
-	if !mockTier1Called || !mockTier2Called {
+	if !mockTier1Called.Load() || !mockTier2Called.Load() {
 		t.Fatalf("kỳ vọng cả 2 tầng đều được gọi")
 	}
 	if res[0] != "Dòng 1 hoàn tất" {
@@ -357,6 +359,109 @@ func TestTranslateBatch_TruncatedOutput_NoPanic(t *testing.T) {
 	}
 	if res[1] != "fb: Line 2" || res[2] != "fb: Line 3" {
 		t.Fatalf("dòng 2 và 3 phải do tầng 2 bù phần thiếu, nhận: %q, %q", res[1], res[2])
+	}
+}
+
+// TestTranslateBatch_GoogleEmptyLine_NeverWakesQwen kiểm tra khi tầng trước (fillGaps = false) trả về câu rỗng, Qwen tuyệt đối KHÔNG bị đánh thức
+func TestTranslateBatch_GoogleEmptyLine_NeverWakesQwen(t *testing.T) {
+	fb := &dummyFallbackTranslator{}
+	f := &FastHybridTranslator{
+		phraseCache: NewLRUCache(100),
+		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+	}
+
+	var tier1Called atomic.Bool
+	tier1 := tier{
+		name: "api",
+		translate: func(ctx context.Context, lines []string) ([]string, error) {
+			tier1Called.Store(true)
+			// Trả về 2 dòng, trong đó dòng 2 là chuỗi rỗng
+			return []string{"Câu 1 dịch", ""}, nil
+		},
+		cache:    true,
+		fillGaps: false, // GTX: không đẩy dòng rỗng xuống Qwen
+	}
+
+	var qwenCalled atomic.Bool
+	qwenTier := tier{
+		name: "local_ai",
+		translate: func(ctx context.Context, lines []string) ([]string, error) {
+			qwenCalled.Store(true)
+			return fb.TranslateBatch(ctx, lines)
+		},
+		cache:    false,
+		fillGaps: false,
+	}
+
+	lines := []string{"Line 1", "Line 2"}
+	res, err := f.translateWithTiers(context.Background(), lines, []tier{tier1, qwenTier})
+	if err != nil {
+		t.Fatalf("kỳ vọng translateWithTiers thành công, nhận lỗi: %v", err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("kỳ vọng res có 2 phần tử, nhận: %d", len(res))
+	}
+	if res[0] != "Câu 1 dịch" {
+		t.Fatalf("kỳ vọng câu 1 dịch đúng, nhận: %q", res[0])
+	}
+	if res[1] != "" {
+		t.Fatalf("kỳ vọng câu 2 giữ rỗng, nhận: %q", res[1])
+	}
+	if qwenCalled.Load() {
+		t.Fatalf("Qwen fallback KHÔNG được phép bị đánh thức chỉ vì Google trả dòng rỗng!")
+	}
+	if mode := f.CurrentMode(); mode != "api" {
+		t.Fatalf("mode phải là 'api', nhận: %q", mode)
+	}
+}
+
+type failingFallbackTranslator struct {
+	err error
+}
+
+func (f *failingFallbackTranslator) Translate(ctx context.Context, line string, _ []string) (string, error) {
+	return "", f.err
+}
+
+func (f *failingFallbackTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	return nil, f.err
+}
+
+func (f *failingFallbackTranslator) Close() error { return nil }
+
+// TestTranslateBatch_AllTiersFail_PreservesCacheAndReturnsError kiểm tra khi cả 2 tầng đều lỗi thì kết quả vẫn giữ các câu trong cache và trả lỗi
+func TestTranslateBatch_AllTiersFail_PreservesCacheAndReturnsError(t *testing.T) {
+	// Google trả 429
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			return mockResponse(http.StatusTooManyRequests, "Rate Limited")
+		}),
+	}
+
+	// Qwen fallback cũng bị lỗi
+	fb := &failingFallbackTranslator{err: errors.New("llama-server crash")}
+	f := &FastHybridTranslator{
+		client:      client,
+		phraseCache: NewLRUCache(100),
+		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+	}
+	f.setCached("Cached phrase", "Đã có trong cache")
+
+	lines := []string{"Cached phrase", "New unseen phrase"}
+	res, err := f.TranslateBatch(context.Background(), lines)
+	if err == nil {
+		t.Fatalf("kỳ vọng trả về lỗi khi cả 2 tầng đều thất bại")
+	}
+	if len(res) != 2 {
+		t.Fatalf("kỳ vọng res đủ 2 phần tử, nhận: %d", len(res))
+	}
+	if res[0] != "Đã có trong cache" {
+		t.Fatalf("kỳ vọng câu đã cache được giữ nguyên, nhận: %q", res[0])
+	}
+	if res[1] != "" {
+		t.Fatalf("kỳ vọng câu lỗi chưa dịch được để rỗng, nhận: %q", res[1])
 	}
 }
 

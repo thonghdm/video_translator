@@ -370,9 +370,8 @@ type errKind int
 const (
 	errKindNone errKind = iota
 	errKindCanceled
-	errKindBlocked  // 429, captcha, breaker open
-	errKindMismatch // line mismatch
-	errKindNetwork  // net.Error, DNS, connection timeout
+	errKindBlocked // 429, captcha, breaker open
+	errKindNetwork // net.Error, DNS, connection timeout
 	errKindOther
 )
 
@@ -383,10 +382,14 @@ func classifyErr(err error) errKind {
 	if errors.Is(err, context.Canceled) {
 		return errKindCanceled
 	}
-	if errors.Is(err, ErrRateLimited) || strings.Contains(err.Error(), "breaker open") {
+	if errors.Is(err, ErrRateLimited) {
 		return errKindBlocked
 	}
 	if errors.Is(err, errEmptyTranslation) {
+		return errKindOther
+	}
+	// Hết hạn deadline của context không xem là lỗi mạng thuần túy
+	if errors.Is(err, context.DeadlineExceeded) {
 		return errKindOther
 	}
 	var netErr net.Error
@@ -400,6 +403,7 @@ type tier struct {
 	name      string                                              // "api" | "cloud" | "local_ai"
 	translate func(ctx context.Context, lines []string) ([]string, error)
 	cache     bool                                                // GTX/Gemini: true, Qwen: false
+	fillGaps  bool                                                // true nếu cho phép tầng sau bù dòng rỗng của tầng này (chỉ dùng cho cloud)
 }
 
 func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
@@ -408,11 +412,13 @@ func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []strin
 			name:      "api",
 			translate: f.viaGoogle,
 			cache:     true,
+			fillGaps:  false, // GTX ở P1: nếu thành công thì không đánh thức Qwen vì dòng rỗng
 		},
 		{
 			name:      "local_ai",
 			translate: f.viaFallback,
 			cache:     false,
+			fillGaps:  false,
 		},
 	}
 	return f.translateWithTiers(ctx, lines, tiers)
@@ -484,9 +490,16 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 				if t.cache {
 					f.setCached(todo[pIdx], out[j])
 				}
-			} else {
+			} else if t.fillGaps {
+				// Chỉ đẩy dòng rỗng xuống tầng sau khi tầng này cho phép fillGaps
 				remaining = append(remaining, pIdx)
 			}
+		}
+
+		if !t.fillGaps {
+			// Tầng này không cho phép leo tầng bù dòng rỗng (kết thúc batch ngay khi err == nil)
+			pendingIndices = nil
+			break
 		}
 		pendingIndices = remaining
 	}
