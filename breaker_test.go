@@ -99,6 +99,44 @@ func TestBreaker_Concurrent429_DoesNotJumpSteps(t *testing.T) {
 	}
 }
 
+// TestBreaker_CooldownExpired_NormalRequest429_DoesNotIncrementStep kiểm tra khi cooldown đã hết (blockedUntil ở quá khứ)
+// nhưng request thường (isProbe = false) gặp 429 thì không được tăng step hay coi là lần khóa mới.
+func TestBreaker_CooldownExpired_NormalRequest429_DoesNotIncrementStep(t *testing.T) {
+	cb := NewCircuitBreaker(DefaultBreakerConfig())
+
+	// Bước 1: Khóa lần đầu do rate limit -> step = 1
+	cb.Report(ErrRateLimited, false)
+	if step := cb.backoffStep.Load(); step != 1 {
+		t.Fatalf("kỳ vọng step = 1, nhận: %d", step)
+	}
+
+	// Bước 2: Giả lập thời gian trôi qua, cooldown đã hết (blockedUntil ở quá khứ), nhưng chưa có probe thành công
+	pastTime := time.Now().Add(-5 * time.Second).UnixNano()
+	cb.blockedUntil.Store(pastTime)
+
+	// Blocked() lúc này trả về false vì cooldown đã qua
+	if cb.Blocked() {
+		t.Fatalf("kỳ vọng Blocked() trả về false khi blockedUntil ở quá khứ")
+	}
+
+	// Bước 3: Một request thường (isProbe = false) nhận 429 lúc này
+	cb.Report(ErrRateLimited, false)
+
+	// Step vẫn phải giữ nguyên là 1, blockedUntil không bị thay đổi
+	if step := cb.backoffStep.Load(); step != 1 {
+		t.Fatalf("kỳ vọng step vẫn giữ nguyên 1 khi request thường gặp 429 sau cooldown, nhận: %d", step)
+	}
+	if until := cb.blockedUntil.Load(); until != pastTime {
+		t.Fatalf("kỳ vọng blockedUntil không bị thay đổi, nhận: %d vs %d", until, pastTime)
+	}
+
+	// Bước 4: Request probe (isProbe = true) gặp 429 thì MỚI được tăng step lên 2
+	cb.Report(ErrRateLimited, true)
+	if step := cb.backoffStep.Load(); step != 2 {
+		t.Fatalf("kỳ vọng probe thất bại do 429 tăng step lên 2, nhận: %d", step)
+	}
+}
+
 // TestBreaker_RateLimit_ExponentialBackoff_StepsAndDurations kiểm tra chính xác giá trị từng bậc:
 // Bậc 1: 1m
 // Bậc 2: 2m

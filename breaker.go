@@ -116,9 +116,9 @@ func (cb *CircuitBreaker) Report(err error, isProbe bool) {
 		// Tua video hoặc câu dịch rỗng: không phải lỗi của nhà cung cấp dịch vụ
 	case errors.Is(err, ErrRateLimited):
 		// Bị rate limit / HTTP 429: Khóa với exponential backoff.
-		// Chỉ tăng step và đặt blockedUntil khi breaker chưa đang khóa hoặc khi là request probe.
-		// Request thường nhận 429 lúc breaker đã khóa (do bay đồng thời trước đó) thì bỏ qua.
-		if cb.Blocked() && !isProbe {
+		// Chỉ tăng step và đặt blockedUntil khi breaker hoàn toàn đóng (blockedUntil == 0) hoặc khi là probe.
+		// Request thường nhận 429 lúc breaker đã khóa hoặc đang half-open (blockedUntil != 0) thì bỏ qua.
+		if !isProbe && cb.blockedUntil.Load() != 0 {
 			return
 		}
 
