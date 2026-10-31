@@ -308,6 +308,90 @@ func TestGTX_ContextCanceledNoFallback(t *testing.T) {
 	}
 }
 
+// TestTranslateBatch_TruncatedOutput_NoPanic kiểm tra khi tầng trước trả về mảng ngắn hơn todo không gây panic và tầng sau tiếp tục bù dòng thiếu
+func TestTranslateBatch_TruncatedOutput_NoPanic(t *testing.T) {
+	fb := &dummyFallbackTranslator{}
+	f := &FastHybridTranslator{
+		phraseCache: NewLRUCache(100),
+		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+	}
+
+	mockTier1Called := false
+	mockTier1 := tier{
+		name: "mock_partial",
+		translate: func(ctx context.Context, lines []string) ([]string, error) {
+			mockTier1Called = true
+			return []string{"Dòng 1 hoàn tất"}, nil // Chỉ trả 1 phần tử cho 3 dòng
+		},
+		cache: true,
+	}
+
+	mockTier2Called := false
+	mockTier2 := tier{
+		name: "mock_fallback",
+		translate: func(ctx context.Context, lines []string) ([]string, error) {
+			mockTier2Called = true
+			res := make([]string, len(lines))
+			for i, l := range lines {
+				res[i] = "fb: " + l
+			}
+			return res, nil
+		},
+		cache: false,
+	}
+
+	lines := []string{"Line 1", "Line 2", "Line 3"}
+	res, err := f.translateWithTiers(context.Background(), lines, []tier{mockTier1, mockTier2})
+	if err != nil {
+		t.Fatalf("kỳ vọng không lỗi khi tầng 2 bù phần thiếu thành công, nhận: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("kỳ vọng res đủ 3 phần tử, nhận: %d", len(res))
+	}
+	if !mockTier1Called || !mockTier2Called {
+		t.Fatalf("kỳ vọng cả 2 tầng đều được gọi")
+	}
+	if res[0] != "Dòng 1 hoàn tất" {
+		t.Fatalf("dòng 1 phải do tầng 1 dịch, nhận: %q", res[0])
+	}
+	if res[1] != "fb: Line 2" || res[2] != "fb: Line 3" {
+		t.Fatalf("dòng 2 và 3 phải do tầng 2 bù phần thiếu, nhận: %q, %q", res[1], res[2])
+	}
+}
+
+// TestTranslateBatch_QwenOutput_NeverCached kiểm tra kết quả dịch từ Qwen fallback tuyệt đối không được ghi vào phraseCache
+func TestTranslateBatch_QwenOutput_NeverCached(t *testing.T) {
+	// Giả lập Google bị rate limit
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			return mockResponse(http.StatusTooManyRequests, "Rate Limited")
+		}),
+	}
+
+	fb := &dummyFallbackTranslator{}
+	f := &FastHybridTranslator{
+		client:      client,
+		phraseCache: NewLRUCache(100),
+		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+	}
+
+	lines := []string{"Sentence from Qwen"}
+	res, err := f.TranslateBatch(context.Background(), lines)
+	if err != nil {
+		t.Fatalf("kỳ vọng dịch qua Qwen thành công, nhận: %v", err)
+	}
+	if len(res) != 1 || res[0] != "fb: Sentence from Qwen" {
+		t.Fatalf("kỳ vọng nhận câu dịch từ dummyFallback, nhận: %v", res)
+	}
+
+	// Đảm bảo không nằm trong phraseCache
+	if _, cached := f.getCached("Sentence from Qwen"); cached {
+		t.Fatalf("kết quả từ Qwen fallback KHÔNG được phép lưu vào phraseCache")
+	}
+}
+
 type modeSwitchTranslator struct {
 	mode   string
 	modeMu sync.RWMutex

@@ -285,6 +285,9 @@ func (f *FastHybridTranslator) viaGoogle(ctx context.Context, lines []string) ([
 	}
 	out, err := f.googleBatchOrPerLine(ctx, lines)
 	f.gtxReport(err, isProbe)
+	if err == nil && len(out) != len(lines) {
+		return nil, fmt.Errorf("google returned %d lines, want %d", len(out), len(lines))
+	}
 	return out, err
 }
 
@@ -362,7 +365,60 @@ func (f *FastHybridTranslator) Translate(ctx context.Context, line string, _ []s
 	return "", nil
 }
 
+type errKind int
+
+const (
+	errKindNone errKind = iota
+	errKindCanceled
+	errKindBlocked  // 429, captcha, breaker open
+	errKindMismatch // line mismatch
+	errKindNetwork  // net.Error, DNS, connection timeout
+	errKindOther
+)
+
+func classifyErr(err error) errKind {
+	if err == nil {
+		return errKindNone
+	}
+	if errors.Is(err, context.Canceled) {
+		return errKindCanceled
+	}
+	if errors.Is(err, ErrRateLimited) || strings.Contains(err.Error(), "breaker open") {
+		return errKindBlocked
+	}
+	if errors.Is(err, errEmptyTranslation) {
+		return errKindOther
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return errKindNetwork
+	}
+	return errKindOther
+}
+
+type tier struct {
+	name      string                                              // "api" | "cloud" | "local_ai"
+	translate func(ctx context.Context, lines []string) ([]string, error)
+	cache     bool                                                // GTX/Gemini: true, Qwen: false
+}
+
 func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	tiers := []tier{
+		{
+			name:      "api",
+			translate: f.viaGoogle,
+			cache:     true,
+		},
+		{
+			name:      "local_ai",
+			translate: f.viaFallback,
+			cache:     false,
+		},
+	}
+	return f.translateWithTiers(ctx, lines, tiers)
+}
+
+func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []string, tiers []tier) ([]string, error) {
 	if len(lines) == 0 {
 		return nil, nil
 	}
@@ -387,38 +443,56 @@ func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []strin
 		return results, nil
 	}
 
-	fill := func(out []string) {
-		for j, i := range idx {
-			if out[j] == "" {
-				continue
+	// pendingIndices lưu vị trí trong todo/idx cho những câu chưa dịch được
+	pendingIndices := make([]int, len(todo))
+	for i := range todo {
+		pendingIndices[i] = i
+	}
+
+	var lastErr error
+
+	for _, t := range tiers {
+		if len(pendingIndices) == 0 {
+			break
+		}
+
+		tierInput := make([]string, len(pendingIndices))
+		for j, pIdx := range pendingIndices {
+			tierInput[j] = todo[pIdx]
+		}
+
+		out, err := t.translate(ctx, tierInput)
+		if cerr := ctx.Err(); cerr != nil || classifyErr(err) == errKindCanceled {
+			// QUAN TRỌNG: tua video / hủy context thì dừng ngay, không leo tầng
+			return nil, ctx.Err()
+		}
+
+		if err != nil {
+			lastErr = err
+			// Ở P1: mọi lỗi không phải hủy context thì xuống tầng tiếp theo
+			continue
+		}
+
+		f.setMode(t.name)
+
+		var remaining []int
+		for j, pIdx := range pendingIndices {
+			// j < len(out) bảo vệ chống out ngắn hơn tierInput (không panic)
+			if j < len(out) && out[j] != "" {
+				origIdx := idx[pIdx]
+				results[origIdx] = out[j]
+				if t.cache {
+					f.setCached(todo[pIdx], out[j])
+				}
+			} else {
+				remaining = append(remaining, pIdx)
 			}
-			results[i] = out[j]
-			f.setCached(todo[j], out[j])
 		}
+		pendingIndices = remaining
 	}
 
-	out, err := f.viaGoogle(ctx, todo)
-	if err == nil {
-		f.setMode("api")
-		fill(out)
-		return results, nil
-	}
-
-	// QUAN TRỌNG: tua video / hủy context thì dừng ngay, không đánh thức Qwen vô ích
-	if cerr := ctx.Err(); cerr != nil {
-		return nil, cerr
-	}
-
-	out, ferr := f.viaFallback(ctx, todo)
-	if ferr != nil {
-		return results, ferr // results vẫn chứa các dòng lấy từ cache
-	}
-	f.setMode("local_ai")
-	for j, i := range idx {
-		if j < len(out) && out[j] != "" {
-			results[i] = out[j]
-			// Không cache kết quả Qwen vào phraseCache vĩnh viễn để khi Google hồi phục có thể dịch lại chất lượng cao hơn
-		}
+	if len(pendingIndices) > 0 && lastErr != nil {
+		return results, lastErr
 	}
 	return results, nil
 }
