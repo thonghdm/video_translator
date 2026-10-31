@@ -774,8 +774,8 @@ func TestTranslateBatch_GTX429_GeminiSuccess_CachedAndModeCloud(t *testing.T) {
 		phraseCache: NewLRUCache(100),
 		fallback:    fb,
 		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
-		gemini:      gemini,
 	}
+	f.SetGemini(gemini)
 
 	lines := []string{"Hello Cloud"}
 	res, err := f.TranslateBatch(context.Background(), lines)
@@ -832,8 +832,8 @@ func TestTranslateBatch_GTXNetworkError_BypassesGemini_DirectToQwen(t *testing.T
 			onCalled: func() { qwenCalled.Store(true) },
 		},
 		gtxBreaker: NewCircuitBreaker(DefaultBreakerConfig()),
-		gemini:     gemini,
 	}
+	f.SetGemini(gemini)
 
 	lines := []string{"Sentence needing translation"}
 	res, err := f.TranslateBatch(context.Background(), lines)
@@ -905,8 +905,8 @@ func TestTranslateBatch_GeminiMissingLines_FilledByQwen(t *testing.T) {
 		phraseCache: NewLRUCache(100),
 		fallback:    fb,
 		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
-		gemini:      gemini,
 	}
+	f.SetGemini(gemini)
 
 	lines := []string{"Line 0", "Line 1"}
 	res, err := f.TranslateBatch(context.Background(), lines)
@@ -978,9 +978,9 @@ func TestTranslateBatch_BothGTXAndGeminiBlocked_NoQwen_ModeOffline(t *testing.T)
 	f := &FastHybridTranslator{
 		phraseCache: NewLRUCache(100),
 		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
-		gemini:      gemini,
 		modelOK:     false, // Không có Qwen
 	}
+	f.SetGemini(gemini)
 	// Khóa breaker GTX
 	f.gtxBreaker.blockedUntil.Store(time.Now().Add(10 * time.Minute).UnixNano())
 
@@ -999,8 +999,8 @@ func TestPipeline_Tier2NotPostponed_InCloudMode(t *testing.T) {
 	f := &FastHybridTranslator{
 		phraseCache: NewLRUCache(100),
 		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
-		gemini:      gemini,
 	}
+	f.SetGemini(gemini)
 	// Khóa breaker GTX để CurrentMode chuyển sang 'cloud'
 	f.gtxBreaker.blockedUntil.Store(time.Now().Add(10 * time.Minute).UnixNano())
 

@@ -581,3 +581,59 @@ func TestGemini_Chunking_MoreThanMaxItemsPerCall(t *testing.T) {
 		t.Fatalf("kết quả dịch sau chunking không đúng: %v", res)
 	}
 }
+
+// 17. Test cleanJSONText khi model trả về văn bản thừa xung quanh mảng JSON
+func TestGemini_CleanJSONText_WithSurroundingText(t *testing.T) {
+	raw := "Here is the translated result in JSON format:\n```json\n[{\"id\": 0, \"vi\": \"Xin chào\"}]\n```\nHope this helps!"
+	cleaned := cleanJSONText(raw)
+	if cleaned != `[{"id": 0, "vi": "Xin chào"}]` {
+		t.Fatalf("kỳ vọng trích xuất chính xác JSON, nhận: %q", cleaned)
+	}
+}
+
+// 18. Test chunking một phần lỗi: giữ lại các dòng của chunk thành công, để rỗng các dòng lỗi (để fillGaps bù)
+func TestGemini_Chunking_PartialFailure_KeepsTranslatedLines(t *testing.T) {
+	var chunkCalls atomic.Int32
+
+	client := &http.Client{
+		Transport: geminiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cnt := chunkCalls.Add(1)
+			if cnt == 1 {
+				// Chunk 1 thành công
+				respItems := []GeminiResponseItem{
+					{ID: 0, VI: "Thành công 0"},
+					{ID: 1, VI: "Thành công 1"},
+				}
+				respJSON, _ := json.Marshal(respItems)
+				return mockGeminiJSONResponse(http.StatusOK, string(respJSON), nil), nil
+			}
+			// Chunk 2 bị lỗi server (500)
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error": "Internal Error"}`)),
+			}, nil
+		}),
+	}
+
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+	cfg.MaxItemsPerCall = 2 // Chunk 1: 2 câu, Chunk 2: 1 câu
+
+	g := NewGeminiClient(cfg, client)
+	lines := []string{"Line 0", "Line 1", "Line 2"}
+	res, err := g.TranslateLines(context.Background(), lines, nil, true)
+	if err != nil {
+		t.Fatalf("kỳ vọng err == nil vì chunk 1 đã dịch được 2 câu, nhận lỗi: %v", err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("kỳ vọng đủ 3 phần tử, nhận: %d", len(res))
+	}
+	if res[0] != "Thành công 0" || res[1] != "Thành công 1" {
+		t.Fatalf("kỳ vọng giữ nguyên kết quả chunk 1, nhận: %v", res)
+	}
+	if res[2] != "" {
+		t.Fatalf("kỳ vọng chunk 2 lỗi thì để chuỗi rỗng để fillGaps xử lý, nhận: %q", res[2])
+	}
+}

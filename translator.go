@@ -87,7 +87,7 @@ type FastHybridTranslator struct {
 	fallbackReady   atomic.Bool  // true khi Qwen fallback đã nạp thành công
 	modelOK         bool         // true nếu file model tồn tại trên đĩa (tính 1 lần khi khởi tạo)
 	gtxBreaker      *CircuitBreaker
-	gemini          *GeminiClient // Tầng Gemini Cloud (dự phòng khi GTX bị rate limit)
+	gemini          atomic.Pointer[GeminiClient] // Tầng Gemini Cloud (dự phòng khi GTX bị rate limit)
 	fbFailUntil     atomic.Int64 // không thử init Qwen lại trước mốc này
 	mismatchCount   atomic.Int64 // số lần batch bị lệch dòng phải dịch từng dòng
 }
@@ -132,16 +132,17 @@ func (f *FastHybridTranslator) isFallbackAvailable() bool {
 	return f.modelOK && time.Now().UnixNano() >= f.fbFailUntil.Load()
 }
 
-// SetGemini gắn GeminiClient vào bộ dịch lai
+// SetGemini gắn GeminiClient vào bộ dịch lai (an toàn luồng qua atomic.Pointer)
 func (f *FastHybridTranslator) SetGemini(g *GeminiClient) {
-	f.gemini = g
+	f.gemini.Store(g)
 }
 
 // CurrentMode trả về loại dịch đang hoạt động: "api" (Google GTX), "cloud" (Gemini Cloud), "local_ai" (Qwen Local LLM), hoặc "offline"
 func (f *FastHybridTranslator) CurrentMode() string {
 	if f.isGtxBlocked() {
 		// GTX bị khóa: Kiểm tra Gemini Cloud trước
-		if f.gemini != nil && f.gemini.cfg.Enabled && f.gemini.cfg.APIKey != "" && !f.gemini.Blocked() {
+		g := f.gemini.Load()
+		if g != nil && g.Available() {
 			return "cloud"
 		}
 		// Gemini không khả dụng hoặc bị khóa: Kiểm tra Local AI
@@ -160,8 +161,12 @@ func (f *FastHybridTranslator) CurrentMode() string {
 
 func (f *FastHybridTranslator) setMode(m string) {
 	f.modeMu.Lock()
+	old := f.currentMode
 	f.currentMode = m
 	f.modeMu.Unlock()
+	if old != m {
+		log.Printf("[Translator] Chuyển chế độ hoạt động: %s -> %s", old, m)
+	}
 }
 
 func (f *FastHybridTranslator) getCached(line string) (string, bool) {
@@ -419,12 +424,13 @@ type tier struct {
 }
 
 func (f *FastHybridTranslator) viaGemini(ctx context.Context, lines []string) ([]string, error) {
-	if f.gemini == nil {
+	g := f.gemini.Load()
+	if g == nil {
 		return nil, ErrGeminiDisabled
 	}
-	// Batch nhỏ (<= 3 câu) coi là Tier-1 (hiển thị gấp), lớn hơn là Tier-2
+	// Heuristic: Batch nhỏ (<= 3 câu) coi là Tier-1 (hiển thị gấp), lớn hơn là Tier-2
 	isTier1 := len(lines) <= 3
-	return f.gemini.TranslateLines(ctx, lines, nil, isTier1)
+	return g.TranslateLines(ctx, lines, nil, isTier1)
 }
 
 func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
@@ -436,7 +442,8 @@ func (f *FastHybridTranslator) TranslateBatch(ctx context.Context, lines []strin
 			fillGaps:  false, // GTX ở P1/P2: nếu thành công thì không đánh thức Qwen vì dòng rỗng
 		},
 	}
-	if f.gemini != nil && f.gemini.cfg.Enabled && f.gemini.cfg.APIKey != "" {
+	g := f.gemini.Load()
+	if g != nil && g.cfg.Enabled && g.cfg.APIKey != "" {
 		tiers = append(tiers, tier{
 			name:      "cloud",
 			translate: f.viaGemini,
@@ -540,7 +547,6 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 		// Chỉ đặt mode khi tầng dịch thành công ít nhất một câu (không đặt khi trả rỗng hoàn toàn)
 		if translatedCount > 0 {
 			f.setMode(t.name)
-			log.Printf("[Translator] Dịch %d câu thành công qua tầng: %s", translatedCount, t.name)
 		}
 
 		if !t.fillGaps {

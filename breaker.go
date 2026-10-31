@@ -170,10 +170,15 @@ func (cb *CircuitBreaker) Report(err error, isProbe bool) {
 				return
 			}
 
-			// Khi bị khóa lần đầu từ trạng thái bình thường (closed)
-			cb.backoffStep.Store(1)
+			// Khi bị khóa lần đầu hoặc không phải probe:
+			// Giữ max(step hiện tại, 1), tuyệt đối không hạ bậc backoff nếu trước đó đã ở bậc cao hơn
+			curStep := cb.backoffStep.Load()
+			if curStep < 1 {
+				cb.backoffStep.Store(1)
+				curStep = 1
+			}
 			cb.blockedUntil.Store(time.Now().Add(dur).UnixNano())
-			log.Printf("[CircuitBreaker] Khóa breaker theo Retry-After: bậc 1, thời lượng %v", dur)
+			log.Printf("[CircuitBreaker] Khóa breaker theo Retry-After: bậc %d, thời lượng %v", curStep, dur)
 			return
 		}
 

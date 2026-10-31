@@ -87,6 +87,14 @@ func (tb *TokenBucket) refillLocked() {
 	}
 }
 
+// HasTokens kiểm tra xem bucket hiện có ít nhất 1 token không
+func (tb *TokenBucket) HasTokens() bool {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	tb.refillLocked()
+	return tb.tokens >= 1.0
+}
+
 // TryAcquire kiểm tra và tiêu tốn 1 token.
 // Tier-1 (ưu tiên): chỉ cần >= 1.0 token.
 // Tier-2: bắt buộc >= 3.0 token (dự trữ ít nhất 2 token cho Tier-1).
@@ -252,6 +260,14 @@ func (c *GeminiClient) Blocked() bool {
 	return c.breaker.Blocked()
 }
 
+// Available kiểm tra xem Gemini có sẵn sàng dịch không: được bật, có key, breaker không khóa và bucket còn token
+func (c *GeminiClient) Available() bool {
+	if !c.cfg.Enabled || c.cfg.APIKey == "" || c.breaker.Blocked() {
+		return false
+	}
+	return c.rateLimiter.HasTokens()
+}
+
 // TranslateLines dịch một danh sách câu qua Gemini Cloud.
 // Nếu số câu vượt quá MaxItemsPerCall, tự động chia nhỏ thành các chunk để không bao giờ cắt bỏ câu.
 // Tự động validate ID, retry 1 lần với riêng các ID thiếu, và trả về mảng kết quả đúng thứ tự.
@@ -270,6 +286,8 @@ func (c *GeminiClient) TranslateLines(ctx context.Context, lines []string, conte
 
 	if len(lines) > maxChunk {
 		res := make([]string, len(lines))
+		var lastErr error
+		translatedAny := false
 		for start := 0; start < len(lines); start += maxChunk {
 			end := start + maxChunk
 			if end > len(lines) {
@@ -288,9 +306,19 @@ func (c *GeminiClient) TranslateLines(ctx context.Context, lines []string, conte
 			}
 			chunkRes, err := c.translateChunk(ctx, chunkLines, chunkContext, isTier1)
 			if err != nil {
-				return nil, err
+				lastErr = err
+				// Giữ các dòng của chunk lỗi là chuỗi rỗng để fillGaps đẩy xuống Qwen
+				continue
 			}
-			copy(res[start:end], chunkRes)
+			for i, r := range chunkRes {
+				if r != "" {
+					translatedAny = true
+					res[start+i] = r
+				}
+			}
+		}
+		if !translatedAny && lastErr != nil {
+			return nil, lastErr
 		}
 		return res, nil
 	}
@@ -558,7 +586,15 @@ func cleanJSONText(s string) string {
 	if strings.HasSuffix(s, "```") {
 		s = strings.TrimSuffix(s, "```")
 	}
-	return strings.TrimSpace(s)
+	s = strings.TrimSpace(s)
+
+	// Trích xuất substring từ '[' đầu tiên tới ']' cuối cùng (loại bỏ lời dẫn giải thích nếu có)
+	start := strings.Index(s, "[")
+	end := strings.LastIndex(s, "]")
+	if start != -1 && end != -1 && end > start {
+		return s[start : end+1]
+	}
+	return s
 }
 
 func parseRetryAfter(h string) time.Duration {
