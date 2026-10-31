@@ -869,3 +869,106 @@ func Test_BUG07_LocalAI_CancelWhileWaitingForComputeMu_WorkerExits(t *testing.T)
 		t.Fatalf("translatorWorker không thoát sau khi session bị hủy (kẹt chờ computeMu)")
 	}
 }
+
+func Test_BUG09_PickUrgentBatch(t *testing.T) {
+	items := make([]SubtitleItem, 0, 10)
+	for i := 0; i < 10; i++ {
+		items = append(items, SubtitleItem{StartSec: float64(i) * 10, EndSec: float64(i)*10 + 8})
+	}
+	batches := [][]int{{0, 1}, {2, 3}, {4, 5}, {8, 9}}
+	// playhead 82s -> vùng [81, 97] chỉ chạm item 8 (80-88) và 9 (90-98) -> batch số 3
+	if k := pickUrgentBatch(items, batches, 1, 82.0); k != 3 {
+		t.Fatalf("kỳ vọng batch 3, nhận %d", k)
+	}
+	// batch hiện tại đã là batch cần gấp -> trả về chính nó
+	if k := pickUrgentBatch(items, batches, 3, 82.0); k != 3 {
+		t.Fatalf("kỳ vọng 3, nhận %d", k)
+	}
+	// không có câu nào trong vùng
+	if k := pickUrgentBatch(items, batches, 0, 500.0); k != -1 {
+		t.Fatalf("kỳ vọng -1, nhận %d", k)
+	}
+}
+
+// orderRecordingTranslator ghi lại thứ tự các batch được dịch và gọi hook trước mỗi batch.
+type orderRecordingTranslator struct {
+	MockTranslator
+	mu     sync.Mutex
+	calls  [][]string
+	onCall func(n int)
+}
+
+func (m *orderRecordingTranslator) CurrentMode() string { return "api" }
+func (m *orderRecordingTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	m.mu.Lock()
+	m.calls = append(m.calls, append([]string(nil), lines...))
+	n := len(m.calls)
+	m.mu.Unlock()
+	if m.onCall != nil {
+		m.onCall(n)
+	}
+	return m.MockTranslator.TranslateBatch(ctx, lines)
+}
+
+// BUG-09: tua ngắn trong block đang dịch -> batch Tier-2 chứa câu tại playhead mới phải được dịch trước.
+func Test_BUG09_ShortSeekReprioritizesTier2Batch(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	tempDir := t.TempDir()
+	dummyVideo := filepath.Join(tempDir, "dummy_bug09.mp4")
+	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
+	bs, err := NewBlockStore(dummyVideo, CacheMeta{BlockSec: 30, OverlapSec: 2, DurationSec: 30})
+	if err != nil {
+		t.Fatalf("NewBlockStore error: %v", err)
+	}
+	settings := Settings{BlockSec: 30.0, OverlapSec: 2.0, LookaheadMinSec: 10.0, LookaheadMaxSec: 30.0, TranslateWorkers: 1}
+
+	var p *Pipeline
+	trans := &orderRecordingTranslator{}
+	p = NewPipeline(dummyVideo, 30.0, settings, &ToolsPaths{TempDir: tempDir}, bs, trans, PipelineEventCallbacks{})
+	p.MockSliceAudio = func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error { return nil }
+	p.MockRunSTT = func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error) {
+		segs := make([]WhisperSegment, 0, 15)
+		for i := 0; i < 15; i++ {
+			segs = append(segs, WhisperSegment{StartSec: float64(i) * 2, EndSec: float64(i)*2 + 1.5, Text: fmt.Sprintf("Sentence number %02d.", i*2)})
+		}
+		return segs, nil
+	}
+	// Tier-1 = các câu <= 15s (3 batch). Khi batch Tier-1 cuối cùng được dịch, người dùng tua tới 28s.
+	trans.onCall = func(n int) {
+		if n == 3 {
+			p.mu.Lock()
+			p.playheadSec = 28.0
+			p.mu.Unlock()
+		}
+	}
+
+	_ = p.Start(0)
+	defer p.Stop()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		trans.mu.Lock()
+		n := len(trans.calls)
+		trans.mu.Unlock()
+		if n >= 5 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	trans.mu.Lock()
+	defer trans.mu.Unlock()
+	if len(trans.calls) < 4 {
+		t.Fatalf("chưa đủ batch: %v", trans.calls)
+	}
+	first := trans.calls[3] // batch Tier-2 đầu tiên
+	found := false
+	for _, l := range first {
+		if l == "Sentence number 28." {
+			found = true
+		}
+	}
+	t.Logf("batch Tier-2 đầu tiên: %v", first)
+	if !found {
+		t.Fatalf("BUG-09: batch Tier-2 đầu tiên %v không chứa câu tại playhead mới (Sentence number 28.)", first)
+	}
+}

@@ -1263,7 +1263,7 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			if p.translator != nil && len(job.Items) > 0 {
 				batches, nTier1 := BuildTwoTierBatches(job.Items, curPlayhead, isTier1Block)
 
-				for bIdx, indices := range batches {
+				for bIdx := 0; bIdx < len(batches); bIdx++ {
 					if ctx.Err() != nil {
 						return
 					}
@@ -1274,12 +1274,26 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 						if p.isTier2PostponedMode() {
 							break
 						}
-						if bIdx > 0 && p.MockRunSTT == nil {
+						// Người dùng có thể đã tua ngắn trong block này (Smart Fast-Path 2 giữ nguyên session)
+						// kể từ lúc chia batch: đọc lại playhead, đưa batch chứa câu sắp phát lên trước
+						// và bỏ nhịp nghỉ để hiện phụ đề ngay.
+						p.mu.Lock()
+						nowPlayhead := p.playheadSec
+						p.mu.Unlock()
+						urgent := false
+						if k := pickUrgentBatch(job.Items, batches, bIdx, nowPlayhead); k >= 0 {
+							if k != bIdx {
+								batches[bIdx], batches[k] = batches[k], batches[bIdx]
+							}
+							urgent = true
+						}
+						if !urgent && bIdx > 0 && p.MockRunSTT == nil {
 							if !sleepCtx(ctx, jitter(300*time.Millisecond)) {
 								return
 							}
 						}
 					}
+					indices := batches[bIdx]
 
 					batchLines := make([]string, len(indices))
 					for k, itemIdx := range indices {
@@ -1499,6 +1513,24 @@ func (p *Pipeline) handleBlockFailure(blockIdx int, stage string, err error, ses
 	p.triggerSchedule()
 }
 
+// inPlayWindow: câu nằm trong vùng ưu tiên Tier-1 [playhead-1s, playhead+15s].
+func inPlayWindow(it SubtitleItem, playheadSec float64) bool {
+	return it.EndSec >= playheadSec-1.0 && it.StartSec <= playheadSec+15.0
+}
+
+// pickUrgentBatch trả về chỉ số batch đầu tiên trong batches[from:] có chứa câu thuộc vùng Tier-1
+// tính theo playhead HIỆN TẠI (có thể chính là from), hoặc -1 nếu không có batch nào.
+func pickUrgentBatch(items []SubtitleItem, batches [][]int, from int, playheadSec float64) int {
+	for k := from; k < len(batches); k++ {
+		for _, idx := range batches[k] {
+			if inPlayWindow(items[idx], playheadSec) {
+				return k
+			}
+		}
+	}
+	return -1
+}
+
 // BuildTwoTierBatches chia danh sách câu trong block theo mô hình Two-Tier Lookahead:
 // - Tier 1 (High Priority): Ưu tiên gom cụm nhỏ (tối đa 3 câu / 240 ký tự) cho các câu nằm trong vùng [playheadSec - 1s, playheadSec + 15s] để hiển thị tức thì.
 // - Tier 2 (Low Priority): Các câu phía trước (ahead) dịch trước, các câu đã qua (behind) dịch sau. Giảm batch còn 5 câu / 400 ký tự để giảm tỉ lệ lệch dòng.
@@ -1511,7 +1543,7 @@ func BuildTwoTierBatches(items []SubtitleItem, playheadSec float64, isTier1Block
 	var tier1, ahead, behind []int
 	for i, it := range items {
 		switch {
-		case isTier1Block && it.EndSec >= playheadSec-1.0 && it.StartSec <= playheadSec+15.0:
+		case isTier1Block && inPlayWindow(it, playheadSec):
 			tier1 = append(tier1, i)
 		case isTier1Block && it.EndSec < playheadSec-1.0:
 			behind = append(behind, i)
