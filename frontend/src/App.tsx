@@ -734,6 +734,16 @@ export const App: React.FC = () => {
   );
   const [doneBlocks, setDoneBlocks] = useState<number[]>([]);
   const doneBlocksRef = useRef<number[]>([]);
+  // Ref luôn trỏ giá trị mới nhất để vòng syncFrame / listener keydown không phải hủy-đăng ký lại
+  const subtitlesRef = useRef<SubtitleItem[]>([]);
+  const subtitleOffsetRef = useRef<number>(0);
+  const currentTimeRef = useRef<number>(0);
+  subtitlesRef.current = subtitles;
+  subtitleOffsetRef.current = subtitleOffset;
+  currentTimeRef.current = currentTime;
+  doneBlocksRef.current = doneBlocks;
+  const currentSubtitleRef = useRef<SubtitleItem | null>(null);
+  currentSubtitleRef.current = currentSubtitle;
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1330,13 +1340,10 @@ export const App: React.FC = () => {
         setSubtitles((prev) => upsertSubtitles(prev, chunk.items || []));
         if (chunk.final) {
           setDoneBlocks((prev) => {
-            if (!prev.includes(chunk.block)) {
-              const next = [...prev, chunk.block];
-              next.sort((a, b) => a - b);
-              doneBlocksRef.current = next;
-              return next;
-            }
-            return prev;
+            if (prev.includes(chunk.block)) return prev;
+            const next = [...prev, chunk.block];
+            next.sort((a, b) => a - b);
+            return next;
           });
         }
       },
@@ -1378,7 +1385,10 @@ export const App: React.FC = () => {
       }
 
       // Tra cứu phụ đề bằng Binary Search với offset
-      const sub = findSubtitleAtTime(subtitles, mediaTime + subtitleOffset);
+      const sub = findSubtitleAtTime(
+        subtitlesRef.current,
+        mediaTime + subtitleOffsetRef.current,
+      );
       setCurrentSubtitle((prev) =>
         prev?.id === sub?.id &&
         prev?.target_text === sub?.target_text &&
@@ -1418,7 +1428,24 @@ export const App: React.FC = () => {
         cancelAnimationFrame(handle);
       }
     };
-  }, [subtitles, subtitleOffset, videoInfo?.path]);
+  }, [videoInfo?.path]);
+
+  // Khi phụ đề/offset đổi: cập nhật phụ đề hiện tại ngay, không cần khởi động lại vòng syncFrame
+  // (cũng đúng khi video đang tạm dừng, lúc đó không có frame callback nào chạy)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const sub = findSubtitleAtTime(subtitles, video.currentTime + subtitleOffset);
+    const prev = currentSubtitleRef.current;
+    // So sánh trước để không gọi setState thừa (tránh 1 lần chạy lại thân App khi không đổi)
+    if (
+      prev?.id !== sub?.id ||
+      prev?.target_text !== sub?.target_text ||
+      prev?.source_text !== sub?.source_text
+    ) {
+      setCurrentSubtitle(sub);
+    }
+  }, [subtitles, subtitleOffset]);
 
   // Cập nhật volume và playbackRate cho thẻ video DOM
   useEffect(() => {
@@ -1479,11 +1506,11 @@ export const App: React.FC = () => {
           break;
         case "ArrowLeft":
           e.preventDefault();
-          seekVideo(currentTime - (e.shiftKey ? 30 : 5));
+          seekVideo(currentTimeRef.current - (e.shiftKey ? 30 : 5));
           break;
         case "ArrowRight":
           e.preventDefault();
-          seekVideo(currentTime + (e.shiftKey ? 30 : 5));
+          seekVideo(currentTimeRef.current + (e.shiftKey ? 30 : 5));
           break;
         case "PageUp":
           e.preventDefault();
@@ -1555,7 +1582,6 @@ export const App: React.FC = () => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
-    currentTime,
     seekVideo,
     handlePlayAdjacentVideo,
     handleOpenVideo,

@@ -74,7 +74,12 @@ describe("render profile khi đang phát video", () => {
     localStorage.setItem("subtrans_imported_folders_v1", JSON.stringify(["C:/course"]));
 
     window.requestAnimationFrame = (cb) => (rafQueue.push(cb), rafQueue.length);
-    window.cancelAnimationFrame = () => {};
+    const ev = { keydownAdd: 0, keydownRemove: 0, rafCancel: 0 };
+    window.cancelAnimationFrame = () => { ev.rafCancel++; };
+    const origAdd: any = window.addEventListener.bind(window);
+    const origRemove: any = window.removeEventListener.bind(window);
+    window.addEventListener = ((t: string, ...a: any[]) => { if (t === "keydown") ev.keydownAdd++; return origAdd(t, ...a); }) as any;
+    window.removeEventListener = ((t: string, ...a: any[]) => { if (t === "keydown") ev.keydownRemove++; return origRemove(t, ...a); }) as any;
     Element.prototype.scrollIntoView = () => {};
     Object.defineProperty(HTMLMediaElement.prototype, "currentTime", { get: () => mediaTime, set: () => {}, configurable: true });
     Object.defineProperty(HTMLMediaElement.prototype, "duration", { get: () => 3600, configurable: true });
@@ -112,6 +117,7 @@ describe("render profile khi đang phát video", () => {
 
     // Cửa sổ đo
     probe.renders = {}; probe.commits = 0; probe.actualMs = 0;
+    ev.keydownAdd = ev.keydownRemove = ev.rafCancel = 0;
     let chunkSeq = 5000;
     const t0 = performance.now();
     for (let tick = 1; tick <= TICKS; tick++) {
@@ -139,6 +145,7 @@ describe("render profile khi đang phát video", () => {
     const result = {
       scenario: `${TICKS * TICK_MS / 1000}s phát, 200 bài trong cây, 1000+ câu phụ đề, 2 panel mở`,
       renders: probe.renders,
+      listeners: { ...ev }, // keydown gắn/gỡ lại, số lần hủy vòng syncFrame trong cửa sổ đo
       profilerCommits: probe.commits,
       profilerActualMs: Math.round(probe.actualMs * 10) / 10,
       wallMsJsdom: Math.round(wallMs),
