@@ -2044,6 +2044,7 @@ export const App: React.FC = () => {
           onOpenYouTube={() => setShowYtModal(true)}
           onSwitchToPlayer={() => setViewMode("player")}
           hasLoadedVideo={!!videoInfo?.path}
+          isActive={viewMode === "landing"}
         />
       </div>
 

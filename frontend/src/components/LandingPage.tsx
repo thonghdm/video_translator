@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { countRender } from '../lib/renderProbe';
 import {
   Play,
   Pause,
@@ -30,6 +31,8 @@ interface LandingPageProps {
   onOpenYouTube: () => void;
   onSwitchToPlayer?: () => void;
   hasLoadedVideo?: boolean;
+  /** false khi trang bị ẩn (đang ở chế độ xem video) -> dừng toàn bộ timer demo chạy ngầm */
+  isActive?: boolean;
 }
 
 interface DemoSubtitle {
@@ -70,8 +73,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   onOpenVideo,
   onOpenYouTube,
   onSwitchToPlayer,
-  hasLoadedVideo = false
+  hasLoadedVideo = false,
+  isActive = true
 }) => {
+  countRender("LandingPage");
   // Demo player state
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [demoTime, setDemoTime] = useState<number>(2);
@@ -81,13 +86,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   const [copiedCmd, setCopiedCmd] = useState<boolean>(false);
 
   // Auto-tick demo player
+  // Chỉ chạy khi trang đang hiển thị: LandingPage không unmount khi sang chế độ player (chỉ ẩn bằng CSS)
   useEffect(() => {
-    if (!isPlaying) return;
+    if (!isPlaying || !isActive) return;
     const interval = setInterval(() => {
       setDemoTime((prev) => (prev >= 19.5 ? 0 : prev + 0.25));
     }, 250);
     return () => clearInterval(interval);
-  }, [isPlaying]);
+  }, [isPlaying, isActive]);
 
   // Current subtitle for demo
   const currentSub = DEMO_TIMELINE.slice().reverse().find((s) => demoTime >= s.time) || DEMO_TIMELINE[0];
