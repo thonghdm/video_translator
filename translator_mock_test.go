@@ -1076,3 +1076,68 @@ func TestFastHybrid_SetGeminiNil_NoPanic(t *testing.T) {
 		t.Fatalf("kỳ vọng 'Xin chào', nhận: %v", res)
 	}
 }
+
+// TestGTX_MismatchFallback_UsesCacheAndPausesOnlyBetweenHTTP (BUG-06):
+// batch 5 câu bị lệch dòng, 2 câu đã có trong cache -> chỉ gọi HTTP cho 3 câu còn lại
+// (+1 request batch ban đầu) và chỉ nghỉ giữa các request thật.
+func TestGTX_MismatchFallback_UsesCacheAndPausesOnlyBetweenHTTP(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			calls.Add(1)
+			if strings.Contains(req.URL.RawQuery, "%0A") {
+				return mockResponse(http.StatusOK, `[[["gop lai","x",null,null,1]],null,"en"]`)
+			}
+			return mockResponse(http.StatusOK, `[[["VI","x",null,null,1]],null,"en"]`)
+		}),
+	}
+	f := &FastHybridTranslator{client: client, phraseCache: NewLRUCache(100)}
+	f.setCached("line b", "VI-b")
+	f.setCached("line d", "VI-d")
+
+	lines := []string{"line a", "line b", "line c", "line d", "line e"}
+	start := time.Now()
+	out, err := f.googleBatchOrPerLine(context.Background(), lines)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("lỗi: %v", err)
+	}
+	t.Logf("HTTP calls=%d elapsed=%v out=%v", calls.Load(), elapsed, out)
+	if out[1] != "VI-b" || out[3] != "VI-d" {
+		t.Fatalf("câu đã cache phải được dùng lại: %v", out)
+	}
+	if got := calls.Load(); got != 4 { // 1 batch + 3 câu chưa cache
+		t.Fatalf("kỳ vọng 4 HTTP request, thực tế %d", got)
+	}
+	if c, ok := f.getCached("line a"); !ok || c != "VI" {
+		t.Fatalf("câu vừa dịch phải được lưu cache ngay")
+	}
+}
+
+// Lỗi giữa chừng: các dòng đã dịch được vẫn nằm trong cache cho lần thử lại.
+func TestGTX_MismatchFallback_KeepsPartialProgressOnError(t *testing.T) {
+	n := 0
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			n++
+			switch {
+			case n == 1:
+				return mockResponse(http.StatusOK, `[[["gop","x",null,null,1]],null,"en"]`)
+			case n <= 3:
+				return mockResponse(http.StatusOK, `[[["VI","x",null,null,1]],null,"en"]`)
+			}
+			return mockResponse(http.StatusInternalServerError, "boom")
+		}),
+	}
+	f := &FastHybridTranslator{client: client, phraseCache: NewLRUCache(100)}
+	_, err := f.googleBatchOrPerLine(context.Background(), []string{"p1", "p2", "p3"})
+	if err == nil {
+		t.Fatalf("kỳ vọng lỗi ở dòng thứ 3")
+	}
+	if _, ok := f.getCached("p1"); !ok {
+		t.Fatalf("p1 đã dịch xong phải còn trong cache")
+	}
+	if _, ok := f.getCached("p2"); !ok {
+		t.Fatalf("p2 đã dịch xong phải còn trong cache")
+	}
+}

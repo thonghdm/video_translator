@@ -308,6 +308,9 @@ func (f *FastHybridTranslator) viaGoogle(ctx context.Context, lines []string) ([
 	return out, err
 }
 
+// perLinePause là nhịp nghỉ chống burst giữa các request dịch từng dòng trong cùng một batch nhỏ (3-5 câu).
+const perLinePause = 60 * time.Millisecond
+
 func (f *FastHybridTranslator) googleBatchOrPerLine(ctx context.Context, lines []string) ([]string, error) {
 	batchOut, err := f.translateFastGTX(ctx, strings.Join(lines, "\n"))
 	if err != nil {
@@ -331,10 +334,19 @@ func (f *FastHybridTranslator) googleBatchOrPerLine(ctx context.Context, lines [
 	// Đo tỉ lệ lệch dòng
 	f.mismatchCount.Add(1)
 
-	// Lệch dòng: dịch từng dòng có nhịp nghỉ (chống burst)
+	// Lệch dòng: dịch từng dòng có nhịp nghỉ (chống burst).
+	// - Dòng đã có trong cache thì dùng luôn: không tốn HTTP và không cần nghỉ.
+	// - Chỉ nghỉ giữa hai request HTTP thật sự liên tiếp.
+	// - Lưu cache ngay từng dòng đã dịch được, để nếu dòng sau lỗi thì lần thử lại
+	//   (hoặc tầng sau) không phải dịch lại những dòng này.
 	out := make([]string, len(lines))
+	needPause := false
 	for i, l := range lines {
-		if i > 0 && !sleepCtx(ctx, jitter(150*time.Millisecond)) {
+		if c, ok := f.getCached(l); ok {
+			out[i] = c
+			continue
+		}
+		if needPause && !sleepCtx(ctx, jitter(perLinePause)) {
 			return nil, ctx.Err()
 		}
 		if err := ctx.Err(); err != nil {
@@ -348,6 +360,8 @@ func (f *FastHybridTranslator) googleBatchOrPerLine(ctx context.Context, lines [
 			return nil, errEmptyTranslation
 		}
 		out[i] = s
+		f.setCached(l, s)
+		needPause = true
 	}
 	return out, nil
 }
