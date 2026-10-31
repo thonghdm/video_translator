@@ -62,6 +62,43 @@ func TestBreaker_ZeroValueConfig_FallbacksToDefaults(t *testing.T) {
 	}
 }
 
+// TestBreaker_Concurrent429_DoesNotJumpSteps kiểm tra ba lần Report(ErrRateLimited, false) liên tiếp từ trạng thái mở
+// chỉ cho khóa 1 phút và Step() == 1; probe thất bại do 429 thì tăng bậc tiếp.
+func TestBreaker_Concurrent429_DoesNotJumpSteps(t *testing.T) {
+	cb := NewCircuitBreaker(DefaultBreakerConfig())
+
+	// 3 lần Report(ErrRateLimited, false) liên tiếp từ trạng thái mở (mô phỏng 3 request đồng thời cùng dính 429)
+	now := time.Now()
+	cb.Report(ErrRateLimited, false)
+	cb.Report(ErrRateLimited, false)
+	cb.Report(ErrRateLimited, false)
+
+	// Chỉ cho khóa 1 phút và Step() == 1
+	if step := cb.backoffStep.Load(); step != 1 {
+		t.Fatalf("kỳ vọng step = 1 sau 3 lần 429 thường liên tiếp, nhận: %d", step)
+	}
+	if !cb.Blocked() {
+		t.Fatalf("kỳ vọng breaker bị khóa sau lần 429 đầu tiên")
+	}
+	blockedUntil := time.Unix(0, cb.blockedUntil.Load())
+	dur := blockedUntil.Sub(now)
+	if dur < 55*time.Second || dur > 65*time.Second {
+		t.Fatalf("kỳ vọng thời gian khóa là 1 phút (bậc 1), nhận: %v", dur)
+	}
+
+	// Giả lập cooldown kết thúc, probe thất bại do 429 (isProbe = true) -> tăng bậc tiếp lên 2 (2 phút)
+	probeNow := time.Now()
+	cb.Report(ErrRateLimited, true)
+	if step := cb.backoffStep.Load(); step != 2 {
+		t.Fatalf("kỳ vọng step = 2 sau khi probe gặp 429, nhận: %d", step)
+	}
+	blockedUntil2 := time.Unix(0, cb.blockedUntil.Load())
+	dur2 := blockedUntil2.Sub(probeNow)
+	if dur2 < 115*time.Second || dur2 > 125*time.Second {
+		t.Fatalf("kỳ vọng thời gian khóa là 2 phút (bậc 2) sau khi probe thất bại, nhận: %v", dur2)
+	}
+}
+
 // TestBreaker_RateLimit_ExponentialBackoff_StepsAndDurations kiểm tra chính xác giá trị từng bậc:
 // Bậc 1: 1m
 // Bậc 2: 2m
@@ -85,7 +122,8 @@ func TestBreaker_RateLimit_ExponentialBackoff_StepsAndDurations(t *testing.T) {
 	for i, expectedDur := range expectedDurations {
 		expectedStep := int32(i + 1)
 		now := time.Now()
-		cb.Report(ErrRateLimited, false)
+		isProbe := (i > 0)
+		cb.Report(ErrRateLimited, isProbe)
 
 		if step := cb.backoffStep.Load(); step != expectedStep {
 			t.Fatalf("lần %d: kỳ vọng step = %d, nhận: %d", i+1, expectedStep, step)
@@ -105,7 +143,7 @@ func TestBreaker_RateLimit_ExponentialBackoff_StepsAndDurations(t *testing.T) {
 	// Gọi thêm 5 lần nữa: step vẫn phải bị cap ở 6, duration vẫn cap ở 10m
 	for i := 0; i < 5; i++ {
 		now := time.Now()
-		cb.Report(ErrRateLimited, false)
+		cb.Report(ErrRateLimited, true)
 		if step := cb.backoffStep.Load(); step != 6 {
 			t.Fatalf("sau khi vượt trần: kỳ vọng step = 6, nhận: %d", step)
 		}
@@ -149,10 +187,10 @@ func TestBreaker_StaleSuccess_DoesNotUnblock(t *testing.T) {
 func TestBreaker_ProbeSuccess_UnblocksAndResetsStep(t *testing.T) {
 	cb := NewCircuitBreaker(DefaultBreakerConfig())
 
-	// Đưa breaker lên step 3
+	// Đưa breaker lên step 3 (step 1 từ unblocked, step 2 và 3 từ probe thất bại)
 	cb.Report(ErrRateLimited, false)
-	cb.Report(ErrRateLimited, false)
-	cb.Report(ErrRateLimited, false)
+	cb.Report(ErrRateLimited, true)
+	cb.Report(ErrRateLimited, true)
 	if cb.backoffStep.Load() != 3 {
 		t.Fatalf("kỳ vọng step = 3, nhận: %d", cb.backoffStep.Load())
 	}

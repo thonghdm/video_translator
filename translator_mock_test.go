@@ -79,15 +79,21 @@ func TestGTX_RateLimit_And_ExponentialBackoff(t *testing.T) {
 		t.Fatalf("kỳ vọng backoff step = 1, nhận: %d", step)
 	}
 
-	// Lần 2 gặp 429: tăng bậc 2 (2 phút)
+	// Lần 2 gặp 429 khi đang khóa (request thường): bị bỏ qua, step giữ nguyên 1
 	f.gtxReport(ErrRateLimited, false)
-	if step := f.gtxBreaker.backoffStep.Load(); step != 2 {
-		t.Fatalf("kỳ vọng backoff step = 2, nhận: %d", step)
+	if step := f.gtxBreaker.backoffStep.Load(); step != 1 {
+		t.Fatalf("kỳ vọng backoff step vẫn giữ 1 khi nhận 429 lúc đang khóa, nhận: %d", step)
 	}
 
-	// Test cap step: gọi liên tiếp nhiều lần, step không được vượt quá 6
+	// Probe thất bại do 429 (isProbe = true): tăng bậc 2 (2 phút)
+	f.gtxReport(ErrRateLimited, true)
+	if step := f.gtxBreaker.backoffStep.Load(); step != 2 {
+		t.Fatalf("kỳ vọng backoff step = 2 khi probe thất bại do 429, nhận: %d", step)
+	}
+
+	// Test cap step: các lần probe tiếp tục thất bại, step không được vượt quá 6
 	for i := 0; i < 10; i++ {
-		f.gtxReport(ErrRateLimited, false)
+		f.gtxReport(ErrRateLimited, true)
 	}
 	if step := f.gtxBreaker.backoffStep.Load(); step > 6 {
 		t.Fatalf("kỳ vọng step bị cap tối đa ở 6, nhận: %d", step)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"sync/atomic"
 	"time"
 )
@@ -114,7 +115,13 @@ func (cb *CircuitBreaker) Report(err error, isProbe bool) {
 	case errors.Is(err, context.Canceled), errors.Is(err, errEmptyTranslation):
 		// Tua video hoặc câu dịch rỗng: không phải lỗi của nhà cung cấp dịch vụ
 	case errors.Is(err, ErrRateLimited):
-		// Bị rate limit / HTTP 429: Khóa với exponential backoff
+		// Bị rate limit / HTTP 429: Khóa với exponential backoff.
+		// Chỉ tăng step và đặt blockedUntil khi breaker chưa đang khóa hoặc khi là request probe.
+		// Request thường nhận 429 lúc breaker đã khóa (do bay đồng thời trước đó) thì bỏ qua.
+		if cb.Blocked() && !isProbe {
+			return
+		}
+
 		// Bậc 1: 1m, Bậc 2: 2m, Bậc 3: 4m, Bậc 4: 8m, Bậc 5: 16m (cap 10m), Bậc 6: 32m (cap 10m)
 		step := cb.backoffStep.Add(1)
 		maxStep := cb.config.MaxBackoffStep
@@ -127,6 +134,7 @@ func (cb *CircuitBreaker) Report(err error, isProbe bool) {
 			dur = cb.config.MaxBackoff
 		}
 		cb.blockedUntil.Store(time.Now().Add(dur).UnixNano())
+		log.Printf("[CircuitBreaker] Khóa breaker: bậc %d, thời lượng %v", step, dur)
 	default: // Lỗi mạng / timeout
 		if isProbe {
 			// Probe thất bại: tiếp tục khóa probeFailCooldown (mặc định 1 phút)
