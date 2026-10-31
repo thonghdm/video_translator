@@ -1050,3 +1050,27 @@ func Test_BUG12_ShouldParseWhisperTimings(t *testing.T) {
 		t.Fatalf("bật telemetry thì luôn phải parse")
 	}
 }
+
+// BUG-18: Start() phải xóa failedBlocks của phiên trước để block lỗi được thử lại.
+func Test_BUG18_Start_ResetsFailedBlocks(t *testing.T) {
+	p, _ := newComputeProbePipeline(t, "api")
+	p.mu.Lock()
+	p.failedBlocks[0] = 2
+	p.failedBlocks[7] = 1
+	p.mu.Unlock()
+
+	// Chặn worker làm việc để kiểm tra trạng thái ngay sau Start
+	p.MockSliceAudio = func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	_ = p.Start(0)
+	defer p.Stop()
+
+	p.mu.Lock()
+	n := len(p.failedBlocks)
+	p.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("Start() phải reset failedBlocks, còn %d mục", n)
+	}
+}

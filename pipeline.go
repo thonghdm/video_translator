@@ -294,6 +294,7 @@ func (p *Pipeline) Start(startSec float64) error {
 	p.sessionBlockCount = 0
 	p.tier2Deferred = make(map[int]bool)
 	p.activeJobs = make(map[int]bool)
+	p.failedBlocks = make(map[int]int) // phiên mới: các block từng lỗi ở phiên trước được thử lại
 	p.pendingSeek.Store(noPendingSeek)
 
 	p.startSessionWorkers(newSession)
