@@ -322,3 +322,63 @@ func parseHMSMs(hStr, mStr, sStr, msStr string) float64 {
 	ms, _ := strconv.Atoi(msStr)
 	return float64(h)*3600.0 + float64(m)*60.0 + float64(s) + float64(ms)/1000.0
 }
+
+// externalSubtitleIndex gom sẵn các file .srt/.vtt của MỘT thư mục từ danh sách os.ReadDir đã có,
+// để kiểm tra phụ đề đi kèm của hàng trăm video mà không phải os.Stat/os.ReadDir lặp lại cho từng video (BUG-10).
+type externalSubtitleIndex struct {
+	dir  string
+	subs []indexedSubtitle // chỉ các file *.srt / *.vtt (tên đã hạ chữ thường)
+}
+
+type indexedSubtitle struct {
+	lowerName string
+	entry     os.DirEntry
+}
+
+func newExternalSubtitleIndex(dir string, entries []os.DirEntry) *externalSubtitleIndex {
+	idx := &externalSubtitleIndex{dir: dir}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		lower := strings.ToLower(e.Name())
+		if strings.HasSuffix(lower, ".srt") || strings.HasSuffix(lower, ".vtt") {
+			idx.subs = append(idx.subs, indexedSubtitle{lowerName: lower, entry: e})
+		}
+	}
+	return idx
+}
+
+func isViSubtitleName(lowerName string) bool {
+	return strings.Contains(lowerName, "_vi.") || strings.Contains(lowerName, ".vi.") || strings.Contains(lowerName, "-vi.") ||
+		strings.Contains(lowerName, "_vn.") || strings.Contains(lowerName, ".vn.") || strings.Contains(lowerName, "-vn.") ||
+		strings.Contains(lowerName, "_vie.") || strings.Contains(lowerName, ".vie.")
+}
+
+func isNonEnglishExportName(lowerName string) bool {
+	return isViSubtitleName(lowerName) || strings.Contains(lowerName, ".bilingual.")
+}
+
+// HasExternalSubtitle tương đương
+// `FindExternalSubtitleFile(p) != "" || FindExternalVietnameseSubtitleFile(p) != ""` cho file video
+// nằm trong thư mục của index, nhưng chỉ duyệt danh sách đã nạp trong RAM; os.Stat chỉ dùng
+// (qua DirEntry.Info) cho các file thực sự khớp tiền tố tên video để kiểm tra kích thước > 10 byte.
+func (x *externalSubtitleIndex) HasExternalSubtitle(videoFileName string) bool {
+	ext := filepath.Ext(videoFileName)
+	lowerBase := strings.ToLower(strings.TrimSuffix(videoFileName, ext))
+	for _, s := range x.subs {
+		if !strings.HasPrefix(s.lowerName, lowerBase) {
+			continue
+		}
+		// Phụ đề EN: mọi .srt/.vtt khớp tiền tố trừ bản .vi/.vn/.vie/.bilingual đã xuất;
+		// phụ đề VI: file khớp tiền tố có dấu hiệu .vi/.vn/.vie. Hợp của hai tập = khớp tiền tố
+		// và (không thuộc nhóm loại trừ EN hoặc là file VI).
+		if isNonEnglishExportName(s.lowerName) && !isViSubtitleName(s.lowerName) {
+			continue
+		}
+		if fi, err := s.entry.Info(); err == nil && fi.Size() > 10 {
+			return true
+		}
+	}
+	return false
+}

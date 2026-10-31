@@ -212,6 +212,9 @@ func scanDirRecursive(dirPath string, depth int) (FolderNode, bool) {
 	var dirs []FolderNode
 	var files []FolderNode
 
+	// BUG-10: dùng danh sách entries đã đọc để tra phụ đề đi kèm, không os.Stat/os.ReadDir lại cho từng video
+	subIdx := newExternalSubtitleIndex(dirPath, entries)
+
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.HasPrefix(name, ".") {
@@ -231,7 +234,7 @@ func scanDirRecursive(dirPath string, depth int) (FolderNode, bool) {
 				Name:     name,
 				Path:     fullPath,
 				IsDir:    false,
-				HasCache: HasCachedSubtitles(fullPath) || FindExternalSubtitleFile(fullPath) != "" || FindExternalVietnameseSubtitleFile(fullPath) != "",
+				HasCache: HasCachedSubtitles(fullPath) || subIdx.HasExternalSubtitle(name),
 			})
 		}
 	}
