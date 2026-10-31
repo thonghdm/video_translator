@@ -972,3 +972,65 @@ func Test_BUG09_ShortSeekReprioritizesTier2Batch(t *testing.T) {
 		t.Fatalf("BUG-09: batch Tier-2 đầu tiên %v không chứa câu tại playhead mới (Sentence number 28.)", first)
 	}
 }
+
+// BUG-03: block đã có STT trong BlockStore -> không cắt WAV, không chạy Whisper, chỉ dịch câu còn thiếu.
+func Test_BUG03_ReusesStoredSTT_NoSliceNoWhisper_OnlyTranslatesMissing(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	tempDir := t.TempDir()
+	dummyVideo := filepath.Join(tempDir, "dummy_bug03.mp4")
+	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
+	bs, err := NewBlockStore(dummyVideo, CacheMeta{BlockSec: 30, OverlapSec: 2, DurationSec: 30})
+	if err != nil {
+		t.Fatalf("NewBlockStore error: %v", err)
+	}
+	// Lần chạy trước: STT xong, Tier-1 dịch dở (câu 1 đã dịch, câu 2-3 chưa)
+	_ = bs.SaveBlock(0, []SubtitleItem{
+		{ID: 0, Block: 0, StartSec: 1, EndSec: 3, SourceText: "First line.", TargetText: "Dòng một.", Translated: true},
+		{ID: 1, Block: 0, StartSec: 4, EndSec: 6, SourceText: "Second line.", Translated: false},
+		{ID: 2, Block: 0, StartSec: 7, EndSec: 9, SourceText: "Third line.", Translated: false},
+	})
+
+	settings := Settings{BlockSec: 30.0, OverlapSec: 2.0, LookaheadMinSec: 10.0, LookaheadMaxSec: 30.0, TranslateWorkers: 1}
+	trans := &orderRecordingTranslator{}
+	p := NewPipeline(dummyVideo, 30.0, settings, &ToolsPaths{TempDir: tempDir}, bs, trans, PipelineEventCallbacks{})
+
+	var sliceCalls, sttCalls atomic.Int32
+	p.MockSliceAudio = func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error {
+		sliceCalls.Add(1)
+		return nil
+	}
+	p.MockRunSTT = func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error) {
+		sttCalls.Add(1)
+		return []WhisperSegment{{StartSec: 1, EndSec: 3, Text: "First line."}}, nil
+	}
+
+	_ = p.Start(0)
+	defer p.Stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !bs.IsBlockDone(0) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !bs.IsBlockDone(0) {
+		t.Fatalf("block 0 phải hoàn tất")
+	}
+
+	trans.mu.Lock()
+	var translated []string
+	for _, c := range trans.calls {
+		translated = append(translated, c...)
+	}
+	trans.mu.Unlock()
+	t.Logf("ffmpeg=%d whisper=%d, câu gửi đi dịch=%v", sliceCalls.Load(), sttCalls.Load(), translated)
+
+	if sliceCalls.Load() != 0 || sttCalls.Load() != 0 {
+		t.Fatalf("BUG-03: không được chạy lại ffmpeg/Whisper (slice=%d, stt=%d)", sliceCalls.Load(), sttCalls.Load())
+	}
+	if len(translated) != 2 {
+		t.Fatalf("chỉ 2 câu chưa dịch được gửi đi, nhận: %v", translated)
+	}
+	items, _ := bs.GetBlockItems(0)
+	if len(items) != 3 || items[0].TargetText != "Dòng một." || !items[1].Translated || !items[2].Translated {
+		t.Fatalf("kết quả cuối không đúng: %+v", items)
+	}
+}

@@ -171,6 +171,31 @@ func (bs *BlockStore) IsBlockDone(block int) bool {
 	return true
 }
 
+// GetBlockItems trả về bản sao danh sách câu đã lưu của block nếu block đã có kết quả STT
+// (ít nhất một câu có SourceText). Dùng để không chạy lại ffmpeg + Whisper khi dịch bù / thử lại block.
+// Block im lặng (không có câu nào) hoặc chưa từng chạy trả về false.
+func (bs *BlockStore) GetBlockItems(block int) ([]SubtitleItem, bool) {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	items, exists := bs.itemsMap[block]
+	if !exists {
+		return nil, false
+	}
+	hasSTT := false
+	for _, it := range items {
+		if it.SourceText != "" {
+			hasSTT = true
+			break
+		}
+	}
+	if !hasSTT {
+		return nil, false
+	}
+	out := make([]SubtitleItem, len(items))
+	copy(out, items)
+	return out, true
+}
+
 // GetDoneBlocks trả về danh sách chỉ số các block đã xong
 func (bs *BlockStore) GetDoneBlocks() []int {
 	bs.mu.RLock()

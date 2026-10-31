@@ -35,6 +35,7 @@ type SlicerJob struct {
 type AudioJob struct {
 	BlockIdx       int
 	WavPath        string
+	UseCachedSTT   bool // true: block đã có STT trong BlockStore, không cắt WAV / không chạy Whisper
 	Range          BlockRange
 	SliceMs        int64
 	ScheduledAt    time.Time
@@ -61,6 +62,7 @@ type TextJob struct {
 	WhisperThreads int
 	WhisperLangArg string
 	VariantName    string
+	STTCacheHit    bool // Items lấy từ BlockStore (bỏ qua ffmpeg + Whisper)
 }
 
 // PipelineSession đại diện cho một phiên làm việc độc lập của pipeline
@@ -846,7 +848,14 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 
 			tSlice0 := time.Now()
 			var err error
-			if len(p.externalSegments) > 0 && p.MockSliceAudio == nil {
+			// Block đã có kết quả STT (ví dụ dịch bù Tier-2 / thử lại sau lỗi dịch): bỏ qua ffmpeg
+			useCachedSTT := false
+			if len(p.externalSegments) == 0 && p.blockStore != nil {
+				_, useCachedSTT = p.blockStore.GetBlockItems(blockIdx)
+			}
+			if useCachedSTT {
+				// không cắt WAV
+			} else if len(p.externalSegments) > 0 && p.MockSliceAudio == nil {
 				// Đã có sẵn file phụ đề gốc (.srt/.vtt) -> bỏ qua cắt WAV bằng ffmpeg
 			} else if p.MockSliceAudio != nil {
 				err = p.MockSliceAudio(ctx, p.videoPath, bRange, wavPath)
@@ -892,6 +901,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			case outChan <- AudioJob{
 				BlockIdx:       blockIdx,
 				WavPath:        wavPath,
+				UseCachedSTT:   useCachedSTT,
 				Range:          bRange,
 				SliceMs:        sliceMs,
 				ScheduledAt:    sJob.ScheduledAt,
@@ -921,6 +931,45 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 		case job, ok := <-inChan:
 			if !ok {
 				return
+			}
+
+			if job.UseCachedSTT {
+				cached, ok := p.blockStore.GetBlockItems(job.BlockIdx)
+				if !ok {
+					p.handleBlockFailure(job.BlockIdx, "stt", errors.New("cached STT result disappeared"), job.SessionID)
+					continue
+				}
+				p.mu.Lock()
+				cachedLang := p.detectedOnceLang
+				p.mu.Unlock()
+				if p.callbacks.OnChunk != nil {
+					p.callbacks.OnChunk(SubtitleChunkPayload{
+						Video: p.videoPath,
+						Block: job.BlockIdx,
+						Items: cached,
+						Final: false,
+					})
+					p.recordFirstSubLatency(job.SessionID, len(cached))
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case outChan <- TextJob{
+					BlockIdx:       job.BlockIdx,
+					Items:          cached,
+					Range:          job.Range,
+					SliceMs:        job.SliceMs,
+					DetectedLang:   cachedLang,
+					ScheduledAt:    job.ScheduledAt,
+					QueueWaitMs:    job.QueueWaitMs,
+					OrderInSession: job.OrderInSession,
+					SessionID:      job.SessionID,
+					WhisperLangArg: "cache",
+					VariantName:    os.Getenv("VT_VARIANT_NAME"),
+					STTCacheHit:    true,
+				}:
+				}
+				continue
 			}
 
 			tStt0 := time.Now()
@@ -1260,8 +1309,28 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			}
 
 			okCount := 0
-			if p.translator != nil && len(job.Items) > 0 {
-				batches, nTier1 := BuildTwoTierBatches(job.Items, curPlayhead, isTier1Block)
+			// Chỉ dịch những câu chưa có bản dịch (block đọc lại từ BlockStore có thể đã dịch dở Tier-1)
+			var pendingIdx []int
+			for i, it := range job.Items {
+				if it.Translated && it.TargetText != "" {
+					if strings.TrimSpace(it.SourceText) != "" && !isIgnoredSubtitle(it.SourceText) {
+						okCount++
+					}
+					continue
+				}
+				pendingIdx = append(pendingIdx, i)
+			}
+			if p.translator != nil && len(pendingIdx) > 0 {
+				pendingItems := make([]SubtitleItem, len(pendingIdx))
+				for k, i := range pendingIdx {
+					pendingItems[k] = job.Items[i]
+				}
+				batches, nTier1 := BuildTwoTierBatches(pendingItems, curPlayhead, isTier1Block)
+				for b := range batches {
+					for k := range batches[b] {
+						batches[b][k] = pendingIdx[batches[b][k]]
+					}
+				}
 
 				for bIdx := 0; bIdx < len(batches); bIdx++ {
 					if ctx.Err() != nil {
@@ -1433,7 +1502,7 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				WhisperThreads:        job.WhisperThreads,
 				WhisperLangArg:        job.WhisperLangArg,
 				VariantName:           job.VariantName,
-				CacheHit:              false,
+				CacheHit:              job.STTCacheHit,
 				FfmpegCutMs:           job.SliceMs,
 				WhisperWallMs:         job.WhisperWallMs,
 				WhisperLoadMs:         job.WhisperTimings.LoadMs,
