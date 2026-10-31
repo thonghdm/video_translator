@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -62,6 +63,16 @@ type TextJob struct {
 	VariantName    string
 }
 
+// PipelineSession đại diện cho một phiên làm việc độc lập của pipeline
+type PipelineSession struct {
+	id     int64
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+const noPendingSeek = math.MaxUint64
+
 // Pipeline là cỗ máy điều phối xử lý video thời gian thực
 type Pipeline struct {
 	mu          sync.Mutex
@@ -75,10 +86,12 @@ type Pipeline struct {
 	callbacks   PipelineEventCallbacks
 
 	// Session management
-	sessionID  int64
-	sessionCtx context.Context
-	cancelFunc context.CancelFunc
-	wg         sync.WaitGroup
+	sessionID   int64
+	session     *PipelineSession
+	seekMu      sync.Mutex
+	seekWake    chan struct{}
+	seekStop    chan struct{}
+	pendingSeek atomic.Uint64
 
 	// Telemetry tracking
 	sessionBlockCount    int
@@ -167,7 +180,7 @@ func NewPipeline(
 		}
 	}
 
-	return &Pipeline{
+	p := &Pipeline{
 		videoPath:        videoPath,
 		durationSec:      durationSec,
 		settings:         settings,
@@ -177,11 +190,14 @@ func NewPipeline(
 		callbacks:        callbacks,
 		state:            "idle",
 		wakeSched:        make(chan struct{}, 1),
+		seekWake:         make(chan struct{}, 1),
 		failedBlocks:     make(map[int]int),
 		activeJobs:       make(map[int]bool),
 		tier2Deferred:    make(map[int]bool),
 		externalSegments: extSegs,
 	}
+	p.pendingSeek.Store(noPendingSeek)
+	return p
 }
 
 // notifyWake Scheduler
@@ -245,24 +261,103 @@ func (p *Pipeline) computeAheadSecLocked() float64 {
 
 // Start bắt đầu pipeline từ vị trí startSec
 func (p *Pipeline) Start(startSec float64) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.seekMu.Lock()
+	defer p.seekMu.Unlock()
 
-	p.stopCurrentSessionLocked()
+	p.stopCurrentSession()
+
+	// Khởi động seekLoop nếu chưa có hoặc đã đóng
+	if p.seekStop != nil {
+		select {
+		case <-p.seekStop:
+		default:
+			close(p.seekStop)
+		}
+	}
+	p.seekStop = make(chan struct{})
+	go p.seekLoop(p.seekStop)
 
 	newSessionID := atomic.AddInt64(&p.sessionID, 1)
-	p.sessionCtx, p.cancelFunc = context.WithCancel(context.Background())
+	newCtx, newCancel := context.WithCancel(context.Background())
+	newSession := &PipelineSession{
+		id:     newSessionID,
+		ctx:    newCtx,
+		cancel: newCancel,
+	}
+
+	p.mu.Lock()
+	p.session = newSession
 	p.playheadSec = startSec
 	p.state = "processing"
+	p.sessionBlockCount = 0
+	p.tier2Deferred = make(map[int]bool)
+	p.activeJobs = make(map[int]bool)
+	p.pendingSeek.Store(noPendingSeek)
 
-	p.startSessionWorkers(p.sessionCtx, newSessionID)
+	p.startSessionWorkers(newSession)
+	p.mu.Unlock()
+	p.triggerSchedule()
 	return nil
 }
 
-// SeekTo di chuyển playhead an toàn, hủy ngay phiên cũ nếu bị lệch vị trí
-func (p *Pipeline) SeekTo(startSec float64) error {
+// RequestSeek yêu cầu tua video đến mốc thời gian sec.
+// Non-blocking và gom (coalesce) các lệnh tua dồn dập,
+// chỉ để phiên làm việc ở vị trí cuối cùng chạy nhằm giải phóng 100% CPU.
+func (p *Pipeline) RequestSeek(sec float64) {
+	if sec < 0 {
+		sec = 0
+	}
+	if sec > p.durationSec {
+		sec = p.durationSec
+	}
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	if p.state == "idle" {
+		p.playheadSec = sec
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+
+	p.pendingSeek.Store(math.Float64bits(sec))
+	select {
+	case p.seekWake <- struct{}{}:
+	default:
+	}
+}
+
+// SeekTo di chuyển playhead an toàn, hỗ trợ tua dồn dập không làm nghẽn pipeline
+func (p *Pipeline) SeekTo(startSec float64) error {
+	p.RequestSeek(startSec)
+	return nil
+}
+
+func (p *Pipeline) seekLoop(stopChan <-chan struct{}) {
+	for {
+		select {
+		case <-stopChan:
+			return
+		case <-p.seekWake:
+		}
+
+		for {
+			bits := p.pendingSeek.Swap(noPendingSeek)
+			if bits == noPendingSeek {
+				break
+			}
+			targetSec := math.Float64frombits(bits)
+			p.doSeek(targetSec)
+		}
+	}
+}
+
+// doSeek thực hiện điều phối phiên làm việc khi tua:
+// - Thoát sớm (Fast Path) nếu block đích đã xong trong cache hoặc worker đang chạy ngay tại đó.
+// - Thoát p.mu trước khi drain oldSession để tránh contention/deadlock.
+// - Hủy phiên nếu phát hiện có lệnh seek mới hơn được xếp hàng trong lúc drain.
+func (p *Pipeline) doSeek(startSec float64) {
+	p.seekMu.Lock()
+	defer p.seekMu.Unlock()
 
 	if startSec < 0 {
 		startSec = 0
@@ -271,32 +366,53 @@ func (p *Pipeline) SeekTo(startSec float64) error {
 		startSec = p.durationSec
 	}
 
-	p.playheadSec = startSec
+	p.mu.Lock()
+	if p.state == "idle" {
+		p.playheadSec = startSec
+		p.mu.Unlock()
+		return
+	}
+
 	targetBlock := int(startSec / p.settings.BlockSec)
 
-	// Kiểm tra xem worker hiện tại có đang xử lý đúng ngay tại targetBlock hoặc block kế tiếp không
-	isProcessingTarget := p.activeJobs[targetBlock] || p.activeJobs[targetBlock+1]
+	// Reset failed count cho block đích và block kế cận trước tiên (ngay cả khi rơi vào Fast-path)
+	delete(p.failedBlocks, targetBlock)
+	delete(p.failedBlocks, targetBlock+1)
 
-	// 1. Nếu block đích đã có trong cache VÀ các worker đang chạy gần đó -> chỉ dời playhead
-	if p.blockStore.IsBlockDone(targetBlock) && isProcessingTarget {
+	// 1. Fast-path: Block đích đã có đầy đủ phụ đề trong cache và session đang chạy
+	if p.session != nil && p.blockStore.IsBlockDone(targetBlock) {
+		p.playheadSec = startSec
+		p.state = "processing"
 		p.triggerSchedule()
-		return nil
+		p.mu.Unlock()
+		return
 	}
 
-	// 2. Nếu block đích chưa có trong cache nhưng worker đang xử lý đúng nó -> giữ nguyên hướng chạy
-	if !p.blockStore.IsBlockDone(targetBlock) && isProcessingTarget {
+	// 2. Smart Fast-Path 2: Tua ngắn trong CÙNG block đang được xử lý (không áp dụng cho block kế cận)
+	// Chỉ giữ session khi:
+	// - Đúng block đích đang active: p.activeJobs[targetBlock] == true
+	// - Block chưa từng bị hoãn Tier-2: !p.tier2Deferred[targetBlock]
+	// - Đang ở mode "api" (Google GTX dịch 100% toàn bộ batch, không bao giờ break bỏ rơi câu)
+	isSameBlockRunning := p.activeJobs[targetBlock] && !p.tier2Deferred[targetBlock]
+	if p.session != nil && isSameBlockRunning && !p.isTier2PostponedMode() {
+		p.playheadSec = startSec
+		p.state = "processing"
 		p.triggerSchedule()
-		return nil
+		p.mu.Unlock()
+		return
 	}
 
-	// 3. Tua nhảy cóc hoặc tua lùi xa vị trí cũ:
-	// Hủy ngay lập tức phiên cũ để giải phóng 100% CPU cho block vừa tua tới
-	oldSessionID := p.sessionID
+	oldSession := p.session
+	oldSessionID := int64(0)
+	if oldSession != nil {
+		oldSessionID = oldSession.id
+	}
+
 	tier2WasRunning := false
 	tier2BlockIdx := -1
 	for b := range p.activeJobs {
 		bRange := ComputeBlockRange(b, p.settings.BlockSec, p.settings.OverlapSec, p.durationSec)
-		isTier1 := bRange.OwnerStart <= p.playheadSec+15.0 && bRange.OwnerEnd >= p.playheadSec
+		isTier1 := bRange.OwnerStart <= startSec+15.0 && bRange.OwnerEnd >= startSec
 		if !isTier1 {
 			tier2WasRunning = true
 			tier2BlockIdx = b
@@ -304,31 +420,109 @@ func (p *Pipeline) SeekTo(startSec float64) error {
 		}
 	}
 
-	computeDrainMs, wgDrainMs := p.stopCurrentSessionLocked()
-
-	newSessionID := atomic.AddInt64(&p.sessionID, 1)
-	p.sessionBlockCount = 0
+	// Tách session cũ ra, dọn sạch activeJobs
+	p.session = nil
+	p.activeJobs = make(map[int]bool)
 	p.tier2Deferred = make(map[int]bool)
-	p.sessionCtx, p.cancelFunc = context.WithCancel(context.Background())
+	p.playheadSec = startSec
 	p.state = "seeking"
 
 	p.lastSeekTime = time.Now()
 	p.lastSeekTargetSec = startSec
 	p.lastSeekOldID = oldSessionID
-	p.lastSeekComputeDrain = computeDrainMs
-	p.lastSeekWgDrain = wgDrainMs
-	p.lastSeekNewID = newSessionID
 	p.tier2RunningAtCancel = tier2WasRunning
 	p.tier2BlockRunningIdx = tier2BlockIdx
 	p.seekActive = true
+	p.mu.Unlock() // <<< Thoát p.mu trước khi drain!
 
-	if IsTelemetryEnabled() {
-		log.Printf("[telemetry] seek initiated to %.2fs (old session=%d, new session=%d, tier2_was_running=%v, computeMu_drain=%dms)\n",
-			startSec, oldSessionID, newSessionID, tier2WasRunning, computeDrainMs)
+	// DRAIN NGOÀI p.mu: Worker cũ có thể Lock p.mu thoải mái để thoát
+	var computeDrainMs, wgDrainMs int64
+	if oldSession != nil {
+		cancelT0 := time.Now()
+		oldSession.cancel()
+
+		drainDone := make(chan int64, 1)
+		go func() {
+			p.computeMu.Lock()
+			d := time.Since(cancelT0).Milliseconds()
+			p.computeMu.Unlock()
+			drainDone <- d
+		}()
+
+		select {
+		case computeDrainMs = <-drainDone:
+			if IsTelemetryEnabled() {
+				log.Printf("[telemetry] session cancel -> computeMu unlocked in %dms\n", computeDrainMs)
+			}
+		case <-time.After(3 * time.Second):
+			computeDrainMs = -1
+		}
+
+		wgT0 := time.Now()
+		done := make(chan struct{})
+		go func() {
+			oldSession.wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			log.Printf("[WARN] old session %d workers did not finish within 3s timeout", oldSessionID)
+		}
+		wgDrainMs = time.Since(wgT0).Milliseconds()
 	}
 
-	p.startSessionWorkers(p.sessionCtx, newSessionID)
-	return nil
+	// Sau khi drain xong, gom lấy mốc thời gian tua mới nhất (nếu có lệnh tua mới gửi đến trong lúc drain)
+	for {
+		latestBits := p.pendingSeek.Swap(noPendingSeek)
+		if latestBits == noPendingSeek {
+			break
+		}
+		startSec = math.Float64frombits(latestBits)
+		if startSec < 0 {
+			startSec = 0
+		}
+		if startSec > p.durationSec {
+			startSec = p.durationSec
+		}
+	}
+
+	p.mu.Lock()
+	p.lastSeekComputeDrain = computeDrainMs
+	p.lastSeekWgDrain = wgDrainMs
+	p.lastSeekTargetSec = startSec
+
+	if p.state == "idle" {
+		p.mu.Unlock()
+		return
+	}
+
+	targetBlock = int(startSec / p.settings.BlockSec)
+	delete(p.failedBlocks, targetBlock)
+	delete(p.failedBlocks, targetBlock+1)
+
+	newSessionID := atomic.AddInt64(&p.sessionID, 1)
+	newCtx, newCancel := context.WithCancel(context.Background())
+	newSession := &PipelineSession{
+		id:     newSessionID,
+		ctx:    newCtx,
+		cancel: newCancel,
+	}
+	p.session = newSession
+	p.lastSeekNewID = newSessionID
+	p.sessionBlockCount = 0
+	p.playheadSec = startSec
+	p.state = "processing"
+
+	if IsTelemetryEnabled() {
+		log.Printf("[telemetry] seek initiated to %.2fs (old session=%d, new session=%d, tier2_was_running=%v, computeMu_drain=%dms, wg_drain=%dms)\n",
+			startSec, oldSessionID, newSessionID, tier2WasRunning, computeDrainMs, wgDrainMs)
+	}
+
+	p.startSessionWorkers(newSession)
+	p.mu.Unlock()
+	p.triggerSchedule()
 }
 
 // UpdatePlayhead cập nhật vị trí phát hiện tại từ frontend
@@ -343,19 +537,37 @@ func (p *Pipeline) UpdatePlayhead(sec float64, playing bool) {
 
 // Stop dừng hoàn toàn pipeline
 func (p *Pipeline) Stop() {
+	p.seekMu.Lock()
+	defer p.seekMu.Unlock()
+
+	if p.seekStop != nil {
+		select {
+		case <-p.seekStop:
+		default:
+			close(p.seekStop)
+		}
+		p.seekStop = nil
+	}
+
+	p.stopCurrentSession()
+
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stopCurrentSessionLocked()
 	p.state = "idle"
+	p.pendingSeek.Store(noPendingSeek)
+	p.mu.Unlock()
 }
 
-func (p *Pipeline) stopCurrentSessionLocked() (int64, int64) {
-	cancelT0 := time.Now()
-	var computeDrainMs int64
+func (p *Pipeline) stopCurrentSession() (int64, int64) {
+	p.mu.Lock()
+	oldSession := p.session
+	p.session = nil
+	p.activeJobs = make(map[int]bool)
+	p.mu.Unlock()
 
-	if p.cancelFunc != nil {
-		p.cancelFunc()
-		p.cancelFunc = nil
+	var computeDrainMs, wgDrainMs int64
+	if oldSession != nil {
+		cancelT0 := time.Now()
+		oldSession.cancel()
 
 		// Đo thời gian chờ computeMu được nhả sau khi cancel
 		drainDone := make(chan int64, 1)
@@ -374,26 +586,36 @@ func (p *Pipeline) stopCurrentSessionLocked() (int64, int64) {
 		case <-time.After(3 * time.Second):
 			computeDrainMs = -1
 		}
+
+		// Chờ tối đa 3 giây cho các worker thoát
+		wgT0 := time.Now()
+		done := make(chan struct{})
+		go func() {
+			oldSession.wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			log.Printf("[WARN] old session %d workers did not finish within 3s timeout", oldSession.id)
+		}
+		wgDrainMs = time.Since(wgT0).Milliseconds()
 	}
 
-	// Chờ tối đa 3 giây cho các worker thoát
-	wgT0 := time.Now()
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		// Timeout chờ worker cũ
-	}
-	wgDrainMs := time.Since(wgT0).Milliseconds()
-
-	// Xóa danh sách activeJobs
-	p.activeJobs = make(map[int]bool)
 	return computeDrainMs, wgDrainMs
+}
+
+func (p *Pipeline) LastSeekComputeDrain() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastSeekComputeDrain
+}
+
+func (p *Pipeline) LastSeekWgDrain() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastSeekWgDrain
 }
 
 // currentTranslatorMode trả về "api", "local_ai", hoặc "offline" để báo cáo lên giao diện người dùng
@@ -445,46 +667,43 @@ func (p *Pipeline) recordFirstSubLatency(sessionID int64, itemCount int) {
 	p.seekActive = false
 }
 
-func (p *Pipeline) startSessionWorkers(ctx context.Context, sessionID int64) {
+func (p *Pipeline) startSessionWorkers(sess *PipelineSession) {
 	slicerChan := make(chan SlicerJob, 2)
 	audioChan := make(chan AudioJob, 2)
 	textChan := make(chan TextJob, 2)
 
 	// 1. Stage Slicer (1 worker)
-	p.wg.Add(1)
+	sess.wg.Add(1)
 	go func() {
-		defer p.wg.Done()
+		defer sess.wg.Done()
 		defer close(audioChan)
-		p.slicerWorker(ctx, slicerChan, audioChan)
+		p.slicerWorker(sess.ctx, slicerChan, audioChan)
 	}()
 
 	// 2. Stage STT (1 worker)
-	p.wg.Add(1)
+	sess.wg.Add(1)
 	go func() {
-		defer p.wg.Done()
+		defer sess.wg.Done()
 		defer close(textChan)
-		p.sttWorker(ctx, audioChan, textChan)
+		p.sttWorker(sess.ctx, audioChan, textChan)
 	}()
 
 	// 3. Stage Translator (N workers)
 	workers := p.settings.TranslateWorkers
-	var transWg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		transWg.Add(1)
-		p.wg.Add(1)
+		sess.wg.Add(1)
 		go func() {
-			defer p.wg.Done()
-			defer transWg.Done()
-			p.translatorWorker(ctx, textChan)
+			defer sess.wg.Done()
+			p.translatorWorker(sess.ctx, textChan)
 		}()
 	}
 
 	// 4. Scheduler loop điều phối
-	p.wg.Add(1)
+	sess.wg.Add(1)
 	go func() {
-		defer p.wg.Done()
+		defer sess.wg.Done()
 		defer close(slicerChan)
-		p.schedulerLoop(ctx, slicerChan, sessionID)
+		p.schedulerLoop(sess.ctx, slicerChan, sess.id)
 	}()
 }
 
@@ -606,7 +825,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			queueWaitMs := time.Since(sJob.ScheduledAt).Milliseconds()
 
 			bRange := ComputeBlockRange(blockIdx, p.settings.BlockSec, p.settings.OverlapSec, p.durationSec)
-			wavPath := filepath.Join(p.tools.TempDir, fmt.Sprintf("block_%d_%d.wav", p.sessionID, blockIdx))
+			wavPath := filepath.Join(p.tools.TempDir, fmt.Sprintf("block_%d_%d.wav", sJob.SessionID, blockIdx))
 
 			tSlice0 := time.Now()
 			var err error
@@ -645,7 +864,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 				if ctx.Err() != nil {
 					return
 				}
-				p.handleBlockFailure(blockIdx, "slice", err)
+				p.handleBlockFailure(blockIdx, "slice", err, sJob.SessionID)
 				continue
 			}
 
@@ -820,7 +1039,7 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 					})
 					return
 				}
-				p.handleBlockFailure(job.BlockIdx, "stt", err)
+				p.handleBlockFailure(job.BlockIdx, "stt", err, job.SessionID)
 				continue
 			}
 
@@ -997,7 +1216,9 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				})
 
 				p.mu.Lock()
-				delete(p.activeJobs, job.BlockIdx)
+				if p.session != nil && p.session.id == job.SessionID {
+					delete(p.activeJobs, job.BlockIdx)
+				}
 				p.mu.Unlock()
 
 				// Phát phụ đề tiếng Việt hoàn tất ngay lập tức (Final=true)
@@ -1103,7 +1324,9 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			// Đánh dấu hoãn block để scheduler không lặp lại vô ích (áp dụng cho cả hoãn Tier-2 lẫn lỗi Tier-1)
 			if okCount < hasTextCount && p.isTier2PostponedMode() {
 				p.mu.Lock()
-				p.tier2Deferred[job.BlockIdx] = true
+				if p.session != nil && p.session.id == job.SessionID {
+					p.tier2Deferred[job.BlockIdx] = true
+				}
 				p.mu.Unlock()
 			}
 
@@ -1170,10 +1393,12 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			})
 
 			p.mu.Lock()
-			if p.blockStore.IsBlockDone(job.BlockIdx) {
-				delete(p.tier2Deferred, job.BlockIdx)
+			if p.session != nil && p.session.id == job.SessionID {
+				if p.blockStore.IsBlockDone(job.BlockIdx) {
+					delete(p.tier2Deferred, job.BlockIdx)
+				}
+				delete(p.activeJobs, job.BlockIdx)
 			}
-			delete(p.activeJobs, job.BlockIdx)
 			p.mu.Unlock()
 
 			// Phát bản dịch tiếng Việt hoàn tất (Final=true)
@@ -1193,8 +1418,16 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 	}
 }
 
-func (p *Pipeline) handleBlockFailure(blockIdx int, stage string, err error) {
+func (p *Pipeline) handleBlockFailure(blockIdx int, stage string, err error, sessionID int64) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+
 	p.mu.Lock()
+	if p.session == nil || p.session.id != sessionID || p.session.ctx.Err() != nil {
+		p.mu.Unlock()
+		return
+	}
 	delete(p.activeJobs, blockIdx)
 	p.failedBlocks[blockIdx]++
 	retryCount := p.failedBlocks[blockIdx]
