@@ -21,6 +21,9 @@ export function upsertSubtitles(
     return existing;
   }
 
+  const fast = tryReplaceInPlace(existing, incoming);
+  if (fast) return fast;
+
   const map = new Map<number, SubtitleItem>();
 
   // Nạp toàn bộ danh sách hiện tại vào map
@@ -37,6 +40,43 @@ export function upsertSubtitles(
   const result = Array.from(map.values());
   result.sort((a, b) => a.start_sec - b.start_sec);
 
+  return result;
+}
+
+/**
+ * Đường nhanh: mọi phần tử incoming đã tồn tại trong existing (cùng id và cùng start_sec)
+ * -> chỉ thay thế tại chỗ trên bản sao, không cần dựng Map hay sort lại. Độ phức tạp O(N) cho
+ * bản sao + O(k log N) cho k phần tử mới. Trả về null nếu có phần tử thực sự mới / đổi start_sec
+ * (khi đó dùng nhánh merge + sort đầy đủ).
+ * Yêu cầu existing đã sắp xếp theo start_sec; nếu không, tìm không thấy -> tự rơi về nhánh đầy đủ.
+ */
+function tryReplaceInPlace(
+  existing: SubtitleItem[],
+  incoming: SubtitleItem[]
+): SubtitleItem[] | null {
+  const positions: number[] = [];
+  for (const item of incoming) {
+    let lo = 0;
+    let hi = existing.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (existing[mid].start_sec < item.start_sec) lo = mid + 1;
+      else hi = mid;
+    }
+    let found = -1;
+    for (let j = lo; j < existing.length && existing[j].start_sec === item.start_sec; j++) {
+      if (existing[j].id === item.id) {
+        found = j;
+        break;
+      }
+    }
+    if (found < 0) return null;
+    positions.push(found);
+  }
+  const result = existing.slice();
+  for (let i = 0; i < incoming.length; i++) {
+    result[positions[i]] = incoming[i];
+  }
   return result;
 }
 
