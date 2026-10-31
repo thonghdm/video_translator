@@ -34,6 +34,9 @@ type Settings struct {
 	WhisperThreads   int     `json:"whisper_threads"`
 	SourceLang       string  `json:"source_lang"`
 	Translator       string  `json:"translator"` // "cli" | "server"
+	GeminiAPIKey     string  `json:"gemini_api_key,omitempty"`
+	GeminiEnabled    bool    `json:"gemini_enabled,omitempty"`
+	GeminiModel      string  `json:"gemini_model,omitempty"`
 }
 
 // PipelineStatus payload cho sự kiện pipeline_status

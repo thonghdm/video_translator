@@ -106,6 +106,10 @@ export function SelectVideoFolder() {
   return window['go']['main']['App']['SelectVideoFolder']();
 }
 
+export function SetGeminiConfig(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetGeminiConfig'](arg1, arg2, arg3);
+}
+
 export function SetSourceLang(arg1) {
   return window['go']['main']['App']['SetSourceLang'](arg1);
 }

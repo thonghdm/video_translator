@@ -38,11 +38,14 @@ type GeminiConfig struct {
 	MaxItemsPerCall int           `json:"max_items_per_call"`
 }
 
+// DefaultGeminiModel là model mặc định được tối ưu latency cho dịch thuật video
+const DefaultGeminiModel = "gemini-3.5-flash-lite"
+
 // DefaultGeminiConfig trả về cấu hình mặc định an toàn cho Gemini Cloud
 func DefaultGeminiConfig() GeminiConfig {
 	return GeminiConfig{
 		Enabled:         false, // Mặc định tắt
-		Model:           "gemini-3.5-flash-lite", // Model nhẹ, độ trễ p50 ~1.19s, hỗ trợ JSON Schema
+		Model:           DefaultGeminiModel, // Model nhẹ, độ trễ p50 ~1.19s, hỗ trợ JSON Schema
 		APIKey:          "",
 		Endpoint:        "https://generativelanguage.googleapis.com/v1beta/models",
 		RPM:             12, // Đặt 12 RPM (thấp hơn 20% so với trần 15 RPM của free tier để an toàn)

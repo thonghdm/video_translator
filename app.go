@@ -53,6 +53,7 @@ func NewApp() *App {
 		WhisperThreads:   4,
 		SourceLang:       "auto",
 		Translator:       "cli",
+		GeminiModel:      DefaultGeminiModel,
 	}
 
 	if data, err := os.ReadFile(settingsPath); err == nil {
@@ -60,6 +61,19 @@ func NewApp() *App {
 	}
 	if defaultSettings.SourceLang == "" {
 		defaultSettings.SourceLang = "auto"
+	}
+	if defaultSettings.GeminiModel == "" {
+		defaultSettings.GeminiModel = DefaultGeminiModel
+	}
+	if defaultSettings.GeminiAPIKey == "" {
+		if envKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); envKey != "" {
+			defaultSettings.GeminiAPIKey = envKey
+		}
+	}
+	if !defaultSettings.GeminiEnabled {
+		if envEnabled := os.Getenv("GEMINI_ENABLED"); envEnabled == "true" || envEnabled == "1" {
+			defaultSettings.GeminiEnabled = true
+		}
 	}
 
 	return &App{
@@ -407,7 +421,11 @@ func (a *App) StartPipeline(path string, startSec float64) error {
 
 	// Khởi tạo Translator nếu chưa có (sử dụng FastHybridTranslator: siêu tốc ~120ms/block, tiết kiệm 1.2GB RAM, tự fallback Local LLM khi offline)
 	if a.currentTrans == nil {
-		a.currentTrans = NewFastHybridTranslator(a.tools.LlamaModel, a.tools.LlamaServer, a.tools.LlamaCLI)
+		trans := NewFastHybridTranslator(a.tools.LlamaModel, a.tools.LlamaServer, a.tools.LlamaCLI)
+		a.setupGemini(trans)
+		a.currentTrans = trans
+	} else if trans, ok := a.currentTrans.(*FastHybridTranslator); ok {
+		a.setupGemini(trans)
 	}
 
 	callbacks := PipelineEventCallbacks{
@@ -808,11 +826,66 @@ func (a *App) SaveSettings(settings Settings) error {
 	defer a.mu.Unlock()
 
 	a.settings = settings
+	if trans, ok := a.currentTrans.(*FastHybridTranslator); ok {
+		a.setupGemini(trans)
+	}
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(a.settingsPath, data, 0644)
+}
+
+// SetGeminiConfig cập nhật cấu hình Gemini Cloud và lưu vào %LOCALAPPDATA%\SubTrans\settings.json
+func (a *App) SetGeminiConfig(apiKey string, enabled bool, model string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.settings.GeminiAPIKey = strings.TrimSpace(apiKey)
+	a.settings.GeminiEnabled = enabled
+	if strings.TrimSpace(model) != "" {
+		a.settings.GeminiModel = strings.TrimSpace(model)
+	} else if a.settings.GeminiModel == "" {
+		a.settings.GeminiModel = DefaultGeminiModel
+	}
+
+	if trans, ok := a.currentTrans.(*FastHybridTranslator); ok {
+		a.setupGemini(trans)
+	}
+
+	data, err := json.MarshalIndent(a.settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(a.settingsPath, data, 0644)
+}
+
+// setupGemini cấu hình hoặc hủy GeminiClient cho FastHybridTranslator dựa trên Settings và biến môi trường
+func (a *App) setupGemini(trans *FastHybridTranslator) {
+	if trans == nil {
+		return
+	}
+	apiKey := strings.TrimSpace(a.settings.GeminiAPIKey)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+	}
+	enabled := a.settings.GeminiEnabled
+	if !enabled {
+		if envEnabled := os.Getenv("GEMINI_ENABLED"); envEnabled == "true" || envEnabled == "1" {
+			enabled = true
+		}
+	}
+	if enabled && apiKey != "" {
+		cfg := DefaultGeminiConfig()
+		cfg.Enabled = true
+		cfg.APIKey = apiKey
+		if model := strings.TrimSpace(a.settings.GeminiModel); model != "" {
+			cfg.Model = model
+		}
+		trans.SetGemini(NewGeminiClient(cfg, nil))
+	} else {
+		trans.SetGemini(nil)
+	}
 }
 
 // SetSourceLang cập nhật và lưu ngôn ngữ nguồn ("auto", "en", "vi")

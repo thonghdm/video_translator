@@ -95,6 +95,9 @@ export namespace main {
 	    whisper_threads: number;
 	    source_lang: string;
 	    translator: string;
+	    gemini_api_key?: string;
+	    gemini_enabled?: boolean;
+	    gemini_model?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -110,6 +113,9 @@ export namespace main {
 	        this.whisper_threads = source["whisper_threads"];
 	        this.source_lang = source["source_lang"];
 	        this.translator = source["translator"];
+	        this.gemini_api_key = source["gemini_api_key"];
+	        this.gemini_enabled = source["gemini_enabled"];
+	        this.gemini_model = source["gemini_model"];
 	    }
 	}
 	export class SubtitleItem {

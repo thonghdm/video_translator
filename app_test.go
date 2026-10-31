@@ -190,3 +190,53 @@ func Test_TwoTierLookaheadBatches_And_Metrics(t *testing.T) {
 		t.Errorf("Percentile p50=%d p95=%d không khớp kỳ vọng (105, 130)", p50, p95)
 	}
 }
+
+// Test_App_GeminiConfig_Integration kiểm tra tích hợp Gemini vào App và FastHybridTranslator qua cấu hình Settings
+func Test_App_GeminiConfig_Integration(t *testing.T) {
+	tempDir := t.TempDir()
+	settingsFile := filepath.Join(tempDir, "settings.json")
+
+	app := &App{
+		settingsPath: settingsFile,
+		settings: Settings{
+			BlockSec:    30.0,
+			GeminiModel: DefaultGeminiModel,
+		},
+	}
+
+	trans := NewFastHybridTranslator("", "", "")
+	app.currentTrans = trans
+
+	// 1. Mặc định chưa bật Gemini: trans không có Gemini client
+	app.setupGemini(trans)
+	if trans.gemini.Load() != nil {
+		t.Errorf("Kỳ vọng gemini là nil khi chưa bật, nhận được: %v", trans.gemini.Load())
+	}
+
+	// 2. Bật Gemini với SetGeminiConfig
+	testKey := "TEST_KEY_APP_123"
+	err := app.SetGeminiConfig(testKey, true, "gemini-3.5-flash-lite")
+	if err != nil {
+		t.Fatalf("SetGeminiConfig thất bại: %v", err)
+	}
+	g := trans.gemini.Load()
+	if g == nil {
+		t.Fatalf("Kỳ vọng trans có GeminiClient sau khi bật")
+	}
+	if g.cfg.APIKey != testKey {
+		t.Errorf("Kỳ vọng APIKey=%q, nhận được: %q", testKey, g.cfg.APIKey)
+	}
+	if g.cfg.Model != "gemini-3.5-flash-lite" {
+		t.Errorf("Kỳ vọng Model=gemini-3.5-flash-lite, nhận được: %q", g.cfg.Model)
+	}
+
+	// 3. Tắt Gemini qua SaveSettings
+	cfg := app.GetSettings()
+	cfg.GeminiEnabled = false
+	if err := app.SaveSettings(cfg); err != nil {
+		t.Fatalf("SaveSettings thất bại: %v", err)
+	}
+	if trans.gemini.Load() != nil {
+		t.Errorf("Kỳ vọng gemini là nil sau khi tắt qua SaveSettings")
+	}
+}

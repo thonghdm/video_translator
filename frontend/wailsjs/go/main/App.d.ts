@@ -54,6 +54,8 @@ export function SelectVideoFile():Promise<string>;
 
 export function SelectVideoFolder():Promise<main.FolderNode>;
 
+export function SetGeminiConfig(arg1:string,arg2:boolean,arg3:string):Promise<void>;
+
 export function SetSourceLang(arg1:string):Promise<void>;
 
 export function StartDriveFolderScan(arg1:string,arg2:string):Promise<void>;

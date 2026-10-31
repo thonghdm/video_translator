@@ -148,6 +148,9 @@ declare global {
           ApplyUpdate: (downloadURL: string) => Promise<void>;
           RestartApp: () => Promise<void>;
           GetCurrentVersion: () => Promise<string>;
+          GetSettings?: () => Promise<any>;
+          SaveSettings?: (settings: any) => Promise<void>;
+          SetGeminiConfig?: (apiKey: string, enabled: boolean, model: string) => Promise<void>;
         };
       };
     };
@@ -636,6 +639,7 @@ export const App: React.FC = () => {
 
   // Source language ('auto' | 'en' | 'vi')
   const [sourceLang, setSourceLang] = useState<string>("auto");
+  const [geminiEnabled, setGeminiEnabled] = useState<boolean>(false);
 
   // Ghi nhớ đường dẫn thư mục gốc vào localStorage
   const rememberFolderPath = useCallback((p: string) => {
@@ -891,6 +895,13 @@ export const App: React.FC = () => {
       .then((l) => {
         if (l === "en" || l === "vi" || l === "auto") {
           setSourceLang(l);
+        }
+      })
+      .catch(() => {});
+    window.go?.main?.App?.GetSettings?.()
+      .then((s) => {
+        if (s) {
+          setGeminiEnabled(!!s.gemini_enabled);
         }
       })
       .catch(() => {});
@@ -1755,6 +1766,39 @@ export const App: React.FC = () => {
                 <option value="vi" className="bg-neutral-900 text-neutral-200">VI</option>
               </select>
             </div>
+
+            {/* Nút bật/tắt Cloud AI (Gemini) */}
+            <button
+              onClick={async () => {
+                try {
+                  const s = await window.go?.main?.App?.GetSettings?.();
+                  if (!s) return;
+                  const next = !geminiEnabled;
+                  await window.go?.main?.App?.SetGeminiConfig?.(
+                    s.gemini_api_key || "",
+                    next,
+                    s.gemini_model || "gemini-3.5-flash-lite",
+                  );
+                  setGeminiEnabled(next);
+                  showToast(
+                    next
+                      ? "Đã BẬT Cloud AI (Gemini 3.5 Flash-Lite)"
+                      : "Đã TẮT Cloud AI (chỉ dùng GTX + Qwen)",
+                  );
+                } catch (e) {
+                  console.error(e);
+                }
+              }}
+              className={`flex items-center space-x-1 h-8 px-2.5 rounded-lg border text-xs font-medium transition-all shrink-0 whitespace-nowrap ${
+                geminiEnabled
+                  ? "bg-cyan-500/15 text-cyan-300 border-cyan-500/40 hover:bg-cyan-500/25"
+                  : "bg-neutral-900/90 text-neutral-400 border-neutral-700/80 hover:bg-neutral-800"
+              }`}
+              title="Bật/Tắt dịch Cloud AI (Gemini) khi Google Translate bị chặn"
+            >
+              <Cloud className="w-3.5 h-3.5 shrink-0" />
+              <span>Cloud: {geminiEnabled ? "BẬT" : "TẮT"}</span>
+            </button>
 
             {/* Nút bật/tắt Tự động chuyển bài khi hết video */}
             <button
