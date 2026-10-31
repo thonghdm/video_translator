@@ -133,6 +133,7 @@ trong khóa học EKS Kubernetes Masterclass này.
 	if err != nil {
 		t.Fatalf("Lỗi tạo BlockStore: %v", err)
 	}
+	t.Cleanup(bs.WaitPersist) // BUG-14: file block được ghi nền; đợi xong trước khi dọn thư mục tạm
 	if !PopulateStoreFromVietnameseSRT(bs, vidPath, 30.0, 30.0, 2.0) {
 		t.Fatalf("Kỳ vọng nạp thành công phụ đề từ _vi.srt")
 	}

@@ -164,6 +164,7 @@ func PopulateStoreFromVietnameseSRT(bs *BlockStore, videoPath string, durationSe
 		totalBlocks = 1
 	}
 
+	pending := make(map[int][]SubtitleItem)
 	for b := 0; b < totalBlocks; b++ {
 		if bs.IsBlockDone(b) {
 			continue
@@ -208,8 +209,11 @@ func PopulateStoreFromVietnameseSRT(bs *BlockStore, videoPath string, durationSe
 			})
 			seq++
 		}
-		_ = bs.SaveBlock(b, items)
+		pending[b] = items
 	}
+
+	// BUG-14: nạp RAM ngay, ghi đĩa ở nền (không chặn OpenVideo / không giữ a.mu qua ~120 lần ghi file)
+	bs.SaveBlocksDeferred(pending)
 
 	return true
 }
