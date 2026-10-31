@@ -626,6 +626,23 @@ func (p *Pipeline) currentTranslatorMode() string {
 	return "api"
 }
 
+// acquireComputeForLocalLLM giữ computeMu khi bộ dịch đang ở chế độ local_ai (Qwen chạy bằng CPU),
+// để Whisper và LLM không chạy song song tranh core. Các chế độ api/cloud/offline không cần khóa.
+// Chờ theo kiểu TryLock + ctx để không bị kẹt khi session bị hủy (tua video) trong lúc Whisper đang giữ khóa.
+func (p *Pipeline) acquireComputeForLocalLLM(ctx context.Context) (release func(), ok bool) {
+	if p.currentTranslatorMode() != "local_ai" {
+		return func() {}, true
+	}
+	for !p.computeMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return func() {}, false
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	return p.computeMu.Unlock, true
+}
+
 func (p *Pipeline) isTier2PostponedMode() bool {
 	m := p.currentTranslatorMode()
 	return m == "local_ai" || m == "offline"
@@ -1269,9 +1286,16 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 						batchLines[k] = job.Items[itemIdx].SourceText
 					}
 
+					// Local LLM chạy trên CPU: xếp hàng sau Whisper qua computeMu để 2 tiến trình
+					// không tranh nhau toàn bộ core (nhả ngay khi người dùng tua / hủy session).
+					releaseCompute, gotCompute := p.acquireComputeForLocalLLM(ctx)
+					if !gotCompute {
+						return
+					}
 					tBatch0 := time.Now()
 					targets, _ := p.translator.TranslateBatch(ctx, batchLines)
 					batchMs := time.Since(tBatch0).Milliseconds()
+					releaseCompute()
 
 					if ctx.Err() != nil {
 						return

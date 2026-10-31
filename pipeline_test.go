@@ -771,3 +771,101 @@ func Test_BUG02_InfiniteLoop_WhenTranslateReturnsEmptyInAPIMode(t *testing.T) {
 		t.Fatalf("Block 0 chưa dịch được câu nào thì IsBlockDone(0) phải là false để cho phép thử lại khi người dùng tua (Seek)")
 	}
 }
+
+// computeProbeTranslator ghi lại thời điểm TranslateBatch được gọi đầu tiên.
+type computeProbeTranslator struct {
+	MockTranslator
+	mode      string
+	firstCall atomic.Int64 // UnixNano, 0 = chưa gọi
+}
+
+func (m *computeProbeTranslator) CurrentMode() string { return m.mode }
+func (m *computeProbeTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	m.firstCall.CompareAndSwap(0, time.Now().UnixNano())
+	return m.MockTranslator.TranslateBatch(ctx, lines)
+}
+
+func newComputeProbePipeline(t *testing.T, mode string) (*Pipeline, *computeProbeTranslator) {
+	t.Helper()
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	tempDir := t.TempDir()
+	dummyVideo := filepath.Join(tempDir, "dummy_bug07.mp4")
+	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
+	bs, err := NewBlockStore(dummyVideo, CacheMeta{BlockSec: 30, OverlapSec: 2, DurationSec: 30})
+	if err != nil {
+		t.Fatalf("NewBlockStore error: %v", err)
+	}
+	settings := Settings{BlockSec: 30.0, OverlapSec: 2.0, LookaheadMinSec: 10.0, LookaheadMaxSec: 30.0, TranslateWorkers: 1}
+	trans := &computeProbeTranslator{mode: mode}
+	p := NewPipeline(dummyVideo, 30.0, settings, &ToolsPaths{TempDir: tempDir}, bs, trans, PipelineEventCallbacks{})
+	p.MockSliceAudio = func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error { return nil }
+	p.MockRunSTT = func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error) {
+		return []WhisperSegment{{StartSec: 1.0, EndSec: 3.0, Text: "This is a test line"}}, nil
+	}
+	return p, trans
+}
+
+// BUG-07: ở chế độ local_ai, TranslateBatch phải chờ Whisper nhả computeMu.
+func Test_BUG07_LocalAI_TranslateWaitsForWhisperComputeMu(t *testing.T) {
+	p, trans := newComputeProbePipeline(t, "local_ai")
+	p.computeMu.Lock() // giả lập Whisper đang chạy
+	_ = p.Start(0)
+	defer p.Stop()
+
+	time.Sleep(300 * time.Millisecond)
+	released := time.Now()
+	if c := trans.firstCall.Load(); c != 0 {
+		t.Fatalf("BUG-07: local LLM chạy song song với Whisper (gọi sau %dms khi Whisper còn giữ computeMu)", (c-released.Add(-300*time.Millisecond).UnixNano())/1e6)
+	}
+	p.computeMu.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for trans.firstCall.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if trans.firstCall.Load() == 0 {
+		t.Fatalf("TranslateBatch phải chạy sau khi computeMu được nhả")
+	}
+}
+
+// Đối chứng: chế độ api không bị khóa bởi computeMu.
+func Test_BUG07_ApiMode_NotBlockedByComputeMu(t *testing.T) {
+	p, trans := newComputeProbePipeline(t, "api")
+	p.computeMu.Lock()
+	_ = p.Start(0)
+	defer p.Stop()
+	defer p.computeMu.Unlock() // chạy trước Stop (LIFO) để Stop không chờ hết 3s drain
+
+	deadline := time.Now().Add(2 * time.Second)
+	for trans.firstCall.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if trans.firstCall.Load() == 0 {
+		t.Fatalf("chế độ api không được phụ thuộc computeMu")
+	}
+}
+
+// Hủy session (tua video) khi worker dịch đang chờ computeMu: worker phải thoát dù khóa vẫn bị giữ.
+func Test_BUG07_LocalAI_CancelWhileWaitingForComputeMu_WorkerExits(t *testing.T) {
+	p, trans := newComputeProbePipeline(t, "local_ai")
+	p.computeMu.Lock()
+	defer p.computeMu.Unlock()
+	_ = p.Start(0)
+	time.Sleep(150 * time.Millisecond)
+	if trans.firstCall.Load() != 0 {
+		t.Fatalf("worker lẽ ra phải đang chờ computeMu")
+	}
+
+	p.mu.Lock()
+	sess := p.session
+	p.mu.Unlock()
+	sess.cancel()
+
+	exited := make(chan struct{})
+	go func() { sess.wg.Wait(); close(exited) }()
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("translatorWorker không thoát sau khi session bị hủy (kẹt chờ computeMu)")
+	}
+}
