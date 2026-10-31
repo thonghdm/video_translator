@@ -954,20 +954,9 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 					p.mu.Unlock()
 				}
 
-				if envLang := strings.ToLower(strings.TrimSpace(os.Getenv("VT_WHISPER_LANG"))); envLang != "" {
-					if envLang == "detect-once" {
-						p.mu.Lock()
-						if p.detectedOnceLang != "" {
-							lang = p.detectedOnceLang
-							detectedLang = p.detectedOnceLang
-						} else {
-							lang = "auto"
-						}
-						p.mu.Unlock()
-					} else {
-						lang = envLang
-						detectedLang = envLang
-					}
+				if envLang := strings.ToLower(strings.TrimSpace(os.Getenv("VT_WHISPER_LANG"))); envLang != "" && envLang != "detect-once" {
+					lang = envLang
+					detectedLang = envLang
 				}
 				langArg = lang
 
@@ -999,15 +988,8 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 				if runRes != nil && runRes.FullStderr != "" {
 					whisperTimings = ParseWhisperTimings(runRes.FullStderr)
 					SaveWhisperStderrSample(runRes.FullStderr)
-					if whisperTimings.DetectedLang != "" {
-						p.mu.Lock()
-						if p.detectedOnceLang == "" {
-							p.detectedOnceLang = whisperTimings.DetectedLang
-						}
-						p.mu.Unlock()
-						if detectedLang == "" || detectedLang == "auto" {
-							detectedLang = whisperTimings.DetectedLang
-						}
+					if whisperTimings.DetectedLang != "" && (detectedLang == "" || detectedLang == "auto") {
+						detectedLang = whisperTimings.DetectedLang
 					}
 				}
 
@@ -1018,11 +1000,6 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 						segments, parsedLang, err = ParseWhisperJSONResult(data, job.Range.ExtractStart)
 						if parsedLang != "" {
 							detectedLang = parsedLang
-							p.mu.Lock()
-							if p.detectedOnceLang == "" {
-								p.detectedOnceLang = parsedLang
-							}
-							p.mu.Unlock()
 						}
 						_ = os.Remove(jsonOutPath)
 					} else {
@@ -1060,6 +1037,19 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 
 			// Lọc theo quy tắc điểm giữa, bỏ ảo giác
 			filtered := FilterAndDeduplicateSegments(segments, job.Range)
+
+			// Chỉ chốt detectedOnceLang khi block có câu thoại thực sự sau khi lọc ảo giác
+			// và xác suất nhận diện ngôn ngữ (nếu có) không quá thấp (>= 0.25), tránh chốt nhầm ngôn ngữ ở block intro nhạc không lời.
+			if len(filtered) > 0 && detectedLang != "" && detectedLang != "auto" {
+				confident := whisperTimings.DetectedLangP == nil || *whisperTimings.DetectedLangP >= 0.25
+				if confident {
+					p.mu.Lock()
+					if p.detectedOnceLang == "" {
+						p.detectedOnceLang = detectedLang
+					}
+					p.mu.Unlock()
+				}
+			}
 
 			var items []SubtitleItem
 			for seq, s := range filtered {

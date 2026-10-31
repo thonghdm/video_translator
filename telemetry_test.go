@@ -94,10 +94,20 @@ func TestParseWhisperTimings_InvalidSample(t *testing.T) {
 func Test_BUG01_MeasureDetectOnce(t *testing.T) {
 	src := os.Getenv("VT_HARNESS_VIDEO")
 	if src == "" {
-		src = filepath.Join(os.Getenv("LOCALAPPDATA"), "SubTrans", "youtube", "Advanced_Golang_-_Channels_Context_and_Interfaces_Explained_[VkGQFFl66X4].mp4")
+		t.Skip("đặt VT_HARNESS_VIDEO để chạy đo đạc detect-once trên video thật")
 	}
 	if _, err := os.Stat(src); err != nil {
 		t.Skipf("không tìm thấy video mẫu: %v", err)
+	}
+
+	workDir := t.TempDir()
+	tmpDir := filepath.Join(workDir, "tmp")
+	_ = os.MkdirAll(tmpDir, 0755)
+
+	// Sao chép video sang thư mục riêng không có .srt đi kèm để bắt buộc chạy Whisper thật
+	videoPath := filepath.Join(workDir, "video.mp4")
+	if err := copyFile(videoPath, src); err != nil {
+		t.Fatalf("không sao chép được video: %v", err)
 	}
 
 	repoRoot, _ := os.Getwd()
@@ -108,9 +118,9 @@ func Test_BUG01_MeasureDetectOnce(t *testing.T) {
 		FFprobe:      filepath.Join(binDir, "tools", "ffmpeg", "ffprobe.exe"),
 		WhisperCLI:   filepath.Join(binDir, "tools", "whisper", "whisper-cli.exe"),
 		WhisperModel: filepath.Join(binDir, "models", "ggml-base.bin"),
+		TempDir:      tmpDir,
 	}
 
-	workDir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", filepath.Join(workDir, "appdata"))
 	t.Setenv("VT_TELEMETRY", "1")
 
@@ -119,7 +129,7 @@ func Test_BUG01_MeasureDetectOnce(t *testing.T) {
 	telemetryOutputDir = runDir
 	defer func() { telemetryOutputDir = prevDir }()
 
-	probe, err := ProbeMedia(tools, src)
+	probe, err := ProbeMedia(tools, videoPath)
 	if err != nil {
 		t.Fatalf("ffprobe error: %v", err)
 	}
@@ -130,7 +140,7 @@ func Test_BUG01_MeasureDetectOnce(t *testing.T) {
 		DurationSec:  probe.DurationSec,
 		WhisperModel: "ggml-base.bin",
 	}
-	bs, err := NewBlockStore(src, meta)
+	bs, err := NewBlockStore(videoPath, meta)
 	if err != nil {
 		t.Fatalf("NewBlockStore error: %v", err)
 	}
@@ -146,7 +156,7 @@ func Test_BUG01_MeasureDetectOnce(t *testing.T) {
 	}
 
 	mockTrans := &MockTranslator{}
-	pipe := NewPipeline(src, probe.DurationSec, settings, tools, bs, mockTrans, PipelineEventCallbacks{})
+	pipe := NewPipeline(videoPath, probe.DurationSec, settings, tools, bs, mockTrans, PipelineEventCallbacks{})
 	if err := pipe.Start(0); err != nil {
 		t.Fatalf("pipe.Start error: %v", err)
 	}
@@ -161,11 +171,12 @@ func Test_BUG01_MeasureDetectOnce(t *testing.T) {
 	}
 	pipe.Stop()
 
-	// Đọc blocks.jsonl
+	// Đọc blocks.jsonl và kiểm tra LangArg chuyển từ "auto" (block 0) sang ngôn ngữ cụ thể (block 1, 2)
 	data, err := os.ReadFile(filepath.Join(runDir, "blocks.jsonl"))
 	if err != nil {
 		t.Fatalf("không đọc được blocks.jsonl: %v", err)
 	}
+	var completed []BlockTelemetryRecord
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if line == "" {
 			continue
@@ -176,8 +187,23 @@ func Test_BUG01_MeasureDetectOnce(t *testing.T) {
 			if r.WhisperEncodeMs != nil {
 				encMs = *r.WhisperEncodeMs
 			}
-			t.Logf("[MEASURE] Block=%d LangArg=%s WallMs=%d EncodeMs=%.1f Runs=%d",
-				r.BlockIndex, r.WhisperLangArg, r.WhisperWallMs, encMs, r.WhisperEncodeRuns)
+			t.Logf("[MEASURE] Block=%d LangArg=%s WallMs=%d EncodeMs=%.1f Runs=%d Cancelled=%v",
+				r.BlockIndex, r.WhisperLangArg, r.WhisperWallMs, encMs, r.WhisperEncodeRuns, r.Cancelled)
+			if !r.Cancelled {
+				completed = append(completed, r)
+			}
+		}
+	}
+	if len(completed) < 2 {
+		t.Fatalf("kỳ vọng ít nhất 2 block hoàn tất, nhận: %d", len(completed))
+	}
+	if completed[0].WhisperLangArg != "auto" {
+		t.Errorf("Block đầu tiên phải chạy với -l auto, nhận: %q", completed[0].WhisperLangArg)
+	}
+	for i := 1; i < len(completed); i++ {
+		if completed[i].WhisperLangArg == "" || completed[i].WhisperLangArg == "auto" {
+			t.Errorf("Block thứ %d phải dùng ngôn ngữ đã phát hiện từ block 0 thay vì 'auto', nhận: %q",
+				completed[i].BlockIndex, completed[i].WhisperLangArg)
 		}
 	}
 }
