@@ -42,7 +42,7 @@ type GeminiConfig struct {
 func DefaultGeminiConfig() GeminiConfig {
 	return GeminiConfig{
 		Enabled:         false, // Mặc định tắt
-		Model:           "gemini-2.0-flash",
+		Model:           "gemini-3.5-flash-lite", // Model nhẹ, độ trễ p50 ~1.19s, hỗ trợ JSON Schema
 		APIKey:          "",
 		Endpoint:        "https://generativelanguage.googleapis.com/v1beta/models",
 		RPM:             12, // Đặt 12 RPM (thấp hơn 20% so với trần 15 RPM của free tier để an toàn)
