@@ -514,6 +514,10 @@ func (c *GeminiClient) doRequest(ctx context.Context, items []GeminiItem, contex
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		if retryAfter == 0 && len(bodyBytes) > 0 {
+			retryAfter = parseRetryDelayFromBody(bodyBytes)
+		}
 		return nil, &RateLimitError{
 			RetryAfter: retryAfter,
 			Message:    "gemini rate limit 429",
@@ -617,6 +621,30 @@ func parseRetryAfter(h string) time.Duration {
 			return 0
 		}
 		return d
+	}
+	return 0
+}
+
+// parseRetryDelayFromBody trích xuất retryDelay từ payload JSON lỗi của Google (vd: "retryDelay": "16s")
+func parseRetryDelayFromBody(body []byte) time.Duration {
+	idx := bytes.Index(body, []byte(`"retryDelay"`))
+	if idx == -1 {
+		return 0
+	}
+	sub := body[idx+len(`"retryDelay"`):]
+	start := bytes.IndexByte(sub, '"')
+	if start == -1 {
+		return 0
+	}
+	sub = sub[start+1:]
+	end := bytes.IndexByte(sub, '"')
+	if end == -1 {
+		return 0
+	}
+	raw := strings.TrimSpace(string(sub[:end]))
+	raw = strings.TrimSuffix(raw, "s")
+	if secs, err := strconv.ParseFloat(raw, 64); err == nil && secs > 0 {
+		return time.Duration(secs * float64(time.Second))
 	}
 	return 0
 }

@@ -876,12 +876,20 @@ func (a *App) setupGemini(trans *FastHybridTranslator) {
 		}
 	}
 	if enabled && apiKey != "" {
+		model := strings.TrimSpace(a.settings.GeminiModel)
+		if model == "" {
+			model = DefaultGeminiModel
+		}
+		// Nếu đã có GeminiClient với cùng cấu hình, giữ nguyên để không làm gián đoạn breaker và token bucket
+		if cur := trans.gemini.Load(); cur != nil {
+			if cur.cfg.Enabled && cur.cfg.APIKey == apiKey && cur.cfg.Model == model {
+				return
+			}
+		}
 		cfg := DefaultGeminiConfig()
 		cfg.Enabled = true
 		cfg.APIKey = apiKey
-		if model := strings.TrimSpace(a.settings.GeminiModel); model != "" {
-			cfg.Model = model
-		}
+		cfg.Model = model
 		trans.SetGemini(NewGeminiClient(cfg, nil))
 	} else {
 		trans.SetGemini(nil)

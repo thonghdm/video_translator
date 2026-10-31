@@ -230,6 +230,12 @@ func Test_App_GeminiConfig_Integration(t *testing.T) {
 		t.Errorf("Kỳ vọng Model=gemini-3.5-flash-lite, nhận được: %q", g.cfg.Model)
 	}
 
+	// 2b. Gọi setupGemini lại với cùng config: phải tái sử dụng cùng client (không tạo mới làm mất breaker/tokens)
+	app.setupGemini(trans)
+	if trans.gemini.Load() != g {
+		t.Errorf("Kỳ vọng giữ nguyên con trỏ GeminiClient g, nhưng bị tạo mới")
+	}
+
 	// 3. Tắt Gemini qua SaveSettings
 	cfg := app.GetSettings()
 	cfg.GeminiEnabled = false

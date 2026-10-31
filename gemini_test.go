@@ -637,3 +637,23 @@ func TestGemini_Chunking_PartialFailure_KeepsTranslatedLines(t *testing.T) {
 		t.Fatalf("kỳ vọng chunk 2 lỗi thì để chuỗi rỗng để fillGaps xử lý, nhận: %q", res[2])
 	}
 }
+
+func Test_ParseRetryDelayFromBody(t *testing.T) {
+	cases := []struct {
+		body     string
+		expected time.Duration
+	}{
+		{`{"error":{"details":[{"retryDelay":"16s"}]}}`, 16 * time.Second},
+		{`{"retryDelay": "20.5s"}`, 20500 * time.Millisecond},
+		{`{"retryDelay": "0s"}`, 0},
+		{`no retry delay here`, 0},
+		{``, 0},
+	}
+
+	for _, c := range cases {
+		got := parseRetryDelayFromBody([]byte(c.body))
+		if got != c.expected {
+			t.Errorf("parseRetryDelayFromBody(%q) = %v, kỳ vọng %v", c.body, got, c.expected)
+		}
+	}
+}
