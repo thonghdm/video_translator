@@ -84,7 +84,7 @@ type DriveManager struct {
 	loginActive bool
 
 	streamToken string // token ngẫu nhiên bảo vệ route /drive/stream (chống tiến trình khác trên máy gọi bừa)
-	subCache    map[string][]WhisperSegment
+	subCache    *segmentLRU // phụ đề Drive đã tải, giữ tối đa driveSubCacheMax video gần nhất (BUG-19)
 	names       map[string]string
 	durations   map[string]float64
 	subIDs      map[string]string // videoID -> subtitle fileID (ghi nhận khi quét cây thư mục)
@@ -113,7 +113,7 @@ func GetDriveManager() *DriveManager {
 		driveMgr = &DriveManager{
 			tokenPath:   filepath.Join(dir, "drive_token.json"),
 			streamToken: hex.EncodeToString(tb),
-			subCache:    make(map[string][]WhisperSegment),
+			subCache:    newSegmentLRU(driveSubCacheMax),
 			names:       make(map[string]string),
 			durations:   make(map[string]float64),
 			subIDs:      make(map[string]string),
@@ -201,7 +201,7 @@ func GetDriveSubtitleSegments(path string) []WhisperSegment {
 	dm := GetDriveManager()
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
-	return dm.subCache[DriveFileIDFromPath(path)]
+	return dm.subCache.Get(DriveFileIDFromPath(path))
 }
 
 // StreamURL tạo URL loopback proxy cho 1 fileId
@@ -331,7 +331,7 @@ func (p *persistingTokenSource) lastAccessToken() string {
 func (dm *DriveManager) dropSession() {
 	dm.mu.Lock()
 	dm.src = nil
-	dm.subCache = make(map[string][]WhisperSegment)
+	dm.subCache.Clear()
 	dm.mu.Unlock()
 
 	dm.fileMu.Lock()
@@ -944,7 +944,7 @@ func (dm *DriveManager) fetchDriveSubtitle(videoID, subID string) ([]WhisperSegm
 		return nil, fmt.Errorf("file phụ đề trống hoặc sai định dạng")
 	}
 	dm.mu.Lock()
-	dm.subCache[videoID] = segs
+	dm.subCache.Put(videoID, segs)
 	dm.mu.Unlock()
 	return segs, nil
 }
@@ -956,7 +956,7 @@ func (dm *DriveManager) PrepareVideo(fileID, name, subtitleID string) (hasSub bo
 	if name != "" {
 		dm.names[fileID] = name
 	}
-	delete(dm.subCache, fileID)
+	dm.subCache.Delete(fileID)
 	dm.mu.Unlock()
 
 	if subtitleID == "" {
