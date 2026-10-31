@@ -229,7 +229,8 @@ type GeminiClient struct {
 // NewGeminiClient khởi tạo client cho Gemini
 func NewGeminiClient(cfg GeminiConfig, client *http.Client) *GeminiClient {
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		// Dùng chung transport với GTX/Llama để tái sử dụng kết nối TLS/HTTP2 (mặc định chỉ giữ 2 idle conn/host)
+		client = &http.Client{Timeout: 15 * time.Second, Transport: sharedHTTPTransport}
 	}
 	if cfg.RPM <= 0 {
 		cfg.RPM = 12
@@ -510,7 +511,11 @@ func (c *GeminiClient) doRequest(ctx context.Context, items []GeminiItem, contex
 		}
 		return nil, errors.New(c.sanitize(err.Error()))
 	}
-	defer resp.Body.Close()
+	// Đọc cạn phần body còn lại (tối đa 1MB) trước khi đóng để kết nối quay về pool thay vì bị hủy
+	defer func() {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
