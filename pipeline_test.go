@@ -767,4 +767,7 @@ func Test_BUG02_InfiniteLoop_WhenTranslateReturnsEmptyInAPIMode(t *testing.T) {
 	if count > 2 {
 		t.Fatalf("BUG-02 THẤT BẠI (ĐÃ TÁI HIỆN): Block 0 bị lặp vô tận, đã được scheduler chọn lại %d lần (> 2 lần)", count)
 	}
+	if bs.IsBlockDone(0) {
+		t.Fatalf("Block 0 chưa dịch được câu nào thì IsBlockDone(0) phải là false để cho phép thử lại khi người dùng tua (Seek)")
+	}
 }

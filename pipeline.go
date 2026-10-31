@@ -1336,27 +1336,20 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				}
 				p.mu.Unlock()
 
-				// Nếu đã thử lại đủ số lần (>= 2) mà vẫn còn câu rỗng:
-				// Đánh dấu Translated = true cho các câu còn lại để không làm nghẽn tiến độ pipeline
-				if retryCount >= 2 {
-					for k := range translatedItems {
-						if !translatedItems[k].Translated && translatedItems[k].SourceText != "" {
-							translatedItems[k].Translated = true
-						}
-					}
-					if p.callbacks.OnError != nil {
-						p.callbacks.OnError(PipelineError{
-							Block:   job.BlockIdx,
-							Stage:   "translate",
-							Message: fmt.Sprintf("Dịch block %d không đầy đủ sau %d lần thử (%d/%d câu thành công)", job.BlockIdx, retryCount, okCount, hasTextCount),
-							Fatal:   true,
-							Video:   p.videoPath,
-						})
-					}
+				if retryCount > 0 && p.callbacks.OnError != nil {
+					p.callbacks.OnError(PipelineError{
+						Block:   job.BlockIdx,
+						Stage:   "translate",
+						Message: fmt.Sprintf("Dịch block %d không đầy đủ ở lần thử %d (%d/%d câu thành công)", job.BlockIdx, retryCount, okCount, hasTextCount),
+						Fatal:   retryCount >= 2,
+						Video:   p.videoPath,
+					})
 				}
 			} else {
 				p.mu.Lock()
-				delete(p.failedBlocks, job.BlockIdx)
+				if p.session != nil && p.session.id == job.SessionID {
+					delete(p.failedBlocks, job.BlockIdx)
+				}
 				p.mu.Unlock()
 			}
 
