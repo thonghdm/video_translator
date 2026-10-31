@@ -249,7 +249,10 @@ func RunCommand(ctx context.Context, bin string, args []string, timeout time.Dur
 	scanner := bufio.NewScanner(stderrPipe)
 	scanner.Split(splitCRLF)
 
+	var stderrWg sync.WaitGroup
+	stderrWg.Add(1)
 	go func() {
+		defer stderrWg.Done()
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
@@ -269,6 +272,7 @@ func RunCommand(ctx context.Context, bin string, args []string, timeout time.Dur
 		}
 	}()
 
+	stderrWg.Wait()
 	cmdErr := cmd.Wait()
 
 	recentMu.Lock()
