@@ -1015,3 +1015,63 @@ func TestPipeline_Tier2NotPostponed_InCloudMode(t *testing.T) {
 		t.Fatalf("kỳ vọng isTier2PostponedMode() = false khi mode là 'cloud' (không được hoãn Tier-2 trên Cloud)!")
 	}
 }
+
+// TestTranslateBatch_GeminiBucketExhausted_CurrentModeReturnsLocalAI kiểm tra khi GTX bị khóa và Gemini cạn token bucket,
+// CurrentMode() lập tức trả về 'local_ai' thay vì báo nhầm 'cloud'
+func TestTranslateBatch_GeminiBucketExhausted_CurrentModeReturnsLocalAI(t *testing.T) {
+	cfg := DefaultGeminiConfig()
+	cfg.Enabled = true
+	cfg.APIKey = "valid_key"
+	gemini := NewGeminiClient(cfg, nil)
+	// Rút cạn token trong bucket
+	gemini.rateLimiter.tokens = 0.0
+
+	fb := &dummyFallbackTranslator{}
+	f := &FastHybridTranslator{
+		phraseCache: NewLRUCache(100),
+		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+		modelOK:     true,
+	}
+	f.SetGemini(gemini)
+	// Khóa breaker GTX
+	f.gtxBreaker.blockedUntil.Store(time.Now().Add(10 * time.Minute).UnixNano())
+
+	// Token bucket cạn -> Gemini không Available() -> mode phải là 'local_ai'
+	if mode := f.CurrentMode(); mode != "local_ai" {
+		t.Fatalf("kỳ vọng CurrentMode là 'local_ai' khi Gemini cạn token, nhận: %q", mode)
+	}
+}
+
+// TestFastHybrid_SetGeminiNil_NoPanic kiểm tra gọi SetGemini(nil) tuyệt đối không gây panic khi truy vấn mode hoặc dịch batch
+func TestFastHybrid_SetGeminiNil_NoPanic(t *testing.T) {
+	fb := &dummyFallbackTranslator{}
+	f := &FastHybridTranslator{
+		phraseCache: NewLRUCache(100),
+		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
+		modelOK:     true,
+	}
+
+	// Gắn nil tường minh
+	f.SetGemini(nil)
+
+	// 1. CurrentMode không panic
+	if mode := f.CurrentMode(); mode != "api" {
+		t.Fatalf("kỳ vọng mode là 'api', nhận: %q", mode)
+	}
+
+	// 2. TranslateBatch không panic
+	f.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			return mockResponse(http.StatusOK, `[[["Xin chào","Hello"]]]`)
+		}),
+	}
+	res, err := f.TranslateBatch(context.Background(), []string{"Hello"})
+	if err != nil {
+		t.Fatalf("kỳ vọng dịch thành công, nhận lỗi: %v", err)
+	}
+	if len(res) != 1 || res[0] != "Xin chào" {
+		t.Fatalf("kỳ vọng 'Xin chào', nhận: %v", res)
+	}
+}
