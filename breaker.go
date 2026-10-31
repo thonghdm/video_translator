@@ -8,6 +8,23 @@ import (
 	"time"
 )
 
+// RateLimitError đóng gói lỗi rate limit kèm thời gian giãn cách nếu nhà cung cấp trả về Retry-After
+type RateLimitError struct {
+	RetryAfter time.Duration
+	Message    string
+}
+
+func (e *RateLimitError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	return "rate limited (429)"
+}
+
+func (e *RateLimitError) Is(target error) bool {
+	return target == ErrRateLimited
+}
+
 // Breaker định nghĩa giao diện chuẩn cho bộ ngắt mạch bảo vệ dịch thuật
 type Breaker interface {
 	Allow() (allowed bool, isProbe bool)
@@ -115,10 +132,21 @@ func (cb *CircuitBreaker) Report(err error, isProbe bool) {
 	case errors.Is(err, context.Canceled), errors.Is(err, errEmptyTranslation):
 		// Tua video hoặc câu dịch rỗng: không phải lỗi của nhà cung cấp dịch vụ
 	case errors.Is(err, ErrRateLimited):
-		// Bị rate limit / HTTP 429: Khóa với exponential backoff.
+		// Bị rate limit / HTTP 429: Khóa với exponential backoff hoặc theo Retry-After cụ thể.
 		// Chỉ tăng step và đặt blockedUntil khi breaker hoàn toàn đóng (blockedUntil == 0) hoặc khi là probe.
 		// Request thường nhận 429 lúc breaker đã khóa hoặc đang half-open (blockedUntil != 0) thì bỏ qua.
 		if !isProbe && cb.blockedUntil.Load() != 0 {
+			return
+		}
+
+		var rlErr *RateLimitError
+		if errors.As(err, &rlErr) && rlErr.RetryAfter > 0 {
+			dur := rlErr.RetryAfter
+			if dur > cb.config.MaxBackoff {
+				dur = cb.config.MaxBackoff
+			}
+			cb.blockedUntil.Store(time.Now().Add(dur).UnixNano())
+			log.Printf("[CircuitBreaker] Khóa breaker theo Retry-After: thời lượng %v", dur)
 			return
 		}
 
