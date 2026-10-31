@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -671,5 +672,87 @@ func Test_Pipeline_Benchmark_ThreeSeekScenarios(t *testing.T) {
 	}
 	if durScenario2 > 10*time.Millisecond {
 		t.Errorf("Kịch bản 2 phải hoàn tất tức thì (<10ms), đo được: %v", durScenario2)
+	}
+}
+
+type emptyResponseTranslator struct {
+	mode string
+}
+
+func (m *emptyResponseTranslator) Translate(ctx context.Context, line string, prevContext []string) (string, error) {
+	return "", nil
+}
+
+func (m *emptyResponseTranslator) TranslateBatch(ctx context.Context, lines []string) ([]string, error) {
+	// Giả lập tầng dịch ở mode api/cloud trả về chuỗi rỗng
+	res := make([]string, len(lines))
+	for i := range res {
+		res[i] = ""
+	}
+	return res, nil
+}
+
+func (m *emptyResponseTranslator) Close() error {
+	return nil
+}
+
+func (m *emptyResponseTranslator) CurrentMode() string {
+	return m.mode
+}
+
+// Test_BUG02_InfiniteLoop_WhenTranslateReturnsEmptyInAPIMode tái hiện lỗi BUG-02:
+// Khi TranslateBatch trả về câu rỗng ở mode api, scheduler bị lặp vô tận vì okCount < hasTextCount
+// không tăng failedBlocks và không set tier2Deferred.
+func Test_BUG02_InfiniteLoop_WhenTranslateReturnsEmptyInAPIMode(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	tempDir := t.TempDir()
+	dummyVideo := filepath.Join(tempDir, "dummy_bug02.mp4")
+	_ = os.WriteFile(dummyVideo, make([]byte, 1024), 0644)
+
+	bs, err := NewBlockStore(dummyVideo, CacheMeta{BlockSec: 30, OverlapSec: 2, DurationSec: 30})
+	if err != nil {
+		t.Fatalf("NewBlockStore error: %v", err)
+	}
+
+	settings := Settings{
+		BlockSec:         30.0,
+		OverlapSec:       2.0,
+		LookaheadMinSec:  10.0,
+		LookaheadMaxSec:  30.0,
+		TranslateWorkers: 1,
+	}
+	tools := &ToolsPaths{TempDir: tempDir}
+	trans := &emptyResponseTranslator{mode: "api"}
+
+	p := NewPipeline(dummyVideo, 30.0, settings, tools, bs, trans, PipelineEventCallbacks{})
+
+	var scheduleCount atomic.Int32
+	p.MockSliceAudio = func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error {
+		if bRange.Index == 0 {
+			scheduleCount.Add(1)
+		}
+		return nil
+	}
+	p.MockRunSTT = func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error) {
+		return []WhisperSegment{
+			{StartSec: 1.0, EndSec: 3.0, Text: "This is a test line"},
+		}, nil
+	}
+
+	_ = p.Start(0)
+	defer p.Stop()
+
+	// Chờ scheduler xử lý hoặc phát hiện lặp lại > 2 lần
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if scheduleCount.Load() > 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	count := scheduleCount.Load()
+	if count > 2 {
+		t.Fatalf("BUG-02 THẤT BẠI (ĐÃ TÁI HIỆN): Block 0 bị lặp vô tận, đã được scheduler chọn lại %d lần (> 2 lần)", count)
 	}
 }

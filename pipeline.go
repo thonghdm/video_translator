@@ -1320,13 +1320,43 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				}
 			}
 
-			// Nếu chưa dịch xong toàn bộ các câu có text VÀ đang ở chế độ hoãn (local_ai/offline):
-			// Đánh dấu hoãn block để scheduler không lặp lại vô ích (áp dụng cho cả hoãn Tier-2 lẫn lỗi Tier-1)
-			if okCount < hasTextCount && p.isTier2PostponedMode() {
+			// Nếu chưa dịch xong toàn bộ các câu có text:
+			if okCount < hasTextCount {
 				p.mu.Lock()
+				var retryCount int
 				if p.session != nil && p.session.id == job.SessionID {
-					p.tier2Deferred[job.BlockIdx] = true
+					if p.isTier2PostponedMode() {
+						// Đang ở chế độ hoãn (local_ai/offline): Đánh dấu hoãn block để scheduler không lặp lại vô ích
+						p.tier2Deferred[job.BlockIdx] = true
+					} else {
+						// Đang ở chế độ api/cloud: Tăng failedBlocks để scheduler không lặp vô tận (tối đa 2 lần thử lại)
+						p.failedBlocks[job.BlockIdx]++
+						retryCount = p.failedBlocks[job.BlockIdx]
+					}
 				}
+				p.mu.Unlock()
+
+				// Nếu đã thử lại đủ số lần (>= 2) mà vẫn còn câu rỗng:
+				// Đánh dấu Translated = true cho các câu còn lại để không làm nghẽn tiến độ pipeline
+				if retryCount >= 2 {
+					for k := range translatedItems {
+						if !translatedItems[k].Translated && translatedItems[k].SourceText != "" {
+							translatedItems[k].Translated = true
+						}
+					}
+					if p.callbacks.OnError != nil {
+						p.callbacks.OnError(PipelineError{
+							Block:   job.BlockIdx,
+							Stage:   "translate",
+							Message: fmt.Sprintf("Dịch block %d không đầy đủ sau %d lần thử (%d/%d câu thành công)", job.BlockIdx, retryCount, okCount, hasTextCount),
+							Fatal:   true,
+							Video:   p.videoPath,
+						})
+					}
+				}
+			} else {
+				p.mu.Lock()
+				delete(p.failedBlocks, job.BlockIdx)
 				p.mu.Unlock()
 			}
 
