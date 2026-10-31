@@ -212,7 +212,6 @@ func (p *Pipeline) triggerSchedule() {
 
 func (p *Pipeline) emitStatus(block int) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	totalBlocks := int(math.Ceil(p.durationSec / p.settings.BlockSec))
 	doneBlocks := len(p.blockStore.GetDoneBlocks())
@@ -229,9 +228,12 @@ func (p *Pipeline) emitStatus(block int) {
 		Video:          p.videoPath,
 		TranslatorMode: p.currentTranslatorMode(),
 	}
+	onStatus := p.callbacks.OnStatus
+	p.mu.Unlock()
 
-	if p.callbacks.OnStatus != nil {
-		p.callbacks.OnStatus(status)
+	// Gọi callback (Wails IPC / JSON) NGOÀI khóa p.mu để không chặn scheduler và các worker
+	if onStatus != nil {
+		onStatus(status)
 	}
 }
 

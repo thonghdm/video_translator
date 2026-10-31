@@ -1074,3 +1074,24 @@ func Test_BUG18_Start_ResetsFailedBlocks(t *testing.T) {
 		t.Fatalf("Start() phải reset failedBlocks, còn %d mục", n)
 	}
 }
+
+// BUG-13: OnStatus phải được gọi khi p.mu đã được nhả.
+func Test_BUG13_EmitStatus_CallbackRunsOutsideLock(t *testing.T) {
+	p, _ := newComputeProbePipeline(t, "api")
+	var lockFree atomic.Int32 // 1 = p.mu rảnh khi callback chạy, 2 = đang bị giữ
+	p.callbacks.OnStatus = func(PipelineStatus) {
+		if p.mu.TryLock() {
+			p.mu.Unlock()
+			lockFree.Store(1)
+		} else {
+			lockFree.Store(2)
+		}
+	}
+	p.emitStatus(0)
+	switch lockFree.Load() {
+	case 0:
+		t.Fatalf("OnStatus không được gọi")
+	case 2:
+		t.Fatalf("BUG-13: OnStatus chạy khi vẫn giữ p.mu")
+	}
+}
