@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -474,17 +475,21 @@ func Test_QC_BUG08_ShrinkDuration_SchedulerStopsImmediatelyAndTransitionsToDone(
 
 	var scheduledBlocks []int
 	var schedMu sync.Mutex
-	// Các block đã được lập lịch/cắt TRƯỚC khi frontend báo thời lượng thật là không thể thu hồi;
-	// chỉ kiểm tra những block được cắt SAU khi UpdateDuration trả về.
-	updated := false
+	block0Started := make(chan struct{}, 1)
+	releaseBlock0 := make(chan struct{})
 
 	p := NewPipeline(dummyVideo, 3600.0, settings, tools, bs, trans, PipelineEventCallbacks{})
 	p.MockSliceAudio = func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error {
 		schedMu.Lock()
-		if updated {
-			scheduledBlocks = append(scheduledBlocks, bRange.Index)
-		}
+		scheduledBlocks = append(scheduledBlocks, bRange.Index)
 		schedMu.Unlock()
+		if bRange.Index == 0 {
+			select {
+			case block0Started <- struct{}{}:
+			default:
+			}
+			<-releaseBlock0
+		}
 		return os.WriteFile(outWav, []byte("RIFFdummyWAV"), 0644)
 	}
 	p.MockRunSTT = func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error) {
@@ -496,22 +501,23 @@ func Test_QC_BUG08_ShrinkDuration_SchedulerStopsImmediatelyAndTransitionsToDone(
 	}
 	defer p.Stop()
 
-	// Chờ block 0 hoàn tất
-	deadline0 := time.Now().Add(2 * time.Second)
-	for !bs.IsBlockDone(0) && time.Now().Before(deadline0) {
-		time.Sleep(20 * time.Millisecond)
+	// Chờ block 0 bắt đầu chạy
+	select {
+	case <-block0Started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Block 0 không bắt đầu trong vòng 2 giây")
 	}
-	if !bs.IsBlockDone(0) {
-		t.Fatalf("Block 0 phải hoàn tất")
-	}
+
+	// Cho scheduler một khoảnh khắc để xếp hàng block 1 và block 2 vào slicerChan
+	time.Sleep(30 * time.Millisecond)
 
 	// Frontend phát hiện thời lượng thật là 60s (chỉ có 2 block: 0 và 1)
 	if !p.UpdateDuration(60.0) {
 		t.Fatalf("UpdateDuration(60.0) phải thành công")
 	}
-	schedMu.Lock()
-	updated = true
-	schedMu.Unlock()
+
+	// Thả cho block 0 chạy tiếp
+	close(releaseBlock0)
 
 	// Chờ scheduler xử lý xong block 1 và chuyển sang done
 	deadlineDone := time.Now().Add(3 * time.Second)
@@ -534,19 +540,26 @@ func Test_QC_BUG08_ShrinkDuration_SchedulerStopsImmediatelyAndTransitionsToDone(
 	dur := p.duration()
 	p.mu.Unlock()
 
-	t.Logf("[Quan sát] Các block đã lập lịch: %v | State cuối: %s | Duration: %.1fs", blocksCopy, finalState, dur)
+	t.Logf("[Quan sát] Các block đã slice: %v | State cuối: %s | Duration: %.1fs", blocksCopy, finalState, dur)
 
-	// Kiểm tra không có block nào >= 2 được lập lịch
+	// Kiểm tra không có block nào >= 2 được slice
 	for _, b := range blocksCopy {
 		if b >= 2 {
-			t.Fatalf("BUG-08 TỒN TẠI: Vẫn lập lịch block %d vượt quá thời lượng thật 60s (2 block 0,1)!", b)
+			t.Fatalf("BUG-08 TỒN TẠI: Vẫn slice block %d vượt quá thời lượng thật 60s (2 block 0,1)!", b)
 		}
+	}
+
+	if !bs.IsBlockDone(0) || !bs.IsBlockDone(1) {
+		t.Fatalf("Kỳ vọng cả 2 block 0 và 1 phải hoàn tất, nhưng 0=%v, 1=%v", bs.IsBlockDone(0), bs.IsBlockDone(1))
+	}
+	if bs.IsBlockDone(2) {
+		t.Fatalf("Block 2 không được phép hoàn tất khi thời lượng đã bị rút ngắn về 60s!")
 	}
 
 	if finalState != "done" {
 		t.Errorf("Kỳ vọng state chuyển sang 'done' sau khi hoàn tất 2 block thật, hiện tại: %s", finalState)
 	}
-	t.Log("[PASS BUG-08 Shrink] Scheduler dừng chính xác tại block cuối (block 1) và chuyển state sang 'done'!")
+	t.Log("[PASS BUG-08 Shrink] Scheduler và SlicerWorker hủy chính xác block thừa, dừng ở block 1 và chuyển state sang 'done'!")
 }
 
 // TEST CASE 6: BUG-08 Expand Duration
@@ -719,4 +732,62 @@ func Test_QC_BUG08_Concurrent_UpdateDuration_Seek_Playhead_NoRace(t *testing.T) 
 
 	wg.Wait()
 	t.Log("[PASS BUG-08 Concurrency] Đa luồng UpdateDuration, SeekTo, UpdatePlayhead không xảy ra data race!")
+}
+
+// TEST CASE 8: BUG-08 App layer UpdateVideoDuration
+// Kiểm tra hàm UpdateVideoDuration trong app.go:
+// 1. Cập nhật duration và totalBlocks trên currentInfo.
+// 2. Đồng bộ thời lượng vào DriveManager với đúng scheme gdrive://.
+// 3. Gọi p.UpdateDuration trên pipeline đang chạy.
+// 4. Lọc bỏ các giá trị NaN, Inf, âm hoặc 0.
+func Test_QC_BUG08_App_UpdateVideoDuration_SyncsCurrentInfoAndDriveManager(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir()) // BUG-20: cô lập cache khỏi %LOCALAPPDATA% thật
+	tempDir := t.TempDir()
+
+	app := NewApp()
+	app.tools = &ToolsPaths{TempDir: tempDir}
+
+	driveVideo := "gdrive://test_drive_file_123"
+	app.currentVideo = driveVideo
+	app.currentInfo = &VideoInfo{
+		Path:        driveVideo,
+		DurationSec: 3600.0,
+		BlockSec:    30.0,
+		TotalBlocks: 120,
+	}
+
+	// 1. Test cập nhật giá trị hợp lệ 95.0s
+	app.UpdateVideoDuration(driveVideo, 95.0)
+
+	if app.currentInfo.DurationSec != 95.0 {
+		t.Errorf("currentInfo.DurationSec kỳ vọng 95.0, nhận: %v", app.currentInfo.DurationSec)
+	}
+	expectedBlocks := int(math.Ceil(95.0 / 30.0)) // 4 blocks
+	if app.currentInfo.TotalBlocks != expectedBlocks {
+		t.Errorf("currentInfo.TotalBlocks kỳ vọng %d, nhận: %d", expectedBlocks, app.currentInfo.TotalBlocks)
+	}
+
+	// Kiểm tra DriveManager nhận đúng duration
+	dmDur := GetDriveManager().GetDuration("test_drive_file_123")
+	if dmDur != 95.0 {
+		t.Errorf("DriveManager duration kỳ vọng 95.0, nhận: %f", dmDur)
+	}
+
+	// 2. Test bỏ qua các giá trị không hợp lệ
+	app.UpdateVideoDuration(driveVideo, math.NaN())
+	app.UpdateVideoDuration(driveVideo, math.Inf(1))
+	app.UpdateVideoDuration(driveVideo, -10.0)
+	app.UpdateVideoDuration(driveVideo, 0.0)
+
+	if app.currentInfo.DurationSec != 95.0 {
+		t.Errorf("currentInfo.DurationSec không được thay đổi khi nhận giá trị không hợp lệ, nhận: %v", app.currentInfo.DurationSec)
+	}
+
+	// 3. Test bỏ qua nếu path không khớp currentVideo
+	app.UpdateVideoDuration("gdrive://other_file", 200.0)
+	if app.currentInfo.DurationSec != 95.0 {
+		t.Errorf("currentInfo.DurationSec không được thay đổi khi path không khớp currentVideo, nhận: %v", app.currentInfo.DurationSec)
+	}
+
+	t.Log("[PASS BUG-08 App] App.UpdateVideoDuration đồng bộ chuẩn xác sang currentInfo và DriveManager, lọc bỏ input rác!")
 }
