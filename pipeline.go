@@ -871,6 +871,14 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			blockIdx := sJob.BlockIdx
 			queueWaitMs := time.Since(sJob.ScheduledAt).Milliseconds()
 
+			// BUG-08: thời lượng thật ngắn hơn ước lượng → bỏ các job đã xếp hàng nhưng nằm ngoài video
+			if float64(blockIdx)*p.settings.BlockSec >= p.duration() {
+				p.mu.Lock()
+				delete(p.activeJobs, blockIdx)
+				p.mu.Unlock()
+				continue
+			}
+
 			bRange := ComputeBlockRange(blockIdx, p.settings.BlockSec, p.settings.OverlapSec, p.duration())
 			wavPath := filepath.Join(p.tools.TempDir, fmt.Sprintf("block_%d_%d.wav", sJob.SessionID, blockIdx))
 
