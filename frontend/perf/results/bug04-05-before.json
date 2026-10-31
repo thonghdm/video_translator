@@ -1,0 +1,13 @@
+{
+  "scenario": "10s phát, 200 bài trong cây, 1000+ câu phụ đề, 2 panel mở",
+  "renders": {
+    "LandingPage": 108,
+    "App": 68,
+    "CourseTreePanel": 68,
+    "FolderTreeItem": 14348,
+    "SubtitleListPanel": 68
+  },
+  "profilerCommits": 244,
+  "profilerActualMs": 5309.4,
+  "wallMsJsdom": 5826
+}

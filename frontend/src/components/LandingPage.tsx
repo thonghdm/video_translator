@@ -69,7 +69,7 @@ const DEMO_TIMELINE: DemoSubtitle[] = [
   }
 ];
 
-export const LandingPage: React.FC<LandingPageProps> = ({
+const LandingPageComponent: React.FC<LandingPageProps> = ({
   onOpenVideo,
   onOpenYouTube,
   onSwitchToPlayer,
@@ -915,3 +915,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     </div>
   );
 };
+
+// memo: props từ App đã ổn định (useCallback) nên LandingPage không render lại theo từng nhịp currentTime/pipeline_status
+export const LandingPage = React.memo(LandingPageComponent);

@@ -45,6 +45,7 @@ import {
   findSubtitleAtTime,
 } from "./lib/subtitles";
 import { LandingPage } from "./components/LandingPage";
+import { countRender } from "./lib/renderProbe";
 import { SetupWizard } from "./components/SetupWizard";
 import { UpdateNotification } from "./components/UpdateNotification";
 import { GoogleDrivePicker, DriveItem } from "./components/GoogleDrivePicker";
@@ -231,6 +232,7 @@ const FolderTreeItem = memo(
     onSelectVideo: (path: string) => void;
     onRemoveRoot?: (path: string) => void;
   }) => {
+    countRender("FolderTreeItem");
     const [expanded, setExpanded] = useState<boolean>(depth <= 1);
     const activeItemRef = useRef<HTMLDivElement>(null);
     const isExpanded = forceExpand || expanded;
@@ -364,6 +366,55 @@ const FolderTreeItem = memo(
   },
 );
 
+// So sánh pipeline_status: backend bắn mỗi 500ms kể cả khi chẳng có gì đổi.
+// ahead_sec chỉ hiển thị làm tròn theo giây nên so sánh theo Math.round.
+function isSamePipelineStatus(
+  a: PipelineStatus | null,
+  b: PipelineStatus,
+): boolean {
+  return (
+    !!a &&
+    a.state === b.state &&
+    a.message === b.message &&
+    a.block === b.block &&
+    a.done_blocks === b.done_blocks &&
+    a.total_blocks === b.total_blocks &&
+    a.video === b.video &&
+    a.translator_mode === b.translator_mode &&
+    Math.round(a.ahead_sec) === Math.round(b.ahead_sec)
+  );
+}
+
+// Dải vàng các block đã dịch xong trên seekbar (memo: không dựng lại tối đa ~120 thẻ div mỗi nhịp currentTime)
+const DoneBlocksStrip = memo(
+  ({
+    doneBlocks,
+    duration,
+    blockSec,
+  }: {
+    doneBlocks: number[];
+    duration: number;
+    blockSec: number;
+  }) => {
+    if (duration <= 0) return null;
+    return (
+      <>
+        {doneBlocks.map((b) => {
+          const left = ((b * blockSec) / duration) * 100;
+          const width = (blockSec / duration) * 100;
+          return (
+            <div
+              key={b}
+              style={{ left: `${left}%`, width: `${width}%` }}
+              className="absolute top-0 bottom-0 bg-amber-500/35"
+            />
+          );
+        })}
+      </>
+    );
+  },
+);
+
 // Panel cây thư mục khóa học bên trái
 const CourseTreePanel = memo(
   ({
@@ -391,6 +442,7 @@ const CourseTreePanel = memo(
     onClearAll: () => void;
     onClose: () => void;
   }) => {
+    countRender("CourseTreePanel");
     const [searchQuery, setSearchQuery] = useState<string>("");
     const allVideos = useMemo(() => flattenVideoNodes(roots), [roots]);
     const filteredRoots = useMemo(
@@ -532,6 +584,7 @@ const SubtitleListPanel = memo(
     onSeek: (sec: number) => void;
     onClose: () => void;
   }) => {
+    countRender("SubtitleListPanel");
     const activeItemRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -608,6 +661,7 @@ const SubtitleListPanel = memo(
 );
 
 export const App: React.FC = () => {
+  countRender("App");
   // Navigation View: 'landing' (Giới thiệu & Tính năng) hoặc 'player' (Trình phát video)
   const [viewMode, setViewMode] = useState<"landing" | "player">("landing");
 
@@ -1227,6 +1281,43 @@ export const App: React.FC = () => {
     showToast,
   ]);
 
+  // Các callback ổn định (tham chiếu không đổi giữa các lần render) để React.memo của
+  // LandingPage / CourseTreePanel / FolderTreeItem / SubtitleListPanel thực sự có tác dụng.
+  const handleToggleAutoCollapse = useCallback(() => {
+    setAutoCollapseFolder((v) => {
+      const next = !v;
+      showToast(
+        next
+          ? "Đã BẬT tự ẩn thư mục khi chọn bài"
+          : "Đã TẮT tự ẩn thư mục khi chọn bài",
+      );
+      return next;
+    });
+  }, [showToast]);
+
+  const handleSelectVideoFromTree = useCallback(
+    (path: string) => {
+      handleOpenVideo(path);
+      if (autoCollapseFolder) {
+        setShowFolderPanel(false);
+      }
+    },
+    [handleOpenVideo, autoCollapseFolder],
+  );
+
+  // Bọc lại để không truyền MouseEvent vào tham số rawLink của handlePasteDriveLink
+  const handleAddDriveLinkFromTree = useCallback(() => {
+    handlePasteDriveLink();
+  }, [handlePasteDriveLink]);
+
+  const handleCloseFolderPanel = useCallback(() => setShowFolderPanel(false), []);
+  const handleCloseSubPanel = useCallback(() => setShowSubPanel(false), []);
+  const handleLandingOpenVideo = useCallback(() => {
+    handleOpenVideo();
+  }, [handleOpenVideo]);
+  const handleLandingOpenYouTube = useCallback(() => setShowYtModal(true), []);
+  const handleLandingSwitchToPlayer = useCallback(() => setViewMode("player"), []);
+
   // Đăng ký lắng nghe sự kiện từ Wails backend
   useEffect(() => {
     if (!window.runtime) return;
@@ -1256,7 +1347,7 @@ export const App: React.FC = () => {
       "pipeline_status",
       (st: PipelineStatus) => {
         if (st.video !== videoInfo?.path) return;
-        setPipelineStatus(st);
+        setPipelineStatus((prev) => (isSamePipelineStatus(prev, st) ? prev : st));
       },
     );
 
@@ -2040,9 +2131,9 @@ export const App: React.FC = () => {
         className={`flex-1 relative overflow-hidden bg-[#0a0c10] flex flex-col ${viewMode === "landing" ? "" : "hidden"}`}
       >
         <LandingPage
-          onOpenVideo={() => handleOpenVideo()}
-          onOpenYouTube={() => setShowYtModal(true)}
-          onSwitchToPlayer={() => setViewMode("player")}
+          onOpenVideo={handleLandingOpenVideo}
+          onOpenYouTube={handleLandingOpenYouTube}
+          onSwitchToPlayer={handleLandingSwitchToPlayer}
           hasLoadedVideo={!!videoInfo?.path}
           isActive={viewMode === "landing"}
         />
@@ -2059,28 +2150,13 @@ export const App: React.FC = () => {
             activeVideoPath={videoInfo?.path ?? null}
             completedVideos={completedVideos}
             autoCollapse={autoCollapseFolder}
-            onToggleAutoCollapse={() => {
-              setAutoCollapseFolder((v) => {
-                const next = !v;
-                showToast(
-                  next
-                    ? "Đã BẬT tự ẩn thư mục khi chọn bài"
-                    : "Đã TẮT tự ẩn thư mục khi chọn bài",
-                );
-                return next;
-              });
-            }}
-            onSelectVideo={(path) => {
-              handleOpenVideo(path);
-              if (autoCollapseFolder) {
-                setShowFolderPanel(false);
-              }
-            }}
+            onToggleAutoCollapse={handleToggleAutoCollapse}
+            onSelectVideo={handleSelectVideoFromTree}
             onAddFolder={handleAddFolder}
-            onAddDriveLink={() => handlePasteDriveLink()}
+            onAddDriveLink={handleAddDriveLinkFromTree}
             onRemoveRoot={handleRemoveRootFolder}
             onClearAll={handleClearAllFolders}
-            onClose={() => setShowFolderPanel(false)}
+            onClose={handleCloseFolderPanel}
           />
         ) : (
           /* Nút tai nhỏ ở sát mép trái để bật nhanh lại Cây thư mục khi đang ẩn */
@@ -2268,7 +2344,7 @@ export const App: React.FC = () => {
             subtitles={subtitles}
             activeId={currentSubtitle?.id ?? null}
             onSeek={seekVideo}
-            onClose={() => setShowSubPanel(false)}
+            onClose={handleCloseSubPanel}
           />
         )}
       </div>
@@ -2281,19 +2357,11 @@ export const App: React.FC = () => {
             {/* Thanh nền tổng thời gian */}
             <div className="w-full h-1.5 bg-neutral-800 rounded relative overflow-hidden">
               {/* Dải màu hiển thị các block đã hoàn tất xử lý */}
-              {duration > 0 &&
-                doneBlocks.map((b) => {
-                  const blockSec = videoInfo?.block_sec || 30;
-                  const left = ((b * blockSec) / duration) * 100;
-                  const width = (blockSec / duration) * 100;
-                  return (
-                    <div
-                      key={b}
-                      style={{ left: `${left}%`, width: `${width}%` }}
-                      className="absolute top-0 bottom-0 bg-amber-500/35"
-                    />
-                  );
-                })}
+              <DoneBlocksStrip
+                doneBlocks={doneBlocks}
+                duration={duration}
+                blockSec={videoInfo?.block_sec || 30}
+              />
 
               {/* Thanh tiến độ đang phát */}
               <div

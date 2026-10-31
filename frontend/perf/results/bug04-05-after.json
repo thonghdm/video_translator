@@ -1,0 +1,10 @@
+{
+  "scenario": "10s phát, 200 bài trong cây, 1000+ câu phụ đề, 2 panel mở",
+  "renders": {
+    "App": 59,
+    "SubtitleListPanel": 15
+  },
+  "profilerCommits": 177,
+  "profilerActualMs": 572.1,
+  "wallMsJsdom": 691
+}
