@@ -62,6 +62,7 @@ func TestGTX_RateLimit_And_ExponentialBackoff(t *testing.T) {
 		client:      client,
 		phraseCache: NewLRUCache(100),
 		fallback:    fb,
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
 	}
 
 	ctx := context.Background()
@@ -74,13 +75,13 @@ func TestGTX_RateLimit_And_ExponentialBackoff(t *testing.T) {
 		t.Fatalf("kỳ vọng breaker mở (chặn Google) sau khi gặp 429")
 	}
 
-	if step := f.gtxBackoffStep.Load(); step != 1 {
+	if step := f.gtxBreaker.backoffStep.Load(); step != 1 {
 		t.Fatalf("kỳ vọng backoff step = 1, nhận: %d", step)
 	}
 
 	// Lần 2 gặp 429: tăng bậc 2 (2 phút)
 	f.gtxReport(ErrRateLimited, false)
-	if step := f.gtxBackoffStep.Load(); step != 2 {
+	if step := f.gtxBreaker.backoffStep.Load(); step != 2 {
 		t.Fatalf("kỳ vọng backoff step = 2, nhận: %d", step)
 	}
 
@@ -88,7 +89,7 @@ func TestGTX_RateLimit_And_ExponentialBackoff(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		f.gtxReport(ErrRateLimited, false)
 	}
-	if step := f.gtxBackoffStep.Load(); step > 6 {
+	if step := f.gtxBreaker.backoffStep.Load(); step > 6 {
 		t.Fatalf("kỳ vọng step bị cap tối đa ở 6, nhận: %d", step)
 	}
 
@@ -100,7 +101,7 @@ func TestGTX_RateLimit_And_ExponentialBackoff(t *testing.T) {
 
 	// Chỉ request probe (isProbe = true, err = nil) mới được phép đóng breaker và reset backoff
 	f.gtxReport(nil, true)
-	if f.gtxBackoffStep.Load() != 0 || f.isGtxBlocked() {
+	if f.gtxBreaker.backoffStep.Load() != 0 || f.isGtxBlocked() {
 		t.Fatalf("kỳ vọng breaker đóng lại sau khi probe thành công (isProbe=true)")
 	}
 }
@@ -109,6 +110,7 @@ func TestGTX_RateLimit_And_ExponentialBackoff(t *testing.T) {
 func TestCurrentMode_NoCAS_And_OfflineReport(t *testing.T) {
 	f := &FastHybridTranslator{
 		phraseCache: NewLRUCache(100),
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
 	}
 
 	// Trạng thái bình thường: "api"
@@ -117,13 +119,13 @@ func TestCurrentMode_NoCAS_And_OfflineReport(t *testing.T) {
 	}
 
 	// Khóa Google do rate limit, chưa cài đặt model Qwen
-	f.gtxBlockedUntil.Store(time.Now().Add(5 * time.Minute).UnixNano())
+	f.gtxBreaker.blockedUntil.Store(time.Now().Add(5 * time.Minute).UnixNano())
 	if mode := f.CurrentMode(); mode != "offline" {
 		t.Fatalf("kỳ vọng mode 'offline' khi chưa có Qwen model, nhận: %q", mode)
 	}
 
 	// Đảm bảo cờ probe không bao giờ bị bật do gọi CurrentMode()
-	if f.gtxProbing.Load() {
+	if f.gtxBreaker.probing.Load() {
 		t.Fatalf("CurrentMode() không được phép thay đổi cờ gtxProbing")
 	}
 
@@ -133,7 +135,7 @@ func TestCurrentMode_NoCAS_And_OfflineReport(t *testing.T) {
 	if mode := f.CurrentMode(); mode != "local_ai" {
 		t.Fatalf("kỳ vọng mode 'local_ai' khi có fallback, nhận: %q", mode)
 	}
-	if f.gtxProbing.Load() {
+	if f.gtxBreaker.probing.Load() {
 		t.Fatalf("CurrentMode() vẫn không được đổi cờ gtxProbing khi có fallback")
 	}
 }
@@ -142,10 +144,11 @@ func TestCurrentMode_NoCAS_And_OfflineReport(t *testing.T) {
 func TestHalfOpen_SingleProbeAndRelease(t *testing.T) {
 	f := &FastHybridTranslator{
 		phraseCache: NewLRUCache(100),
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
 	}
 
 	// Giả lập cooldown vừa hết (until ở quá khứ)
-	f.gtxBlockedUntil.Store(time.Now().Add(-100 * time.Millisecond).UnixNano())
+	f.gtxBreaker.blockedUntil.Store(time.Now().Add(-100 * time.Millisecond).UnixNano())
 
 	// Goroutine 1 nhận được quyền probe
 	allowed1, isProbe1 := f.allowGtxRequest()
@@ -161,12 +164,12 @@ func TestHalfOpen_SingleProbeAndRelease(t *testing.T) {
 
 	// Goroutine 1 thất bại do rate limited: gtxReport phải giải phóng cờ probe
 	f.gtxReport(ErrRateLimited, isProbe1)
-	if f.gtxProbing.Load() {
+	if f.gtxBreaker.probing.Load() {
 		t.Fatalf("cờ gtxProbing phải được reset về false sau gtxReport")
 	}
 
 	// Giả lập cooldown lại hết: Goroutine 3 probe thành công
-	f.gtxBlockedUntil.Store(time.Now().Add(-100 * time.Millisecond).UnixNano())
+	f.gtxBreaker.blockedUntil.Store(time.Now().Add(-100 * time.Millisecond).UnixNano())
 	allowed3, isProbe3 := f.allowGtxRequest()
 	if !allowed3 || !isProbe3 {
 		t.Fatalf("kỳ vọng goroutine 3 nhận probe sau khi hết cooldown")
@@ -174,10 +177,10 @@ func TestHalfOpen_SingleProbeAndRelease(t *testing.T) {
 
 	// Báo thành công -> Breaker đóng hoàn toàn
 	f.gtxReport(nil, isProbe3)
-	if f.gtxProbing.Load() {
+	if f.gtxBreaker.probing.Load() {
 		t.Fatalf("cờ gtxProbing phải false sau khi probe thành công")
 	}
-	if f.gtxBlockedUntil.Load() != 0 {
+	if f.gtxBreaker.blockedUntil.Load() != 0 {
 		t.Fatalf("gtxBlockedUntil phải là 0 sau khi probe thành công")
 	}
 
@@ -453,8 +456,9 @@ func TestScheduler_Tier2Postpone_TwoWay(t *testing.T) {
 func TestFastHybrid_ConcurrentProbingAndMode(t *testing.T) {
 	f := &FastHybridTranslator{
 		phraseCache: NewLRUCache(100),
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
 	}
-	f.gtxBlockedUntil.Store(time.Now().Add(-10 * time.Millisecond).UnixNano())
+	f.gtxBreaker.blockedUntil.Store(time.Now().Add(-10 * time.Millisecond).UnixNano())
 
 	var wg sync.WaitGroup
 	var probeWins atomic.Int32

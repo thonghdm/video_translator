@@ -85,10 +85,7 @@ type FastHybridTranslator struct {
 	currentMode     string // "api" | "local_ai"
 	fallbackReady   atomic.Bool  // true khi Qwen fallback đã nạp thành công
 	modelOK         bool         // true nếu file model tồn tại trên đĩa (tính 1 lần khi khởi tạo)
-	gtxBlockedUntil atomic.Int64 // unix nano; 0 = không bị khóa
-	gtxProbing      atomic.Bool  // half-open: chỉ 1 request được thử lại
-	gtxFails        atomic.Int32 // số lỗi thường liên tiếp
-	gtxBackoffStep  atomic.Int32 // số lần bị rate limit liên tiếp để tăng dần cooldown (10m, 20m, 40m, max 1h)
+	gtxBreaker      *CircuitBreaker
 	fbFailUntil     atomic.Int64 // không thử init Qwen lại trước mốc này
 	mismatchCount   atomic.Int64 // số lần batch bị lệch dòng phải dịch từng dòng
 }
@@ -108,6 +105,7 @@ func NewFastHybridTranslator(modelPath, serverExe, cliExe string) *FastHybridTra
 			Transport: sharedHTTPTransport,
 		},
 		phraseCache: NewLRUCache(8000),
+		gtxBreaker:  NewCircuitBreaker(DefaultBreakerConfig()),
 		modelPath:   modelPath,
 		serverExe:   serverExe,
 		cliExe:      cliExe,
@@ -118,8 +116,10 @@ func NewFastHybridTranslator(modelPath, serverExe, cliExe string) *FastHybridTra
 
 // isGtxBlocked chỉ đọc cờ khóa bằng atomic, tuyệt đối không dùng CAS làm tiêu tốn lượt probe
 func (f *FastHybridTranslator) isGtxBlocked() bool {
-	until := f.gtxBlockedUntil.Load()
-	return until != 0 && time.Now().UnixNano() < until
+	if f.gtxBreaker == nil {
+		return false
+	}
+	return f.gtxBreaker.Blocked()
 }
 
 // isFallbackAvailable kiểm tra fallback Qwen đã sẵn sàng hoặc có file model hợp lệ để tải không (không lấy lock, không đụng disk I/O)
@@ -263,62 +263,18 @@ func (f *FastHybridTranslator) translateFastGTX(ctx context.Context, text string
 	return strings.TrimSpace(sb.String()), nil
 }
 
-// allowGtxRequest kiểm tra và cấp quyền gọi Google.
-// Trả về: (allowed bool, isProbe bool).
-// Khi half-open (hết cooldown), duy nhất 1 goroutine nhận isProbe=true qua CAS.
+// allowGtxRequest kiểm tra và cấp quyền gọi Google, chuyển tiếp sang gtxBreaker.
 func (f *FastHybridTranslator) allowGtxRequest() (bool, bool) {
-	until := f.gtxBlockedUntil.Load()
-	if until == 0 {
+	if f.gtxBreaker == nil {
 		return true, false
 	}
-	if time.Now().UnixNano() < until {
-		return false, false
-	}
-	// Hết cooldown: chỉ đúng 1 goroutine nhận cờ probe thử lại (half-open)
-	if f.gtxProbing.CompareAndSwap(false, true) {
-		return true, true
-	}
-	return false, false
+	return f.gtxBreaker.Allow()
 }
 
-// gtxReport cập nhật trạng thái breaker sau khi gọi Google.
-// Luôn giải phóng cờ probe (f.gtxProbing) ở mọi đường thoát qua defer.
+// gtxReport cập nhật trạng thái breaker sau khi gọi Google, chuyển tiếp sang gtxBreaker.
 func (f *FastHybridTranslator) gtxReport(err error, isProbe bool) {
-	if isProbe {
-		defer f.gtxProbing.Store(false)
-	}
-	switch {
-	case err == nil:
-		f.gtxFails.Store(0)
-		if isProbe {
-			// Chỉ reset breaker và backoff khi request probe thành công
-			// Tránh request cũ về muộn vô tình mở breaker sớm
-			f.gtxBlockedUntil.Store(0)
-			f.gtxBackoffStep.Store(0)
-		}
-	case errors.Is(err, context.Canceled), errors.Is(err, errEmptyTranslation):
-		// Tua video hoặc câu dịch rỗng: không phải lỗi của Google
-	case errors.Is(err, ErrRateLimited):
-		// Bị Google rate limit / captcha: Khóa Google với exponential backoff 1m -> 2m -> 4m -> 8m -> max 10m
-		step := f.gtxBackoffStep.Add(1)
-		if step > 6 {
-			f.gtxBackoffStep.Store(6)
-			step = 6
-		}
-		dur := 1 * time.Minute * time.Duration(1<<(step-1))
-		if dur > 10*time.Minute || dur <= 0 {
-			dur = 10 * time.Minute
-		}
-		f.gtxBlockedUntil.Store(time.Now().Add(dur).UnixNano())
-	default: // Lỗi mạng/timeout
-		if isProbe {
-			// Probe thất bại: tiếp tục khóa 1 phút
-			f.gtxBlockedUntil.Store(time.Now().Add(1 * time.Minute).UnixNano())
-		} else if f.gtxFails.Add(1) >= 3 {
-			// 3 lần liên tiếp lỗi mạng khi chạy bình thường: khóa ngắn 2 phút
-			f.gtxBlockedUntil.Store(time.Now().Add(2 * time.Minute).UnixNano())
-			f.gtxFails.Store(0)
-		}
+	if f.gtxBreaker != nil {
+		f.gtxBreaker.Report(err, isProbe)
 	}
 }
 
