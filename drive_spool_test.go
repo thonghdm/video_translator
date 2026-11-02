@@ -3,294 +3,692 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-// Test 1: Spool phủ vùng thì trả về file cục bộ, không gọi proxy
-func TestDriveSpool_CoveredRegion_UsesLocalFile(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "spool_test_covered_*")
-	if err != nil {
-		t.Fatalf("Không thể tạo thư mục tạm: %v", err)
+// ---------- upstream giả ----------
+
+type fakeUp struct {
+	mu   sync.Mutex
+	data []byte
+	etag string
+
+	status     int           // khác 0: luôn trả status này (vd 403)
+	stallAfter int64         // đứng im (tới khi ctx hủy) khi chạm vị trí tuyệt đối n của file (0 = không)
+	dieAfter   int64         // response ĐẦU TIÊN: đóng sớm khi chạm vị trí tuyệt đối n (0 = không)
+	chunkDelay time.Duration // trễ giữa các lần Read
+	calls      []string
+	served     int
+}
+
+func (f *fakeUp) rangesSeen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+func (f *fakeUp) setStatus(st int) {
+	f.mu.Lock()
+	f.status = st
+	f.mu.Unlock()
+}
+
+func (f *fakeUp) upstreamGet(ctx context.Context, method, fileID, rangeHdr, ifRange string) (*http.Response, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, rangeHdr+"|"+ifRange)
+	f.served++
+	nth := f.served
+	status, data, etag := f.status, f.data, f.etag
+	f.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	defer os.RemoveAll(tempDir)
-
-	spool := NewDriveSpool(tempDir, 100*1024*1024, nil)
-	fileID := "mock_file_1"
-
-	// Mock file đã tải xong 20MB
-	dummyData := bytes.Repeat([]byte("A"), 20*1024*1024)
-	spool.mockDownloadFn = func(ctx context.Context, id string) (*http.Response, error) {
-		return &http.Response{
-			StatusCode:    http.StatusOK,
-			ContentLength: int64(len(dummyData)),
-			Header: http.Header{
-				"ETag": []string{`"etag_mock_1"`},
-			},
-			Body: io.NopCloser(bytes.NewReader(dummyData)),
-		}, nil
+	h := http.Header{}
+	if etag != "" {
+		h.Set("ETag", etag)
+	}
+	if status != 0 {
+		return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(bytes.NewReader(nil))}, nil
 	}
 
-	prog := spool.StartSpool(fileID, int64(len(dummyData)))
-	// Chờ tải hoàn tất
-	for i := 0; i < 50; i++ {
-		if prog.Complete.Load() {
-			break
+	total := int64(len(data))
+	start, end := int64(0), total-1
+	code := http.StatusOK
+	if strings.HasPrefix(rangeHdr, "bytes=") && (ifRange == "" || ifRange == etag) {
+		spec := strings.TrimPrefix(rangeHdr, "bytes=")
+		a, b, _ := strings.Cut(spec, "-")
+		start, _ = strconv.ParseInt(a, 10, 64)
+		if b != "" {
+			end, _ = strconv.ParseInt(b, 10, 64)
 		}
-		time.Sleep(50 * time.Millisecond)
+		if end >= total {
+			end = total - 1
+		}
+		code = http.StatusPartialContent
+		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
 	}
+	body := &fakeBody{ctx: ctx, data: data[start : end+1], base: start, delay: f.chunkDelay, stallAfter: f.stallAfter}
+	if f.dieAfter > 0 && nth == 1 {
+		body.dieAfter = f.dieAfter
+	}
+	return &http.Response{StatusCode: code, Header: h, ContentLength: int64(len(body.data)), Body: body}, nil
+}
 
-	if !prog.Complete.Load() {
-		t.Fatalf("Spool chưa tải xong sau 2.5s")
-	}
+type fakeBody struct {
+	ctx        context.Context
+	data       []byte
+	base       int64 // vị trí tuyệt đối của byte đầu trong file (stall/die tính theo vị trí tuyệt đối)
+	pos        int64
+	delay      time.Duration
+	stallAfter int64
+	dieAfter   int64
+}
 
-	// Gọi GetAvailableMediaInput cho block 0
-	ctx := context.Background()
-	localPath, ok := spool.GetAvailableMediaInput(ctx, fileID, 0, 30, 300)
-	if !ok {
-		t.Fatalf("Kỳ vọng ok=true khi spool đã phủ vùng, nhận được false")
+func (b *fakeBody) Read(p []byte) (int, error) {
+	if b.stallAfter > 0 && b.base+b.pos >= b.stallAfter {
+		<-b.ctx.Done()
+		return 0, b.ctx.Err()
 	}
-	expectedPath := filepath.Join(tempDir, fileID+".part")
-	if localPath != expectedPath {
-		t.Fatalf("Kỳ vọng localPath=%s, nhận được %s", expectedPath, localPath)
+	if b.dieAfter > 0 && b.base+b.pos >= b.dieAfter {
+		return 0, io.EOF // đóng sớm giữa chừng
 	}
+	if b.delay > 0 {
+		select {
+		case <-time.After(b.delay):
+		case <-b.ctx.Done():
+			return 0, b.ctx.Err()
+		}
+	}
+	if b.pos >= int64(len(b.data)) {
+		return 0, io.EOF
+	}
+	n := len(p)
+	if n > 32*1024 {
+		n = 32 * 1024
+	}
+	if rest := int64(len(b.data)) - b.pos; int64(n) > rest {
+		n = int(rest)
+	}
+	if b.stallAfter > 0 && b.base+b.pos+int64(n) > b.stallAfter {
+		n = int(b.stallAfter - b.base - b.pos)
+	}
+	if b.dieAfter > 0 && b.base+b.pos+int64(n) > b.dieAfter {
+		n = int(b.dieAfter - b.base - b.pos)
+	}
+	copy(p, b.data[b.pos:b.pos+int64(n)])
+	b.pos += int64(n)
+	return n, nil
+}
+func (b *fakeBody) Close() error { return nil }
 
-	// Xác nhận file trên đĩa tồn tại và đúng kích thước
-	fi, err := os.Stat(localPath)
-	if err != nil || fi.Size() != int64(len(dummyData)) {
-		t.Fatalf("File cục bộ không đúng kích thước kỳ vọng: %v", err)
+func pattern(n int) []byte {
+	d := make([]byte, n)
+	for i := range d {
+		d[i] = byte(i*7 + i>>8)
+	}
+	return d
+}
+
+func newTestSpool(t *testing.T, up spoolUpstream) *DriveSpool {
+	t.Helper()
+	s := NewDriveSpool(t.TempDir(), 64<<20, up)
+	s.block0Wait = 300 * time.Millisecond
+	s.stallTimeout = 200 * time.Millisecond
+	s.retryBackoff = 5 * time.Millisecond
+	s.maxRetries = 2
+	s.pollInterval = 5 * time.Millisecond
+	s.bgBytesPerSec = 0
+	t.Cleanup(s.Close)
+	return s
+}
+
+func spoolEventually(t *testing.T, d time.Duration, what string, cond func() bool) {
+	t.Helper()
+	dl := time.Now().Add(d)
+	for time.Now().Before(dl) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("hết %v mà chưa có: %s", d, what)
+}
+
+// ---------- tải đầy đủ ----------
+
+func TestSpool_FullDownloadCompletes(t *testing.T) {
+	data := pattern(3<<20 + 123)
+	up := &fakeUp{data: data, etag: `"v1"`}
+	s := newTestSpool(t, up)
+	prog := s.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "Complete", prog.Complete.Load)
+
+	got, err := os.ReadFile(prog.PartPath)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("nội dung file spool sai (err=%v, len=%d want=%d)", err, len(got), len(data))
+	}
+	meta, err := s.readMeta(prog.MetaPath)
+	if err != nil || !meta.Complete || meta.TotalSize != int64(len(data)) || meta.ETag != `"v1"` {
+		t.Fatalf("meta sai: %+v err=%v", meta, err)
+	}
+	path, ok, complete := s.Acquire(context.Background(), "vid", 100, 34, 300)
+	if !ok || !complete || path != prog.PartPath {
+		t.Fatalf("Acquire sau khi xong: ok=%v complete=%v", ok, complete)
 	}
 }
 
-// Test 2: Đổi video khác thì hủy ngay việc tải của video cũ
-func TestDriveSpool_SwitchVideo_CancelsPreviousDownload(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "spool_test_cancel_*")
-	if err != nil {
-		t.Fatalf("Không thể tạo thư mục tạm: %v", err)
+// ---------- BUG #1: tải đứng / lỗi không được làm treo pipeline ----------
+
+func TestSpool_StalledDownload_Block0ReturnsQuickly(t *testing.T) {
+	up := &fakeUp{data: pattern(40 << 20), etag: `"v1"`, stallAfter: 1 << 20}
+	s := newTestSpool(t, up)
+	s.block0Wait = 5 * time.Second // lớn hơn hẳn: phải thoát sớm nhờ cờ Failed, không phải đợi hết giờ
+	prog := s.StartSpool("vid", 0)
+
+	t0 := time.Now()
+	_, ok, _ := s.Acquire(context.Background(), "vid", 0, 34, 300)
+	el := time.Since(t0)
+	if ok {
+		t.Fatal("tải đứng sau 1MB mà vẫn báo dùng được spool")
 	}
-	defer os.RemoveAll(tempDir)
-
-	spool := NewDriveSpool(tempDir, 100*1024*1024, nil)
-
-	var vid1Canceled atomic.Bool
-	// Pipe reader/writer để stream vô hạn cho vid1
-	pr1, pw1 := io.Pipe()
-
-	spool.mockDownloadFn = func(ctx context.Context, id string) (*http.Response, error) {
-		if id == "vid1" {
-			go func() {
-				<-ctx.Done()
-				vid1Canceled.Store(true)
-				_ = pw1.Close()
-			}()
-			return &http.Response{
-				StatusCode:    http.StatusOK,
-				ContentLength: 100 * 1024 * 1024,
-				Header:        http.Header{},
-				Body:          pr1,
-			}, nil
-		}
-		// vid2 trả về nhanh
-		return &http.Response{
-			StatusCode:    http.StatusOK,
-			ContentLength: 1024,
-			Header:        http.Header{},
-			Body:          io.NopCloser(bytes.NewReader(make([]byte, 1024))),
-		}, nil
+	if el > 3*time.Second {
+		t.Fatalf("Acquire chặn %v (phải thoát khi tải bị đánh dấu hỏng)", el)
 	}
+	if !prog.Failed.Load() {
+		t.Fatal("tải đứng nhưng không có cờ Failed")
+	}
+}
 
-	// 1. Bắt đầu tải vid1
-	spool.StartSpool("vid1", 100*1024*1024)
+func TestSpool_Block0WaitHasHardDeadline(t *testing.T) {
+	// tải chậm (không đứng, không lỗi): phải hết giờ đúng block0Wait
+	up := &fakeUp{data: pattern(40 << 20), etag: `"v1"`, chunkDelay: 20 * time.Millisecond}
+	s := newTestSpool(t, up)
+	s.stallTimeout = 10 * time.Second
+	s.block0Wait = 250 * time.Millisecond
+	s.StartSpool("vid", 0)
+
+	t0 := time.Now()
+	_, ok, _ := s.Acquire(context.Background(), "vid", 0, 34, 300)
+	el := time.Since(t0)
+	if ok {
+		t.Fatal("chưa đủ byte mà vẫn ok")
+	}
+	if el < 200*time.Millisecond || el > 2*time.Second {
+		t.Fatalf("hết giờ sai: %v (kỳ vọng ~250ms)", el)
+	}
+}
+
+func TestSpool_Http403_FailsFast(t *testing.T) {
+	up := &fakeUp{data: pattern(1 << 20), status: http.StatusForbidden}
+	s := newTestSpool(t, up)
+	s.block0Wait = 5 * time.Second
+	prog := s.StartSpool("vid", 0)
+
+	t0 := time.Now()
+	_, ok, _ := s.Acquire(context.Background(), "vid", 0, 34, 300)
+	if ok || time.Since(t0) > 2*time.Second {
+		t.Fatalf("403: ok=%v sau %v (phải thoát nhanh, không dùng spool)", ok, time.Since(t0))
+	}
+	if !prog.Failed.Load() || prog.FailReason.Load() == nil || !strings.Contains(*prog.FailReason.Load(), "403") {
+		t.Fatalf("thiếu lý do lỗi 403")
+	}
+	if n := len(up.rangesSeen()); n != 1 {
+		t.Fatalf("403 là lỗi cuối, không được thử lại (số lần gọi=%d)", n)
+	}
+}
+
+func TestSpool_FailedDownloadRestartsOnNextStart(t *testing.T) {
+	data := pattern(2 << 20)
+	up := &fakeUp{data: data, etag: `"v1"`, status: http.StatusForbidden}
+	s := newTestSpool(t, up)
+	p1 := s.StartSpool("vid", 0)
+	spoolEventually(t, 2*time.Second, "Failed", p1.Failed.Load)
+
+	up.setStatus(0)
+	p2 := s.StartSpool("vid", 0)
+	if p2 == p1 {
+		t.Fatal("tiến trình đã chết nhưng StartSpool vẫn trả lại bản cũ")
+	}
+	spoolEventually(t, 5*time.Second, "Complete sau khi khởi động lại", p2.Complete.Load)
+}
+
+// ---------- thử lại / tiếp tục ----------
+
+func TestSpool_EarlyEOF_ResumesWithRange(t *testing.T) {
+	data := pattern(2<<20 + 77)
+	up := &fakeUp{data: data, etag: `"v1"`, dieAfter: 700 * 1024}
+	s := newTestSpool(t, up)
+	prog := s.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "Complete", prog.Complete.Load)
+
+	got, _ := os.ReadFile(prog.PartPath)
+	if !bytes.Equal(got, data) {
+		t.Fatalf("sau khi nối lại nội dung sai (len=%d want=%d)", len(got), len(data))
+	}
+	calls := up.rangesSeen()
+	if len(calls) < 2 || !strings.HasPrefix(calls[1], "bytes=716800-") || !strings.HasSuffix(calls[1], `|"v1"`) {
+		t.Fatalf("lần nối phải xin Range tiếp theo kèm If-Range ETag, calls=%v", calls)
+	}
+}
+
+func TestSpool_PrematureEOFIsNotComplete(t *testing.T) {
+	data := pattern(1 << 20)
+	// luôn đóng sớm: mọi response (dieAfter chỉ áp dụng response đầu → dùng wrapper)
+	up := &alwaysShortUp{fakeUp: fakeUp{data: data, etag: `"v1"`}, cut: 300 * 1024}
+	s := newTestSpool(t, up)
+	prog := s.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "Failed", prog.Failed.Load)
+	if prog.Complete.Load() {
+		t.Fatal("file thiếu byte nhưng bị đánh dấu Complete")
+	}
+}
+
+// mọi response đều đóng sớm tại vị trí tuyệt đối `cut` (nối lại cũng không tiến thêm được)
+type alwaysShortUp struct {
+	fakeUp
+	cut int64
+}
+
+func (a *alwaysShortUp) upstreamGet(ctx context.Context, m, id, rng, ifr string) (*http.Response, error) {
+	resp, err := a.fakeUp.upstreamGet(ctx, m, id, rng, ifr)
+	if err == nil && resp.StatusCode < 300 {
+		fb := resp.Body.(*fakeBody)
+		fb.dieAfter = a.cut
+	}
+	return resp, err
+}
+
+// ---------- ETag / size: dùng lại bản cũ khi còn đúng, bỏ khi đã đổi ----------
+
+func TestSpool_ReuseCompleteFile_RevalidatesFirst(t *testing.T) {
+	data := pattern(1<<20 + 5)
+	up := &fakeUp{data: data, etag: `"v1"`}
+	dir := t.TempDir()
+	mk := func(u spoolUpstream) *DriveSpool {
+		s := NewDriveSpool(dir, 64<<20, u)
+		s.pollInterval = 5 * time.Millisecond
+		s.bgBytesPerSec = 0
+		t.Cleanup(s.Close)
+		return s
+	}
+	s1 := mk(up)
+	p1 := s1.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "lần 1 xong", p1.Complete.Load)
+	s1.Close()
+
+	// phiên mới, file không đổi: chỉ được probe 0-0, không tải lại nội dung
+	up2 := &fakeUp{data: data, etag: `"v1"`}
+	s2 := mk(up2)
+	p2 := s2.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "lần 2 Complete", p2.Complete.Load)
+	calls := up2.rangesSeen()
+	if len(calls) != 1 || calls[0] != "bytes=0-0|" {
+		t.Fatalf("dùng lại bản cũ chỉ cần 1 lần probe, calls=%v", calls)
+	}
+	s2.Close()
+
+	// phiên 3: file trên Drive đã đổi (ETag + nội dung + size) → bỏ bản cũ, tải lại
+	data3 := pattern(1<<20 + 999)
+	data3[0] ^= 0xFF
+	up3 := &fakeUp{data: data3, etag: `"v2"`}
+	s3 := mk(up3)
+	p3 := s3.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "lần 3 Complete", p3.Complete.Load)
+	got, _ := os.ReadFile(p3.PartPath)
+	if !bytes.Equal(got, data3) {
+		t.Fatal("file đã đổi trên Drive nhưng vẫn dùng nội dung cũ")
+	}
+}
+
+func TestSpool_SameSizeDifferentETag_Discarded(t *testing.T) {
+	data := pattern(512 << 10)
+	dir := t.TempDir()
+	s1 := NewDriveSpool(dir, 64<<20, &fakeUp{data: data, etag: `"A"`})
+	s1.bgBytesPerSec = 0
+	p1 := s1.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "xong A", p1.Complete.Load)
+	s1.Close()
+
+	data2 := pattern(512 << 10)
+	data2[100] ^= 1
+	s2 := NewDriveSpool(dir, 64<<20, &fakeUp{data: data2, etag: `"B"`})
+	s2.bgBytesPerSec = 0
+	defer s2.Close()
+	p2 := s2.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "xong B", p2.Complete.Load)
+	if got, _ := os.ReadFile(p2.PartPath); !bytes.Equal(got, data2) {
+		t.Fatal("cùng size nhưng khác ETag mà vẫn giữ bản cũ")
+	}
+}
+
+func TestSpool_ResumesPartialFileFromPreviousSession(t *testing.T) {
+	data := pattern(2 << 20)
+	dir := t.TempDir()
+	half := int64(len(data) / 2)
+	if err := os.WriteFile(filepath.Join(dir, "vid.part"), data[:half], 0644); err != nil {
+		t.Fatal(err)
+	}
+	seed := NewDriveSpool(dir, 64<<20, nil)
+	seed.saveMeta(filepath.Join(dir, "vid.meta"), SpoolMeta{FileID: "vid", ETag: `"v1"`, TotalSize: int64(len(data)), DownloadedBytes: half})
+
+	up := &fakeUp{data: data, etag: `"v1"`}
+	s := NewDriveSpool(dir, 64<<20, up)
+	s.bgBytesPerSec = 0
+	defer s.Close()
+	p := s.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "Complete", p.Complete.Load)
+
+	if got, _ := os.ReadFile(p.PartPath); !bytes.Equal(got, data) {
+		t.Fatal("nội dung sau khi tiếp tục sai")
+	}
+	calls := up.rangesSeen()
+	if len(calls) != 2 || calls[0] != "bytes=0-0|" || !strings.HasPrefix(calls[1], fmt.Sprintf("bytes=%d-", half)) {
+		t.Fatalf("phải probe rồi xin tiếp từ %d, calls=%v", half, calls)
+	}
+}
+
+// ---------- chiến lược prefix cho file lớn ----------
+
+func TestSpool_LargeFileOnlyDownloadsPrefix(t *testing.T) {
+	data := pattern(8 << 20)
+	up := &fakeUp{data: data, etag: `"v1"`}
+	s := NewDriveSpool(t.TempDir(), 4<<20, up) // ngân sách 4MB → file 8MB > nửa ngân sách
+	s.prefixBytes = 1 << 20
+	s.bgBytesPerSec = 0
+	defer s.Close()
+	prog := s.StartSpool("vid", 0)
+	spoolEventually(t, 5*time.Second, "đủ prefix", func() bool { return prog.DownloadedBytes.Load() >= 1<<20 })
 	time.Sleep(100 * time.Millisecond)
 
-	// 2. Chuyển sang tải vid2
-	spool.StartSpool("vid2", 1024)
-
-	// 3. Kiểm tra xem vid1 đã nhận được context cancel chưa
-	for i := 0; i < 40; i++ {
-		if vid1Canceled.Load() {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	if prog.Complete.Load() {
+		t.Fatal("file lớn không được đánh dấu Complete khi mới tải prefix")
 	}
-
-	if !vid1Canceled.Load() {
-		t.Fatalf("Kỳ vọng vid1 bị cancel khi chuyển sang vid2, nhưng vẫn đang chạy")
+	if fi, _ := os.Stat(prog.PartPath); fi.Size() != 1<<20 {
+		t.Fatalf("file spool = %d, kỳ vọng đúng prefix 1MB", fi.Size())
+	}
+	// vùng nằm ngoài prefix → proxy ngay, không chờ
+	t0 := time.Now()
+	if _, ok, _ := s.Acquire(context.Background(), "vid", 200, 34, 300); ok || time.Since(t0) > 100*time.Millisecond {
+		t.Fatalf("vùng ngoài prefix phải trả proxy ngay (ok=%v, %v)", ok, time.Since(t0))
+	}
+	meta, _ := s.readMeta(prog.MetaPath)
+	if meta.Complete || meta.DownloadedBytes != 1<<20 {
+		t.Fatalf("meta prefix sai: %+v", meta)
 	}
 }
 
-// Test 3: Vượt giới hạn dung lượng spool thì xóa file cũ nhất (LRU eviction)
-func TestDriveSpool_CapacityLimit_EvictsOldestFiles(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "spool_test_lru_*")
-	if err != nil {
-		t.Fatalf("Không thể tạo thư mục tạm: %v", err)
+// ---------- tải nền có giới hạn tốc độ ----------
+
+func TestSpool_BackgroundThrottle(t *testing.T) {
+	data := pattern(900 << 10)
+	run := func(bps int64) time.Duration {
+		up := &fakeUp{data: data, etag: `"v1"`}
+		s := NewDriveSpool(t.TempDir(), 64<<20, up)
+		s.burstBytes = 100 << 10
+		s.bgBytesPerSec = bps
+		defer s.Close()
+		t0 := time.Now()
+		p := s.StartSpool("vid", 0)
+		spoolEventually(t, 10*time.Second, "Complete", p.Complete.Load)
+		return time.Since(t0)
 	}
-	defer os.RemoveAll(tempDir)
+	fast := run(0)
+	slow := run(1 << 20) // 800KB sau burst ở 1MB/s ≈ 0.75s
+	if slow < 500*time.Millisecond || slow < fast+300*time.Millisecond {
+		t.Fatalf("giới hạn tốc độ không có tác dụng: không giới hạn=%v, giới hạn=%v", fast, slow)
+	}
+}
 
-	// Giới hạn spool chỉ 300KB
-	spool := NewDriveSpool(tempDir, 300*1024, nil)
+// ---------- Acquire: chính sách theo cấu trúc file ----------
 
+func box(typ string, payload int) []byte {
+	b := make([]byte, 8+payload)
+	binary.BigEndian.PutUint32(b[0:4], uint32(8+payload))
+	copy(b[4:8], typ)
+	return b
+}
+
+func cat(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+
+func TestInspectMP4Head(t *testing.T) {
+	big := box("mdat", 1<<20)
+	mdat64 := append([]byte{0, 0, 0, 1, 'm', 'd', 'a', 't', 0, 0, 0, 0, 0, 0x10, 0, 0}, make([]byte, 1<<20)...)
+	ebml := append([]byte{0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x86, 0x81}, make([]byte, 4096)...)
+	cases := []struct {
+		name  string
+		data  []byte
+		avail int64 // 0 = toàn bộ
+		want  mp4Head
+	}{
+		{"faststart ftyp+moov+mdat", cat(box("ftyp", 16), box("moov", 500), big), 0, headReady},
+		{"free trước moov", cat(box("ftyp", 16), box("free", 100), box("moov", 500), big), 0, headReady},
+		{"moov nằm cuối", cat(box("ftyp", 16), big, box("moov", 500)), 0, headMoovAtEnd},
+		{"mdat 64-bit trước moov", cat(box("ftyp", 16), mdat64), 0, headMoovAtEnd},
+		{"moov chưa tải đủ", cat(box("ftyp", 16), box("moov", 5000), big), 24 + 2000, headUnknown},
+		{"chưa đủ 8 byte đầu", cat(box("ftyp", 16), box("moov", 500)), 6, headUnknown},
+		{"mới có ftyp", cat(box("ftyp", 16), box("moov", 500)), 24, headUnknown},
+		{"mkv/webm", ebml, 0, headNotMP4},
+		{"rác", bytes.Repeat([]byte{0xAB}, 4096), 0, headNotMP4},
+	}
+	for _, c := range cases {
+		p := filepath.Join(t.TempDir(), "x.part")
+		if err := os.WriteFile(p, c.data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		avail := c.avail
+		if avail == 0 {
+			avail = int64(len(c.data))
+		}
+		if got := inspectMP4Head(p, avail); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// dựng spool với tiến trình đã có sẵn trạng thái (không cần mạng)
+func spoolWithProgress(t *testing.T, content []byte, total int64, target int64, mut func(*SpoolProgress)) (*DriveSpool, *SpoolProgress) {
+	t.Helper()
+	s := NewDriveSpool(t.TempDir(), 1<<30, nil)
+	s.block0Wait = 200 * time.Millisecond
+	s.pollInterval = 5 * time.Millisecond
+	p := &SpoolProgress{FileID: "vid", PartPath: filepath.Join(s.spoolDir, "vid.part"), MetaPath: filepath.Join(s.spoolDir, "vid.meta"), done: make(chan struct{})}
+	if err := os.WriteFile(p.PartPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	p.TotalSize.Store(total)
+	p.TargetBytes.Store(target)
+	p.DownloadedBytes.Store(int64(len(content)))
+	if mut != nil {
+		mut(p)
+	}
+	s.activeID, s.activeProg = "vid", p
+	return s, p
+}
+
+func TestAcquire_Policy(t *testing.T) {
+	const total = 100 << 20 // 100MB, 300s → ~349KB/s; cần ≈ (start+len+10)*avg*1.35 (start=50 → ~44MB)
+	faststart := cat(box("ftyp", 16), box("moov", 500), box("mdat", 60<<20))
+	moovEnd := cat(box("ftyp", 16), box("mdat", 60<<20), box("moov", 500))
+	mkv := cat([]byte{0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x86, 0x81}, make([]byte, 60<<20))
+
+	type tc struct {
+		name         string
+		content      []byte
+		start        float64
+		mut          func(*SpoolProgress)
+		fileID       string
+		wantOK       bool
+		wantComplete bool
+	}
+	cases := []tc{
+		{"faststart, đã tải đủ vùng (đoạn 50s cần ~44MB)", faststart, 50, nil, "vid", true, false},
+		{"faststart, chưa tải tới vùng 250s", faststart, 250, nil, "vid", false, false},
+		{"moov ở cuối: dù tải 60MB vẫn không dùng được", moovEnd, 50, nil, "vid", false, false},
+		{"mkv đọc giữa chừng không an toàn", mkv, 50, nil, "vid", false, false},
+		{"mkv block 0 đọc tuần tự được", mkv, 0, nil, "vid", true, false},
+		{"đã Complete → luôn dùng", faststart[:1000], 250, func(p *SpoolProgress) { p.Complete.Store(true) }, "vid", true, true},
+		{"đã Failed → bỏ", faststart, 50, func(p *SpoolProgress) { p.fail("x") }, "vid", false, false},
+		{"khác fileID → bỏ", faststart, 50, nil, "other", false, false},
+		{"ngoài phần sẽ tải (prefix)", faststart, 50, func(p *SpoolProgress) { p.TargetBytes.Store(10 << 20) }, "vid", false, false},
+	}
+	for _, c := range cases {
+		s, _ := spoolWithProgress(t, c.content, total, total, c.mut)
+		path, ok, complete := s.Acquire(context.Background(), c.fileID, c.start, 34, 300)
+		if ok != c.wantOK || complete != c.wantComplete {
+			t.Errorf("%s: ok=%v complete=%v, want ok=%v complete=%v", c.name, ok, complete, c.wantOK, c.wantComplete)
+		}
+		if ok && path == "" {
+			t.Errorf("%s: ok nhưng path rỗng", c.name)
+		}
+	}
+}
+
+func TestAcquire_Block0WaitsForBytesThenSucceeds(t *testing.T) {
+	data := cat(box("ftyp", 16), box("moov", 500), box("mdat", 20<<20))
+	up := &fakeUp{data: data, etag: `"v1"`, chunkDelay: 2 * time.Millisecond}
+	s := newTestSpool(t, up)
+	s.block0Wait = 5 * time.Second
+	s.stallTimeout = 5 * time.Second
+	s.StartSpool("vid", 0)
+
+	_, ok, _ := s.Acquire(context.Background(), "vid", 0, 34, 300)
+	if !ok {
+		t.Fatal("block 0 phải đợi tới khi đủ byte rồi dùng spool")
+	}
+}
+
+func TestWaitFor_RespectsContextAndDeadline(t *testing.T) {
+	s := NewDriveSpool(t.TempDir(), 1<<20, nil)
+	t0 := time.Now()
+	if s.waitFor(context.Background(), 100*time.Millisecond, func() bool { return false }) {
+		t.Fatal("cond luôn false mà trả true")
+	}
+	if el := time.Since(t0); el < 90*time.Millisecond || el > time.Second {
+		t.Fatalf("deadline sai: %v", el)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	t0 = time.Now()
+	s.waitFor(ctx, 10*time.Second, func() bool { return false })
+	if time.Since(t0) > time.Second {
+		t.Fatal("không thoát khi ctx hủy")
+	}
+}
+
+// ---------- đổi video / dọn dẹp ----------
+
+func TestSpool_SwitchVideoCancelsOld(t *testing.T) {
+	up := &fakeUp{data: pattern(40 << 20), etag: `"v1"`, chunkDelay: 5 * time.Millisecond}
+	s := newTestSpool(t, up)
+	s.stallTimeout = 10 * time.Second
+	p1 := s.StartSpool("a", 0)
+	spoolEventually(t, 2*time.Second, "a có dữ liệu", func() bool { return p1.DownloadedBytes.Load() > 0 })
+	p2 := s.StartSpool("b", 0)
+	select {
+	case <-p1.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("tải video cũ không dừng sau khi đổi video")
+	}
+	if p1.Failed.Load() {
+		t.Fatal("hủy chủ động không được tính là lỗi")
+	}
+	if _, ok, _ := s.Acquire(context.Background(), "a", 100, 34, 300); ok {
+		t.Fatal("Acquire video cũ phải trả proxy")
+	}
+	_ = p2
+}
+
+func TestSpool_EvictsWholePairsOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+	s := NewDriveSpool(dir, 3500<<10, nil)
 	now := time.Now()
-
-	// Tạo file cũ nhất file1 (100KB, 3 giờ trước)
-	file1Part := filepath.Join(tempDir, "file1.part")
-	_ = os.WriteFile(file1Part, bytes.Repeat([]byte("1"), 100*1024), 0644)
-	_ = os.Chtimes(file1Part, now.Add(-3*time.Hour), now.Add(-3*time.Hour))
-	spool.saveMeta(filepath.Join(tempDir, "file1.meta"), SpoolMeta{
-		FileID:    "file1",
-		TotalSize: 100 * 1024,
-		Complete:  true,
-		UpdatedAt: now.Add(-3 * time.Hour),
-	})
-
-	// Tạo file thứ hai file2 (100KB, 2 giờ trước)
-	file2Part := filepath.Join(tempDir, "file2.part")
-	_ = os.WriteFile(file2Part, bytes.Repeat([]byte("2"), 100*1024), 0644)
-	_ = os.Chtimes(file2Part, now.Add(-2*time.Hour), now.Add(-2*time.Hour))
-	spool.saveMeta(filepath.Join(tempDir, "file2.meta"), SpoolMeta{
-		FileID:    "file2",
-		TotalSize: 100 * 1024,
-		Complete:  true,
-		UpdatedAt: now.Add(-2 * time.Hour),
-	})
-
-	// Tạo file thứ ba file3 (100KB, 1 giờ trước)
-	file3Part := filepath.Join(tempDir, "file3.part")
-	_ = os.WriteFile(file3Part, bytes.Repeat([]byte("3"), 100*1024), 0644)
-	_ = os.Chtimes(file3Part, now.Add(-1*time.Hour), now.Add(-1*time.Hour))
-	spool.saveMeta(filepath.Join(tempDir, "file3.meta"), SpoolMeta{
-		FileID:    "file3",
-		TotalSize: 100 * 1024,
-		Complete:  true,
-		UpdatedAt: now.Add(-1 * time.Hour),
-	})
-
-	// Thư mục đang chứa 300KB. Giờ tải thêm file4 cần 150KB -> tổng 450KB > 300KB
-	// Phải xóa file1 (cũ nhất) và file2
-	spool.evictLRULocked(150 * 1024)
-
-	if _, err := os.Stat(file1Part); !os.IsNotExist(err) {
-		t.Fatalf("Kỳ vọng file1.part (cũ nhất) bị xóa do vượt quá dung lượng")
-	}
-	if _, err := os.Stat(filepath.Join(tempDir, "file1.meta")); !os.IsNotExist(err) {
-		t.Fatalf("Kỳ vọng file1.meta bị xóa cùng file1.part")
-	}
-
-	// file3 (mới nhất) phải còn nguyên
-	if _, err := os.Stat(file3Part); os.IsNotExist(err) {
-		t.Fatalf("Kỳ vọng file3.part (mới nhất) được giữ lại")
-	}
-}
-
-// Test 4: Tua xa vào vùng chưa tải thì quay về đường proxy (fallback proxy)
-func TestDriveSpool_UnbufferedSeek_FallbacksToProxy(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "spool_test_seek_*")
-	if err != nil {
-		t.Fatalf("Không thể tạo thư mục tạm: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	spool := NewDriveSpool(tempDir, 100*1024*1024, nil)
-	fileID := "big_movie"
-
-	// Mock file 200MB, nhưng background stream mới chỉ tải được 2MB
-	dummyPartial := bytes.Repeat([]byte("B"), 2*1024*1024)
-	pr, pw := io.Pipe()
-	spool.mockDownloadFn = func(ctx context.Context, id string) (*http.Response, error) {
-		go func() {
-			_, _ = pw.Write(dummyPartial)
-			// Giữ stream treo ở đây
-			<-ctx.Done()
-			_ = pw.Close()
-		}()
-		return &http.Response{
-			StatusCode:    http.StatusOK,
-			ContentLength: 200 * 1024 * 1024,
-			Header:        http.Header{},
-			Body:          pr,
-		}, nil
-	}
-
-	prog := spool.StartSpool(fileID, 200*1024*1024)
-
-	// Chờ tải xong 2MB ban đầu
-	for i := 0; i < 40; i++ {
-		if prog.DownloadedBytes.Load() >= 2*1024*1024 {
-			break
+	mk := func(id string, age time.Duration) {
+		for _, ext := range []string{".part", ".meta"} {
+			p := filepath.Join(dir, id+ext)
+			if err := os.WriteFile(p, make([]byte, 600<<10), 0644); err != nil {
+				t.Fatal(err)
+			}
+			mt := now.Add(-age)
+			_ = os.Chtimes(p, mt, mt)
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
+	mk("old", 3*time.Hour)
+	mk("mid", 2*time.Hour)
+	mk("new", 1*time.Hour)
+	s.activeID = "active"
 
-	ctx := context.Background()
-
-	// Tua xa đến giây thứ 300 (phút thứ 5) trên video thời lượng 600s
-	// Tại phút thứ 5 cần khoảng 100MB, trong khi mới tải được 2MB
-	localPath, ok := spool.GetAvailableMediaInput(ctx, fileID, 300.0, 30.0, 600.0)
-
-	// Phải trả về false ngay lập tức để slicer fallback về proxy
-	if ok {
-		t.Fatalf("Kỳ vọng ok=false khi tua xa vào vùng chưa tải, nhận được true với path=%s", localPath)
+	s.makeRoom("cur", 1500<<10) // 3×1200KB=3600KB + 1500KB > 3500KB → phải xóa ít nhất 2 cặp cũ nhất
+	exists := func(n string) bool { _, err := os.Stat(filepath.Join(dir, n)); return err == nil }
+	if exists("old.part") || exists("old.meta") {
+		t.Error("cặp cũ nhất phải bị xóa cả .part lẫn .meta")
 	}
-	if localPath != "" {
-		t.Fatalf("Kỳ vọng localPath='' khi chưa có sẵn, nhận được %s", localPath)
+	if exists("mid.part") != exists("mid.meta") || exists("new.part") != exists("new.meta") {
+		t.Error("không được để lại nửa cặp")
+	}
+	if !exists("new.part") {
+		t.Error("cặp mới nhất không được xóa khi đã đủ chỗ")
 	}
 }
 
-// Test 5: Pipeline Slicer tích hợp - Spool sẵn sàng thì ffmpeg đọc file cục bộ
-func TestPipeline_Slicer_UsesSpoolWhenAvailable(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "pipe_spool_test_*")
-	if err != nil {
-		t.Fatalf("Không thể tạo thư mục tạm: %v", err)
+func TestSpool_EvictKeepsActiveAndCurrent(t *testing.T) {
+	dir := t.TempDir()
+	s := NewDriveSpool(dir, 1<<20, nil)
+	for _, id := range []string{"active", "cur"} {
+		for _, ext := range []string{".part", ".meta"} {
+			_ = os.WriteFile(filepath.Join(dir, id+ext), make([]byte, 900<<10), 0644)
+		}
 	}
-	defer os.RemoveAll(tempDir)
-
-	spool := NewDriveSpool(tempDir, 100*1024*1024, nil)
-	fileID := "test_spool_pipe_vid"
-
-	// Tạo sẵn file .part và .meta hoàn tất
-	partFile := filepath.Join(tempDir, fileID+".part")
-	_ = os.WriteFile(partFile, bytes.Repeat([]byte("P"), 1024*1024), 0644)
-	spool.saveMeta(filepath.Join(tempDir, fileID+".meta"), SpoolMeta{
-		FileID:          fileID,
-		TotalSize:       1024 * 1024,
-		DownloadedBytes: 1024 * 1024,
-		Complete:        true,
-		UpdatedAt:       time.Now(),
-	})
-
-	var usedInput atomic.Pointer[string]
-	pipe := NewPipeline(
-		"gdrive://"+fileID,
-		120.0,
-		Settings{BlockSec: 30.0, OverlapSec: 2.0},
-		&ToolsPaths{FFmpeg: "ffmpeg"},
-		nil,
-		nil,
-		PipelineEventCallbacks{},
-	)
-	pipe.SetSpool(spool)
-
-	// Mock SliceAudio để kiểm tra đường dẫn input ffmpeg nhận được
-	pipe.MockSliceAudio = func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error {
-		// MockSliceAudio được gọi nếu có, nhưng ta muốn kiểm tra xem slicer thực tế nhận mediaInput gì
-		return nil
+	s.activeID = "active"
+	s.makeRoom("cur", 5<<20)
+	for _, n := range []string{"active.part", "active.meta", "cur.part", "cur.meta"} {
+		if _, err := os.Stat(filepath.Join(dir, n)); err != nil {
+			t.Errorf("%s bị xóa nhầm", n)
+		}
 	}
+}
 
-	// Trực tiếp gọi GetAvailableMediaInput
-	ctx := context.Background()
-	path, ok := spool.GetAvailableMediaInput(ctx, fileID, 0, 30, 120.0)
-	if !ok || path != partFile {
-		t.Fatalf("Kỳ vọng spool trả về file cục bộ %s, nhận được ok=%v, path=%s", partFile, ok, path)
+func TestSpool_CleanOrphansOnStart(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	write := func(name string, aged bool) {
+		p := filepath.Join(dir, name)
+		_ = os.WriteFile(p, []byte("x"), 0644)
+		if aged {
+			_ = os.Chtimes(p, old, old)
+		}
 	}
-	usedInput.Store(&path)
-	if *usedInput.Load() != partFile {
-		t.Fatalf("Mock usedInput không khớp")
+	write("lonelymeta.meta", false) // .meta không có .part → xóa
+	write("stale.part", true)       // .part cũ không có .meta → xóa
+	write("fresh.part", false)      // .part mới (đang tải) không có .meta → giữ
+	write("pair.part", true)        // cặp đầy đủ → giữ
+	write("pair.meta", true)
+	NewDriveSpool(dir, 1<<20, nil)
+	exists := func(n string) bool { _, err := os.Stat(filepath.Join(dir, n)); return err == nil }
+	if exists("lonelymeta.meta") || exists("stale.part") {
+		t.Error("file mồ côi chưa được dọn")
 	}
-	fmt.Printf("Pipeline slicer input verified: %s\n", *usedInput.Load())
+	if !exists("fresh.part") || !exists("pair.part") || !exists("pair.meta") {
+		t.Error("dọn nhầm file còn dùng")
+	}
+}
+
+func TestSpool_NilUpstreamNeverStarts(t *testing.T) {
+	s := NewDriveSpool(t.TempDir(), 1<<20, nil)
+	if s.StartSpool("vid", 0) != nil {
+		t.Fatal("không có upstream thì không được bắt đầu tải")
+	}
+	if _, ok, _ := s.Acquire(context.Background(), "vid", 0, 34, 300); ok {
+		t.Fatal("không có spool mà Acquire ok")
+	}
 }
