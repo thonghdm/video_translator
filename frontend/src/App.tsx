@@ -1313,8 +1313,11 @@ export const App: React.FC = () => {
 
       if (!selected && !driveItem) return;
 
+      const isDrive = !!driveItem || (typeof selected === "string" && selected.startsWith("gdrive://"));
+      const driveFileID = driveItem?.id || (isDrive ? (selected as string).replace("gdrive://", "") : "");
+
       openT0Ref.current = performance.now();
-      openPathRef.current = driveItem ? `gdrive://${driveItem.id}` : (selected as string);
+      openPathRef.current = isDrive ? `gdrive://${driveFileID}` : (selected as string);
       loggedEventsRef.current = new Set();
       waitingCountRef.current = 0;
       logPlayback("mở video: bắt đầu");
@@ -1330,11 +1333,11 @@ export const App: React.FC = () => {
         setPlaybackPrep(null);
 
         // 2. Gọi OpenVideo backend (video Google Drive: stream qua loopback proxy, không tải về đĩa)
-        const info = driveItem
+        const info = isDrive
           ? await window.go?.main?.App?.OpenDriveVideo?.(
-              driveItem.id,
-              driveItem.name,
-              driveItem.subtitle_id || "",
+              driveFileID,
+              driveItem?.name || "",
+              driveItem?.subtitle_id || "",
             )
           : await window.go?.main?.App?.OpenVideo(selected as string);
         if (!info) return;
@@ -1666,7 +1669,22 @@ export const App: React.FC = () => {
 
   const handleSelectVideoFromTree = useCallback(
     (path: string) => {
-      handleOpenVideo(path);
+      if (path.startsWith("gdrive://")) {
+        const fileID = path.replace("gdrive://", "");
+        handleOpenVideo(undefined, {
+          id: fileID,
+          name: "",
+          mime_type: "video/mp4",
+          size: 0,
+          thumbnail_link: "",
+          is_folder: false,
+          duration_sec: 0,
+          subtitle_id: "",
+          subtitle_name: "",
+        });
+      } else {
+        handleOpenVideo(path);
+      }
       if (autoCollapseFolder) {
         setShowFolderPanel(false);
       }
