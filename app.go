@@ -32,6 +32,10 @@ type App struct {
 	currentTrans   Translator
 	downloader     *ModelDownloader
 	updater        *Updater
+
+	// Chuyển mã nền để phát hình (xem playback.go). Bảo vệ bởi mu.
+	playbackCancel context.CancelFunc
+	playbackPath   string
 }
 
 // NewApp tạo struct App và nạp cấu hình settings
@@ -108,6 +112,7 @@ func (a *App) shutdown(ctx context.Context) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	a.cancelPlaybackLocked()
 	if a.currentPipe != nil {
 		a.currentPipe.Stop()
 	}
@@ -310,9 +315,16 @@ func (a *App) OpenVideo(path string) (VideoInfo, error) {
 //   - knownDuration: thời lượng đã biết (ví dụ từ metadata Google Drive); nếu > 0 sẽ bypass ffprobe
 func (a *App) openMediaLocked(path, probeInput, directURL, title string, knownDuration float64) (VideoInfo, error) {
 	if a.currentPipe != nil {
+		tStop := time.Now()
 		a.currentPipe.Stop()
 		a.currentPipe = nil
+		if ms := time.Since(tStop).Milliseconds(); ms > 200 {
+			DiagLog("[open] dừng pipeline của video trước mất %dms", ms)
+		}
 	}
+
+	// Hủy job chuyển mã của video trước (nếu đang chạy)
+	a.cancelPlaybackLocked()
 
 	a.currentVideo = path
 
@@ -325,17 +337,26 @@ func (a *App) openMediaLocked(path, probeInput, directURL, title string, knownDu
 	var durationSec float64
 	playable := true
 	playableReason := ""
+	var probe *ProbeResult
 
 	if knownDuration > 0 {
 		durationSec = knownDuration
 	} else if IsDrivePath(path) {
 		// Video Google Drive: tuyệt đối KHÔNG gọi ffprobe làm nghẽn mạng / timeout!
-		// Trình duyệt (thẻ <video>) sẽ phát qua HTTP Range và lấy duration chính xác qua loadedmetadata
+		// Trình duyệt (thẻ <video>) sẽ phát qua HTTP Range và lấy duration chính xác qua loadedmetadata.
+		// Nếu codec không phát được, frontend nhận lỗi MediaError và gọi PreparePlayback.
 		durationSec = 3600
 		playable = true
 	} else {
 		// Probe thời lượng và codec cho file cục bộ
-		probe, err := ProbeMedia(a.tools, probeInput)
+		var err error
+		tProbe := time.Now()
+		probe, err = ProbeMedia(a.tools, probeInput)
+		if probe != nil {
+			DiagLog("[open local] %s: ffprobe=%dms video=%s/%s audio=%s format=%s convert=%v check=%q",
+				filepath.Base(path), time.Since(tProbe).Milliseconds(), probe.VideoCodec, probe.PixFmt,
+				probe.AudioCodec, probe.FormatName, probe.Plan.NeedConvert, probe.Plan.CheckMIME)
+		}
 		if err != nil {
 			return VideoInfo{}, fmt.Errorf("không thể phân tích file video: %w", err)
 		}
@@ -344,11 +365,21 @@ func (a *App) openMediaLocked(path, probeInput, directURL, title string, knownDu
 		playableReason = probe.PlayableReason
 	}
 
-	// Đăng ký file vào MediaServer
+	// Đăng ký file vào MediaServer. Nếu file gốc không phát được mà đã có bản chuyển mã trong cache
+	// từ lần mở trước -> phát bản đó luôn, không bắt người dùng chờ chuyển mã lại.
 	mediaURL := directURL
+	converted := false
 	if mediaURL == "" {
+		servePath := path
+		if probe != nil && probe.Plan.NeedConvert {
+			if cached, ok := findCachedPlayback(path, probe.Plan); ok {
+				servePath = cached
+				converted = true
+				playable = true
+			}
+		}
 		var err error
-		mediaURL, err = a.mediaServer.SetMediaFile(path)
+		mediaURL, err = a.mediaServer.SetMediaFile(servePath)
 		if err != nil {
 			return VideoInfo{}, fmt.Errorf("không thể phục vụ file media: %w", err)
 		}
@@ -384,10 +415,145 @@ func (a *App) openMediaLocked(path, probeInput, directURL, title string, knownDu
 		Playable:       playable,
 		PlayableReason: playableReason,
 		DoneBlocks:     doneBlocks,
+		Converted:      converted,
+	}
+	if probe != nil {
+		info.VideoCodec = probe.VideoCodec
+		info.AudioCodec = probe.AudioCodec
+		if !converted {
+			info.CheckMIME = probe.Plan.CheckMIME
+		}
 	}
 	a.currentInfo = &info
 
 	return info, nil
+}
+
+// cancelPlaybackLocked hủy job chuyển mã đang chạy (caller giữ a.mu)
+func (a *App) cancelPlaybackLocked() {
+	if a.playbackCancel != nil {
+		a.playbackCancel()
+		a.playbackCancel = nil
+	}
+	a.playbackPath = ""
+}
+
+// CancelPlayback hủy chuyển mã nền theo yêu cầu người dùng
+func (a *App) CancelPlayback() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cancelPlaybackLocked()
+}
+
+func (a *App) emit(event string, payload interface{}) {
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, event, payload)
+	}
+}
+
+// PreparePlayback tạo bản .mp4 phát được (H.264 8-bit + AAC) cho video đang mở, chạy nền.
+//   - force=false: theo kết quả ffprobe (chỉ remux / đổi audio nếu được -> vài giây)
+//   - force=true:  WebView2 đã báo lỗi giải mã -> luôn mã hóa lại hình bằng libx264
+//
+// Tiến độ qua event "playback_progress"; xong bắn "playback_ready" {path, media_url};
+// lỗi bắn "playback_error". Pipeline phụ đề không bị ảnh hưởng (vẫn đọc audio từ file gốc).
+func (a *App) PreparePlayback(path string, force bool) error {
+	a.mu.Lock()
+	if a.currentVideo != path {
+		a.mu.Unlock()
+		return fmt.Errorf("video này không còn đang mở")
+	}
+	if a.tools == nil {
+		a.mu.Unlock()
+		return fmt.Errorf("chưa khởi tạo công cụ ffmpeg")
+	}
+	a.cancelPlaybackLocked()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.playbackCancel = cancel
+	a.playbackPath = path
+	tools := a.tools
+	durationSec := 0.0
+	if a.currentInfo != nil {
+		durationSec = a.currentInfo.DurationSec
+	}
+	a.mu.Unlock()
+
+	go a.runPlaybackJob(ctx, cancel, tools, path, force, durationSec)
+	return nil
+}
+
+func (a *App) runPlaybackJob(ctx context.Context, cancel context.CancelFunc, tools *ToolsPaths, path string, force bool, durationSec float64) {
+	defer cancel()
+
+	fail := func(err error) {
+		if ctx.Err() != nil {
+			return // bị hủy (mở video khác / người dùng bấm hủy): không báo lỗi
+		}
+		a.emit("playback_error", PlaybackFailed{Path: path, Error: err.Error()})
+	}
+
+	a.emit("playback_progress", PlaybackProgress{Path: path, Percent: 0, Stage: "probe"})
+
+	input := ResolveMediaInput(path)
+	ext := filepath.Ext(path)
+	if IsDrivePath(path) {
+		ext = filepath.Ext(DriveDisplayName(path))
+	}
+	probe, err := probeMediaWithExt(tools, input, ext)
+	if err != nil {
+		fail(err)
+		return
+	}
+	if probe.DurationSec > 0 {
+		durationSec = probe.DurationSec
+	}
+
+	plan := probe.Plan
+	if !plan.NeedConvert || force {
+		// Probe nói phát được nhưng WebView2 vẫn lỗi (AV1/HEVC thiếu extension, file hỏng nhẹ...)
+		// -> mã hóa lại toàn bộ hình là cách chắc chắn nhất
+		plan.NeedConvert = true
+		plan.CopyVideo = false
+		plan.CopyAudio = probe.AudioCodec == "aac" || probe.AudioCodec == "mp3"
+	}
+
+	output := playbackCacheFile(path, !plan.CopyVideo)
+	if fi, statErr := os.Stat(output); statErr != nil || fi.Size() == 0 {
+		stage := "transcode"
+		if plan.CopyVideo {
+			stage = "remux"
+		}
+		err = RunPlaybackTranscode(ctx, tools, input, output, plan, durationSec, func(pct float64) {
+			a.emit("playback_progress", PlaybackProgress{Path: path, Percent: pct, Stage: stage})
+		})
+		if err != nil {
+			fail(err)
+			return
+		}
+	}
+
+	a.mu.Lock()
+	if ctx.Err() != nil || a.currentVideo != path || a.mediaServer == nil {
+		a.mu.Unlock()
+		return
+	}
+	mediaURL, err := a.mediaServer.AddMediaFile(output)
+	if err != nil {
+		a.mu.Unlock()
+		fail(err)
+		return
+	}
+	if a.currentInfo != nil {
+		a.currentInfo.MediaURL = mediaURL
+		a.currentInfo.Playable = true
+		a.currentInfo.Converted = true
+		a.currentInfo.CheckMIME = ""
+	}
+	a.playbackCancel = nil
+	a.playbackPath = ""
+	a.mu.Unlock()
+
+	a.emit("playback_ready", PlaybackReady{Path: path, MediaURL: mediaURL})
 }
 
 // StartPipeline khởi chạy quá trình bóc tách và dịch phụ đề
@@ -828,21 +994,29 @@ func (a *App) OpenDriveVideo(fileID, name, subtitleID string) (VideoInfo, error)
 	if !dm.IsLoggedIn() {
 		return VideoInfo{}, ErrDriveNotLoggedIn
 	}
+	t0 := time.Now()
 	dm.PrepareVideo(fileID, name, subtitleID) // tải phụ đề ngoài lock, lỗi thì tự fallback Whisper
+	prepMs := time.Since(t0).Milliseconds()
 
 	// Lấy thời lượng trực tiếp từ metadata Google Drive (đã nạp từ ListDriveItems hoặc query 50ms)
 	// Bỏ qua ffprobe qua mạng để mở video ngay lập tức trong 0.05s
+	t1 := time.Now()
 	durationSec := dm.GetDuration(fileID)
 	if durationSec <= 0 {
 		durationSec = dm.FetchDurationFromDrive(fileID)
 	}
+	durMs := time.Since(t1).Milliseconds()
 	if durationSec <= 0 {
 		durationSec = 3600
 	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.openMediaLocked(DrivePathFromID(fileID), streamURL, streamURL, name, durationSec)
+	t2 := time.Now()
+	info, err := a.openMediaLocked(DrivePathFromID(fileID), streamURL, streamURL, name, durationSec)
+	DiagLog("[open drive] %s: tải phụ đề Drive=%dms, lấy thời lượng=%dms, mở cache/pipeline=%dms, tổng=%dms (có phụ đề sẵn: %v)",
+		name, prepMs, durMs, time.Since(t2).Milliseconds(), time.Since(t0).Milliseconds(), subtitleID != "")
+	return info, err
 }
 
 // GetSettings trả về cấu hình hiện tại

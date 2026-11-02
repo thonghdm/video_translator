@@ -90,6 +90,7 @@ type FastHybridTranslator struct {
 	gemini          atomic.Pointer[GeminiClient] // Tầng Gemini Cloud (dự phòng khi GTX bị rate limit)
 	fbFailUntil     atomic.Int64 // không thử init Qwen lại trước mốc này
 	mismatchCount   atomic.Int64 // số lần batch bị lệch dòng phải dịch từng dòng
+	fallbackReason  atomic.Pointer[string] // Lưu lý do lỗi khi fallback sang Local AI / Cloud
 }
 
 // NewFastHybridTranslator khởi tạo bộ dịch lai siêu tốc (tiết kiệm 1.2GB RAM khi có mạng, tự bật Local LLM khi offline)
@@ -166,6 +167,23 @@ func (f *FastHybridTranslator) setMode(m string) {
 	f.modeMu.Unlock()
 	if old != m {
 		log.Printf("[Translator] Chuyển chế độ hoạt động: %s -> %s", old, m)
+	}
+}
+
+// FallbackReason trả về lý do chi tiết khi rớt xuống chế độ fallback (local_ai hoặc cloud)
+func (f *FastHybridTranslator) FallbackReason() string {
+	p := f.fallbackReason.Load()
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+func (f *FastHybridTranslator) setFallbackReason(reason string) {
+	if reason == "" {
+		f.fallbackReason.Store(nil)
+	} else {
+		f.fallbackReason.Store(&reason)
 	}
 }
 
@@ -298,7 +316,14 @@ func (f *FastHybridTranslator) gtxReport(err error, isProbe bool) {
 func (f *FastHybridTranslator) viaGoogle(ctx context.Context, lines []string) ([]string, error) {
 	allowed, isProbe := f.allowGtxRequest()
 	if !allowed {
-		return nil, fmt.Errorf("%w: breaker open", ErrRateLimited)
+		var waitMsg string
+		if f.gtxBreaker != nil {
+			rem := time.Until(time.Unix(0, f.gtxBreaker.blockedUntil.Load()))
+			if rem > 0 {
+				waitMsg = fmt.Sprintf(" (đang khóa trong %v)", rem.Round(time.Second))
+			}
+		}
+		return nil, fmt.Errorf("%w: breaker open%s", ErrRateLimited, waitMsg)
 	}
 	out, err := f.googleBatchOrPerLine(ctx, lines)
 	f.gtxReport(err, isProbe)
@@ -533,6 +558,9 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 
 		if err != nil {
 			lastErr = err
+			reason := fmt.Sprintf("[%s lỗi: %v]", t.name, err)
+			log.Printf("[Translator] %s -> chuyển tầng tiếp theo", reason)
+			f.setFallbackReason(reason)
 			// Phân loại lỗi của GTX: nếu là errKindNetwork (mất mạng Internet),
 			// bỏ qua tầng Cloud (Gemini) vì cả hai cùng cần mạng, xuống thẳng Qwen (Local AI)
 			if t.name == "api" && classifyErr(err) == errKindNetwork {
@@ -561,6 +589,9 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 		// Chỉ đặt mode khi tầng dịch thành công ít nhất một câu (không đặt khi trả rỗng hoàn toàn)
 		if translatedCount > 0 {
 			f.setMode(t.name)
+			if t.name == "api" {
+				f.setFallbackReason("") // Xóa lý do fallback khi tầng chính (API) hoạt động tốt
+			}
 		}
 
 		if !t.fillGaps {

@@ -251,6 +251,7 @@ func (p *Pipeline) emitStatus(block int) {
 		AheadSec:       aheadSec,
 		Video:          p.videoPath,
 		TranslatorMode: p.currentTranslatorMode(),
+		TranslatorReason: p.currentTranslatorReason(),
 	}
 	onStatus := p.callbacks.OnStatus
 	p.mu.Unlock()
@@ -653,6 +654,14 @@ func (p *Pipeline) currentTranslatorMode() string {
 		return m.CurrentMode()
 	}
 	return "api"
+}
+
+// currentTranslatorReason trả về lý do chi tiết khi rớt xuống tầng fallback
+func (p *Pipeline) currentTranslatorReason() string {
+	if m, ok := p.translator.(interface{ FallbackReason() string }); ok {
+		return m.FallbackReason()
+	}
+	return ""
 }
 
 // acquireComputeForLocalLLM giữ computeMu khi bộ dịch đang ở chế độ local_ai (Qwen chạy bằng CPU),
