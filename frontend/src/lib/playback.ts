@@ -156,3 +156,73 @@ export function formatPercent(p: number): string {
   if (!isFinite(p) || p < 0) return "";
   return `${Math.min(100, Math.max(0, Math.round(p)))}%`;
 }
+
+
+/**
+ * Quản lý khởi động pipeline thông minh (Player-First):
+ * - Nguồn cục bộ: chạy ngay lập tức.
+ * - Nguồn Google Drive: chờ sự kiện 'playing' của thẻ <video> (trần tối đa 8s),
+ *   để thẻ video tải xong metadata/khung hình đầu trước, tránh tranh chấp proxy với ffmpeg.
+ * - Hủy bỏ nếu người dùng đổi video khác trước khi kích hoạt.
+ */
+export interface DeferredPipelineStarter {
+  path: string;
+  isDrive: boolean;
+  start: () => void;
+  cancel: () => void;
+  onPlaying: () => void;
+}
+
+export function createPipelineStarter(params: {
+  path: string;
+  isDrive: boolean;
+  startPipeline: (path: string, startSec: number) => void;
+  maxDelayMs?: number; // mặc định 8000ms (8s)
+}): DeferredPipelineStarter {
+  const { path, isDrive, startPipeline, maxDelayMs = 8000 } = params;
+  let started = false;
+  let cancelled = false;
+  let timer: any = null;
+
+  const trigger = () => {
+    if (started || cancelled) return;
+    started = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    startPipeline(path, 0);
+  };
+
+  const cancel = () => {
+    cancelled = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  const onPlaying = () => {
+    if (isDrive) {
+      trigger();
+    }
+  };
+
+  if (!isDrive) {
+    // Nguồn cục bộ: chạy ngay lập tức, không chờ
+    trigger();
+  } else {
+    // Nguồn gdrive: chờ sự kiện playing, trần tối đa 8s
+    timer = setTimeout(() => {
+      trigger();
+    }, maxDelayMs);
+  }
+
+  return {
+    path,
+    isDrive,
+    start: trigger,
+    cancel,
+    onPlaying,
+  };
+}

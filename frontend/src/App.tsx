@@ -48,6 +48,8 @@ import { shouldReportDuration } from "./lib/duration";
 import {
   PlaybackPrepState,
   canPlayMime,
+  createPipelineStarter,
+  DeferredPipelineStarter,
   describeMediaError,
   formatPercent,
   isFixableByTranscode,
@@ -732,6 +734,7 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const pipelineStarterRef = useRef<DeferredPipelineStarter | null>(null);
   const pendingAutoPlayRef = useRef<string | null>(null);
   const currentVideoPathRef = useRef<string | undefined>(undefined);
   currentVideoPathRef.current = videoInfo?.path;
@@ -976,6 +979,9 @@ export const App: React.FC = () => {
     const once = (name: string, label: string) => {
       const h = () => {
         logPlayback(label);
+        if (name === "playing") {
+          pipelineStarterRef.current?.onPlaying();
+        }
         if (name === "loadeddata" && (v as any).requestVideoFrameCallback) {
           (v as any).requestVideoFrameCallback(() =>
             logPlayback(`khung hình đầu tiên hiện ra (${v.videoWidth}x${v.videoHeight})`),
@@ -1347,6 +1353,10 @@ export const App: React.FC = () => {
       loggedEventsRef.current = new Set();
       waitingCountRef.current = 0;
       logPlayback("mở video: bắt đầu");
+      if (pipelineStarterRef.current) {
+        pipelineStarterRef.current.cancel();
+        pipelineStarterRef.current = null;
+      }
 
       try {
         // 1. Reset state cũ
@@ -1418,8 +1428,18 @@ export const App: React.FC = () => {
           }
         }
 
-        // 5. Bắt đầu pipeline ngầm
-        await window.go?.main?.App?.StartPipeline(info.path, 0);
+        // 5. Khởi động pipeline (Player-First: gdrive chờ 'playing' trần 8s, local chạy ngay)
+        pipelineStarterRef.current = createPipelineStarter({
+          path: info.path,
+          isDrive,
+          startPipeline: (p, s) => {
+            logPlayback(`bắt đầu pipeline cho ${isDrive ? "Drive" : "local"}`);
+            window.go?.main?.App?.StartPipeline?.(p, s).catch((err) =>
+              console.error("[Pipeline] Lỗi StartPipeline:", err),
+            );
+          },
+          maxDelayMs: 8000,
+        });
       } catch (err: any) {
         alert(`Không thể mở video: ${err?.message || err}`);
       }
