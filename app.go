@@ -463,6 +463,10 @@ func (a *App) PreparePlayback(path string, force bool) error {
 		a.mu.Unlock()
 		return fmt.Errorf("video này không còn đang mở")
 	}
+	if IsDrivePath(path) {
+		a.mu.Unlock()
+		return fmt.Errorf("không hỗ trợ chuyển mã cho video Google Drive")
+	}
 	if a.tools == nil {
 		a.mu.Unlock()
 		return fmt.Errorf("chưa khởi tạo công cụ ffmpeg")

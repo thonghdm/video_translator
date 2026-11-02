@@ -844,6 +844,11 @@ export const App: React.FC = () => {
 
   const requestPlayback = useCallback(
     (path: string, force: boolean, reason?: string) => {
+      // Tuyệt đối không chuyển mã video Google Drive (tránh tải cả file qua mạng làm nghẽn app)
+      if (path.startsWith("gdrive://")) {
+        console.warn("[Video] Bỏ qua chuyển mã nền cho video Google Drive:", path);
+        return;
+      }
       const att = playbackAttemptRef.current;
       const same = att.path === path;
       if (same && att.pending) return;
@@ -932,6 +937,15 @@ export const App: React.FC = () => {
         audio_codec: info.audio_codec,
         src: el.currentSrc,
       });
+
+      // Với video Google Drive: không gọi requestPlayback chuyển mã toàn bộ file qua mạng; chỉ báo lỗi
+      if (info.path.startsWith("gdrive://")) {
+        if (mediaErr.code !== 1) {
+          showToast(`Lỗi phát video Google Drive: ${msg}`);
+        }
+        return;
+      }
+
       const att = playbackAttemptRef.current;
       // Đang chuyển mã: file gốc lỗi là chuyện dự kiến
       if (att.path === info.path && att.pending) return;
@@ -1016,6 +1030,16 @@ export const App: React.FC = () => {
       // Backend biết file có hình không (ffprobe); video Drive chưa probe thì coi như có hình
       const expectVideo = !!info.video_codec || info.path.startsWith("gdrive://");
       if (!isSilentVideoDecodeFailure(v, expectVideo)) return;
+
+      // Với video Google Drive: không gọi requestPlayback chuyển mã qua mạng; chỉ ghi log cảnh báo
+      if (info.path.startsWith("gdrive://")) {
+        console.warn("[Video] Video Google Drive chưa giải mã được hình (có thể do mạng đang tải chậm):", {
+          path: info.path,
+          src: v.currentSrc,
+        });
+        return;
+      }
+
       const att = playbackAttemptRef.current;
       if (att.path === info.path && att.pending) return;
       const msg = `WebView2 không giải mã được hình${
@@ -1379,15 +1403,17 @@ export const App: React.FC = () => {
           }
         }, 50);
 
-        // 4b. Video WebView2 không phát được -> chuyển mã nền ngay, phụ đề vẫn chạy từ file gốc
-        if (!info.playable) {
-          requestPlayback(info.path, false, info.playable_reason);
-        } else if (info.check_mime && !canPlayMime(info.check_mime)) {
-          requestPlayback(
-            info.path,
-            true,
-            `Máy này không giải mã được video ${(info.video_codec || "").toUpperCase()} (thiếu phần cứng hoặc extension của Windows)`,
-          );
+        // 4b. Video WebView2 không phát được -> chuyển mã nền ngay (chỉ áp dụng cho file cục bộ)
+        if (!info.path.startsWith("gdrive://")) {
+          if (!info.playable) {
+            requestPlayback(info.path, false, info.playable_reason);
+          } else if (info.check_mime && !canPlayMime(info.check_mime)) {
+            requestPlayback(
+              info.path,
+              true,
+              `Máy này không giải mã được video ${(info.video_codec || "").toUpperCase()} (thiếu phần cứng hoặc extension của Windows)`,
+            );
+          }
         }
 
         // 5. Bắt đầu pipeline ngầm
