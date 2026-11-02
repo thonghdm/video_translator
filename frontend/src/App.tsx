@@ -54,6 +54,8 @@ import {
   isSilentVideoDecodeFailure,
   playbackStageLabel,
   playedSeconds,
+  resolveTreeSelection,
+  shouldRequestTranscode,
 } from "./lib/playback";
 import { LandingPage } from "./components/LandingPage";
 import { countRender } from "./lib/renderProbe";
@@ -845,7 +847,7 @@ export const App: React.FC = () => {
   const requestPlayback = useCallback(
     (path: string, force: boolean, reason?: string) => {
       // Tuyệt đối không chuyển mã video Google Drive (tránh tải cả file qua mạng làm nghẽn app)
-      if (path.startsWith("gdrive://")) {
+      if (!shouldRequestTranscode(path)) {
         console.warn("[Video] Bỏ qua chuyển mã nền cho video Google Drive:", path);
         return;
       }
@@ -1695,22 +1697,8 @@ export const App: React.FC = () => {
 
   const handleSelectVideoFromTree = useCallback(
     (path: string) => {
-      if (path.startsWith("gdrive://")) {
-        const fileID = path.replace("gdrive://", "");
-        handleOpenVideo(undefined, {
-          id: fileID,
-          name: "",
-          mime_type: "video/mp4",
-          size: 0,
-          thumbnail_link: "",
-          is_folder: false,
-          duration_sec: 0,
-          subtitle_id: "",
-          subtitle_name: "",
-        });
-      } else {
-        handleOpenVideo(path);
-      }
+      const { filePath, driveItem } = resolveTreeSelection(path);
+      handleOpenVideo(filePath, driveItem);
       if (autoCollapseFolder) {
         setShowFolderPanel(false);
       }

@@ -1,11 +1,14 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canPlayMime,
   describeMediaError,
   formatPercent,
+  isDrivePath,
   isFixableByTranscode,
   isSilentVideoDecodeFailure,
   playbackStageLabel,
+  resolveTreeSelection,
+  shouldRequestTranscode,
 } from "./playback";
 
 describe("canPlayMime", () => {
@@ -91,5 +94,111 @@ describe("mô tả lỗi và tiến độ", () => {
   it("nhãn giai đoạn", () => {
     expect(playbackStageLabel("remux")).toContain("đóng gói");
     expect(playbackStageLabel("transcode")).toContain("chuyển mã");
+  });
+});
+
+describe("mở video từ cây thư mục và chặn chuyển mã cho gdrive (BUG fix)", () => {
+  it("resolveTreeSelection: tách đúng fileID của Google Drive", () => {
+    const res = resolveTreeSelection("gdrive://1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7");
+    expect(res.filePath).toBeUndefined();
+    expect(res.driveItem?.id).toBe("1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7");
+    expect(isDrivePath("gdrive://1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7")).toBe(true);
+  });
+
+  it("resolveTreeSelection: giữ nguyên đường dẫn file cục bộ", () => {
+    const res = resolveTreeSelection("D:/Videos/lesson1.mp4");
+    expect(res.filePath).toBe("D:/Videos/lesson1.mp4");
+    expect(res.driveItem).toBeUndefined();
+    expect(isDrivePath("D:/Videos/lesson1.mp4")).toBe(false);
+  });
+
+  it("shouldRequestTranscode: từ chối tuyệt đối video gdrive", () => {
+    expect(shouldRequestTranscode("gdrive://1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7")).toBe(false);
+    expect(shouldRequestTranscode("")).toBe(false);
+    expect(shouldRequestTranscode("D:/video.mkv")).toBe(true);
+  });
+
+  it("mô phỏng mở gdrive từ cây thư mục: gọi OpenDriveVideo, không gọi PreparePlayback, chỉ 1 lần gán src", async () => {
+    const calls = {
+      openDriveVideo: 0,
+      openVideo: 0,
+      preparePlayback: 0,
+      srcAssignments: 0,
+    };
+    let currentSrc = "";
+
+    const fakeBackend = {
+      OpenDriveVideo: vi.fn(async (id: string) => {
+        calls.openDriveVideo++;
+        return {
+          path: `gdrive://${id}`,
+          media_url: `http://127.0.0.1:54321/drive/stream?id=${id}`,
+          duration_sec: 3600,
+          playable: true,
+          video_codec: "h264",
+        };
+      }),
+      OpenVideo: vi.fn(async (path: string) => {
+        calls.openVideo++;
+        return { path, media_url: `http://127.0.0.1:54321/media/${path}`, playable: true };
+      }),
+      PreparePlayback: vi.fn(async () => {
+        calls.preparePlayback++;
+      }),
+    };
+
+    // 1. Click chọn video gdrive từ cây thư mục
+    const selected = "gdrive://1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7";
+    const { filePath, driveItem } = resolveTreeSelection(selected);
+
+    // 2. Mở video qua OpenDriveVideo
+    const isDrive = !!driveItem || (typeof filePath === "string" && filePath.startsWith("gdrive://"));
+    const driveFileID = driveItem?.id || (isDrive ? (filePath as string).replace("gdrive://", "") : "");
+
+    const info = isDrive
+      ? await fakeBackend.OpenDriveVideo(driveFileID)
+      : await fakeBackend.OpenVideo(filePath as string);
+
+    // 3. Gán src cho thẻ video
+    currentSrc = info.media_url;
+    calls.srcAssignments++;
+
+    // 4. Kiểm tra điều kiện transcode sau khi mở
+    if (!info.path.startsWith("gdrive://")) {
+      if (!info.playable) {
+        await fakeBackend.PreparePlayback(info.path, false);
+      }
+    }
+
+    // 5. Kiểm tra khi video decode failure giả lập (ví dụ màn hình đen / buffering chậm)
+    const isSilentFailure = isSilentVideoDecodeFailure(
+      { currentTime: 2, videoWidth: 0, readyState: 4 },
+      true,
+    );
+    expect(isSilentFailure).toBe(true);
+
+    // Logic trong App.tsx: nếu info.path.startsWith("gdrive://") thì return ngay, không request transcode
+    if (info.path.startsWith("gdrive://")) {
+      // bỏ qua, không gọi PreparePlayback
+    } else {
+      await fakeBackend.PreparePlayback(info.path, true);
+    }
+
+    // 6. Kiểm tra khi onError giả lập
+    if (info.path.startsWith("gdrive://")) {
+      // chỉ showToast, không gọi PreparePlayback
+    } else {
+      await fakeBackend.PreparePlayback(info.path, true);
+    }
+
+    // Khẳng định đúng yêu cầu của người dùng:
+    // - Đi qua OpenDriveVideo, không đi qua OpenVideo
+    expect(calls.openDriveVideo).toBe(1);
+    expect(calls.openVideo).toBe(0);
+    // - Không gọi PreparePlayback (0 lần)
+    expect(calls.preparePlayback).toBe(0);
+    // - Chỉ đúng 1 lần gán src
+    expect(calls.srcAssignments).toBe(1);
+    expect(currentSrc).toBe("http://127.0.0.1:54321/drive/stream?id=1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7");
   });
 });

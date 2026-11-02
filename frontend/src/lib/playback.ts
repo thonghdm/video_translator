@@ -101,6 +101,57 @@ export function playbackStageLabel(stage: string): string {
   }
 }
 
+/** Video Google Drive được phát trực tiếp qua loopback stream, không đi qua pipeline chuyển mã */
+export function isDrivePath(path?: string): boolean {
+  return typeof path === "string" && path.startsWith("gdrive://");
+}
+
+export interface TreeSelectionResult {
+  filePath?: string;
+  driveItem?: {
+    id: string;
+    name: string;
+    mime_type: string;
+    size: number;
+    thumbnail_link: string;
+    is_folder: boolean;
+    duration_sec: number;
+    subtitle_id: string;
+    subtitle_name: string;
+  };
+}
+
+/** Chuyển đổi đường dẫn từ cây thư mục sang tham số mở video phù hợp */
+export function resolveTreeSelection(path: string): TreeSelectionResult {
+  if (isDrivePath(path)) {
+    const fileID = path.replace("gdrive://", "");
+    return {
+      driveItem: {
+        id: fileID,
+        name: "",
+        mime_type: "video/mp4",
+        size: 0,
+        thumbnail_link: "",
+        is_folder: false,
+        duration_sec: 0,
+        subtitle_id: "",
+        subtitle_name: "",
+      },
+    };
+  }
+  return { filePath: path };
+}
+
+/**
+ * Kiểm tra xem có được phép gọi requestPlayback (chuyển mã nền) hay không.
+ * Tuyệt đối không cho phép chuyển mã đối với video Google Drive để tránh tải toàn bộ file qua mạng.
+ */
+export function shouldRequestTranscode(path: string): boolean {
+  if (!path || isDrivePath(path)) return false;
+  return true;
+}
+
+
 export function formatPercent(p: number): string {
   if (!isFinite(p) || p < 0) return "";
   return `${Math.min(100, Math.max(0, Math.round(p)))}%`;

@@ -349,3 +349,17 @@ type fakeRW struct {
 func (f *fakeRW) Header() http.Header         { return f.h }
 func (f *fakeRW) Write(b []byte) (int, error) { return len(b), nil }
 func (f *fakeRW) WriteHeader(c int)           { f.code = c }
+
+func Test_PreparePlayback_RejectsGDrive(t *testing.T) {
+	a := &App{
+		currentVideo: "gdrive://1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7",
+	}
+	err := a.PreparePlayback("gdrive://1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7", true)
+	if err == nil {
+		t.Fatal("PreparePlayback phải từ chối video Google Drive")
+	}
+	if !strings.Contains(err.Error(), "không hỗ trợ chuyển mã cho video Google Drive") {
+		t.Fatalf("thông báo lỗi không đúng: %v", err)
+	}
+}
+
