@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canPlayMime,
+  createPipelineStarter,
   describeMediaError,
   formatPercent,
   isDrivePath,
@@ -200,5 +201,85 @@ describe("mở video từ cây thư mục và chặn chuyển mã cho gdrive (BU
     // - Chỉ đúng 1 lần gán src
     expect(calls.srcAssignments).toBe(1);
     expect(currentSrc).toBe("http://127.0.0.1:54321/drive/stream?id=1Lefyhe4lnA8vCLpkEA2NXRB4x6cEyjx7");
+  });
+});
+
+describe("Player-First createPipelineStarter (Bước 2)", () => {
+  it("gdrive mở -> StartPipeline không chạy trước playing", () => {
+    vi.useFakeTimers();
+    const startPipeline = vi.fn();
+    const starter = createPipelineStarter({
+      path: "gdrive://vid1",
+      isDrive: true,
+      startPipeline,
+      maxDelayMs: 8000,
+    });
+
+    // Chưa phát: không được chạy StartPipeline
+    expect(startPipeline).not.toHaveBeenCalled();
+
+    // Khi playing: chạy StartPipeline ngay
+    starter.onPlaying();
+    expect(startPipeline).toHaveBeenCalledTimes(1);
+    expect(startPipeline).toHaveBeenCalledWith("gdrive://vid1", 0);
+
+    // Sự kiện playing lặp lại sau đó không gọi thêm lần nào
+    starter.onPlaying();
+    expect(startPipeline).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("gdrive mở nhưng quá 8s (trần 8s) -> tự động chạy StartPipeline", () => {
+    vi.useFakeTimers();
+    const startPipeline = vi.fn();
+    createPipelineStarter({
+      path: "gdrive://vid2",
+      isDrive: true,
+      startPipeline,
+      maxDelayMs: 8000,
+    });
+
+    // 7999ms: chưa chạy
+    vi.advanceTimersByTime(7999);
+    expect(startPipeline).not.toHaveBeenCalled();
+
+    // 8000ms: kích hoạt trần 8s
+    vi.advanceTimersByTime(2);
+    expect(startPipeline).toHaveBeenCalledTimes(1);
+    expect(startPipeline).toHaveBeenCalledWith("gdrive://vid2", 0);
+    vi.useRealTimers();
+  });
+
+  it("đổi video thì hủy -> không bao giờ gọi StartPipeline cho video cũ", () => {
+    vi.useFakeTimers();
+    const startPipeline = vi.fn();
+    const starter = createPipelineStarter({
+      path: "gdrive://vid3",
+      isDrive: true,
+      startPipeline,
+      maxDelayMs: 8000,
+    });
+
+    // Đổi video: gọi cancel()
+    starter.cancel();
+
+    // Dù có sự kiện playing hay hết 8s timeout sau đó thì vẫn không được gọi
+    starter.onPlaying();
+    vi.advanceTimersByTime(10000);
+    expect(startPipeline).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("nguồn cục bộ: chạy ngay lập tức, không chờ playing", () => {
+    const startPipeline = vi.fn();
+    createPipelineStarter({
+      path: "D:/Videos/lesson.mp4",
+      isDrive: false,
+      startPipeline,
+      maxDelayMs: 8000,
+    });
+
+    expect(startPipeline).toHaveBeenCalledTimes(1);
+    expect(startPipeline).toHaveBeenCalledWith("D:/Videos/lesson.mp4", 0);
   });
 });
