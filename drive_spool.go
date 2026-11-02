@@ -71,6 +71,7 @@ type SpoolProgress struct {
 	Failed          atomic.Bool
 	ETag            atomic.Pointer[string]
 	FailReason      atomic.Pointer[string]
+	ContentType     atomic.Pointer[string] // Content-Type Drive trả về (để phục vụ lại cho trình phát)
 
 	headState    atomic.Int32 // chỉ lưu kết luận cuối (Ready/MoovAtEnd/NotMP4)
 	lastProgress atomic.Int64 // unix nano của lần nhận byte gần nhất
@@ -461,6 +462,10 @@ func (s *DriveSpool) fetchOnce(ctx context.Context, prog *SpoolProgress, offset 
 		prog.ETag.Store(&e)
 	} else if p := prog.ETag.Load(); p != nil {
 		etag = *p
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		c := ct
+		prog.ContentType.Store(&c)
 	}
 	if total := totalFromResponse(resp, offset); total > 0 {
 		prog.TotalSize.Store(total)

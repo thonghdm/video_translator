@@ -1033,6 +1033,12 @@ func ServeDriveStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// File đang/đã được DriveSpool tải về đĩa bằng 1 kết nối liên tục: phục vụ Range từ đó để trình phát không phải
+	// trả ~0,75s độ trễ Drive cho từng request nhỏ. Không phục vụ được (tua xa, spool hỏng...) thì đi thẳng Drive như cũ.
+	if serveFromSpool(w, r, fileID) {
+		return
+	}
+
 	// r.Context() bị hủy khi client ngắt kết nối (tua video / đóng ffmpeg) -> request lên Google cũng bị hủy
 	resp, err := dm.upstreamGet(r.Context(), r.Method, fileID, r.Header.Get("Range"), r.Header.Get("If-Range"))
 	if err != nil {

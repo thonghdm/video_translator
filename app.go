@@ -81,12 +81,14 @@ func NewApp() *App {
 		}
 	}
 
+	spool := NewDriveSpool("", 0, GetDriveManager())
+	SetDriveSpoolServer(spool) // route /drive/stream phục vụ Range từ file spool khi có thể
 	return &App{
 		settings:     defaultSettings,
 		settingsPath: settingsPath,
 		downloader:   NewModelDownloader(),
 		updater:      NewUpdater(),
-		spool:        NewDriveSpool("", 0, GetDriveManager()),
+		spool:        spool,
 	}
 }
 
@@ -1042,6 +1044,11 @@ func (a *App) OpenDriveVideo(fileID, name, subtitleID string) (VideoInfo, error)
 	defer a.mu.Unlock()
 	t2 := time.Now()
 	info, err := a.openMediaLocked(DrivePathFromID(fileID), streamURL, streamURL, name, durationSec)
+	if err == nil && a.spool != nil {
+		// Tải nền về đĩa NGAY khi mở (sau openMediaLocked vì nó hủy spool cũ): trình phát và slicer cùng đọc file này
+		// thay vì mỗi bên bắn hàng chục request nhỏ lên Drive.
+		a.spool.StartSpool(fileID, 0)
+	}
 	DiagLog("[open drive] %s: tải phụ đề Drive=%dms, lấy thời lượng=%dms, mở cache/pipeline=%dms, tổng=%dms (có phụ đề sẵn: %v)",
 		name, prepMs, durMs, time.Since(t2).Milliseconds(), time.Since(t0).Milliseconds(), hasSub)
 	return info, err
