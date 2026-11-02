@@ -32,6 +32,8 @@ export function ListDriveItems(arg1:string):Promise<Array<main.DriveItem>>;
 
 export function LoadCachedSubtitles(arg1:string):Promise<Array<main.SubtitleItem>>;
 
+export function LogPlaybackEvent(arg1:string,arg2:string,arg3:number):Promise<void>;
+
 export function LoginGoogleDrive():Promise<void>;
 
 export function LogoutGoogleDrive():Promise<void>;

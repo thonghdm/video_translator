@@ -62,6 +62,10 @@ export function LoadCachedSubtitles(arg1) {
   return window['go']['main']['App']['LoadCachedSubtitles'](arg1);
 }
 
+export function LogPlaybackEvent(arg1, arg2, arg3) {
+  return window['go']['main']['App']['LogPlaybackEvent'](arg1, arg2, arg3);
+}
+
 export function LoginGoogleDrive() {
   return window['go']['main']['App']['LoginGoogleDrive']();
 }

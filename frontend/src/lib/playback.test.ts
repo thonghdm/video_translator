@@ -142,7 +142,7 @@ describe("mở video từ cây thư mục và chặn chuyển mã cho gdrive (BU
         calls.openVideo++;
         return { path, media_url: `http://127.0.0.1:54321/media/${path}`, playable: true };
       }),
-      PreparePlayback: vi.fn(async () => {
+      PreparePlayback: vi.fn(async (_path?: string, _force?: boolean) => {
         calls.preparePlayback++;
       }),
     };
