@@ -196,6 +196,8 @@ func Test_TwoTierLookaheadBatches_And_Metrics(t *testing.T) {
 
 // Test_App_GeminiConfig_Integration kiểm tra tích hợp Gemini vào App và FastHybridTranslator qua cấu hình Settings
 func Test_App_GeminiConfig_Integration(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GEMINI_ENABLED", "")
 	tempDir := t.TempDir()
 	settingsFile := filepath.Join(tempDir, "settings.json")
 
