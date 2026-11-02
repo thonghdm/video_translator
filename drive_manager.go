@@ -971,7 +971,12 @@ func (dm *DriveManager) PrepareVideo(fileID, name, subtitleID string) (hasSub bo
 	dm.subCache.Delete(fileID)
 	dm.viSubCache.Delete(fileID)
 	viID := dm.viSubIDs[fileID]
+	// Người gọi có thể không truyền subtitleID (mở bằng đường dẫn, link dán...): lấy ID đã ghi nhận lúc quét thư mục
+	if subtitleID == "" {
+		subtitleID = dm.subIDs[fileID]
+	}
 	dm.mu.Unlock()
+	DiagLog("[drive] chuẩn bị video=%s: phụ đề gốc=%q, phụ đề tiếng Việt=%q", fileID, subtitleID, viID)
 
 	var wg sync.WaitGroup
 	var enOK, viOK bool

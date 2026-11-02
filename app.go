@@ -1023,7 +1023,7 @@ func (a *App) OpenDriveVideo(fileID, name, subtitleID string) (VideoInfo, error)
 		return VideoInfo{}, ErrDriveNotLoggedIn
 	}
 	t0 := time.Now()
-	dm.PrepareVideo(fileID, name, subtitleID) // tải phụ đề ngoài lock, lỗi thì tự fallback Whisper
+	hasSub := dm.PrepareVideo(fileID, name, subtitleID) // tải phụ đề ngoài lock, lỗi thì tự fallback Whisper
 	prepMs := time.Since(t0).Milliseconds()
 
 	// Lấy thời lượng trực tiếp từ metadata Google Drive (đã nạp từ ListDriveItems hoặc query 50ms)
@@ -1043,7 +1043,7 @@ func (a *App) OpenDriveVideo(fileID, name, subtitleID string) (VideoInfo, error)
 	t2 := time.Now()
 	info, err := a.openMediaLocked(DrivePathFromID(fileID), streamURL, streamURL, name, durationSec)
 	DiagLog("[open drive] %s: tải phụ đề Drive=%dms, lấy thời lượng=%dms, mở cache/pipeline=%dms, tổng=%dms (có phụ đề sẵn: %v)",
-		name, prepMs, durMs, time.Since(t2).Milliseconds(), time.Since(t0).Milliseconds(), subtitleID != "")
+		name, prepMs, durMs, time.Since(t2).Milliseconds(), time.Since(t0).Milliseconds(), hasSub)
 	return info, err
 }
 
