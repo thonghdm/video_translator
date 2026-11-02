@@ -36,6 +36,7 @@ type App struct {
 	// Chuyển mã nền để phát hình (xem playback.go). Bảo vệ bởi mu.
 	playbackCancel context.CancelFunc
 	playbackPath   string
+	spool          *DriveSpool
 }
 
 // NewApp tạo struct App và nạp cấu hình settings
@@ -85,6 +86,7 @@ func NewApp() *App {
 		settingsPath: settingsPath,
 		downloader:   NewModelDownloader(),
 		updater:      NewUpdater(),
+		spool:        NewDriveSpool("", 0, GetDriveManager()),
 	}
 }
 
@@ -118,6 +120,9 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 	if a.currentTrans != nil {
 		_ = a.currentTrans.Close()
+	}
+	if a.spool != nil {
+		a.spool.Close()
 	}
 }
 
@@ -325,6 +330,9 @@ func (a *App) openMediaLocked(path, probeInput, directURL, title string, knownDu
 
 	// Hủy job chuyển mã của video trước (nếu đang chạy)
 	a.cancelPlaybackLocked()
+	if a.spool != nil {
+		a.spool.CancelActive()
+	}
 
 	a.currentVideo = path
 
@@ -613,6 +621,11 @@ func (a *App) StartPipeline(path string, startSec float64) error {
 		},
 	}
 
+	if IsDrivePath(path) && a.spool != nil {
+		fileID := DriveFileIDFromPath(path)
+		a.spool.StartSpool(fileID, 0)
+	}
+
 	pipe := NewPipeline(
 		path,
 		a.currentInfo.DurationSec,
@@ -622,6 +635,9 @@ func (a *App) StartPipeline(path string, startSec float64) error {
 		a.currentTrans,
 		callbacks,
 	)
+	if a.spool != nil {
+		pipe.SetSpool(a.spool)
+	}
 	a.currentPipe = pipe
 
 	return pipe.Start(startSec)

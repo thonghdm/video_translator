@@ -127,6 +127,16 @@ type Pipeline struct {
 	// Custom runners hỗ trợ Mock trong Test tự động
 	MockSliceAudio func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error
 	MockRunSTT     func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error)
+
+	// Spool hỗ trợ tải trước file Drive về đĩa cục bộ
+	spool *DriveSpool
+}
+
+// SetSpool gắn DriveSpool vào pipeline để ưu tiên đọc file spool cục bộ
+func (p *Pipeline) SetSpool(s *DriveSpool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.spool = s
 }
 
 // NewPipeline tạo một thực thể Pipeline mới
@@ -910,7 +920,17 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 				var args []string
 				sliceTimeout := 60 * time.Second
 				mediaInput := ResolveMediaInput(p.videoPath)
-				if IsDrivePath(p.videoPath) {
+				useDirectSpool := false
+
+				if IsDrivePath(p.videoPath) && p.spool != nil {
+					fileID := DriveFileIDFromPath(p.videoPath)
+					if localPath, ok := p.spool.GetAvailableMediaInput(ctx, fileID, bRange.ExtractStart, bRange.ExtractLen, p.duration()); ok {
+						mediaInput = localPath
+						useDirectSpool = true
+					}
+				}
+
+				if IsDrivePath(p.videoPath) && !useDirectSpool {
 					// Đọc từ loopback proxy Drive: bật seekable và reconnect để ffmpeg seek HTTP Range nhanh chóng
 					args = append(args, "-seekable", "1", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5")
 					sliceTimeout = 120 * time.Second
