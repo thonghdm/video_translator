@@ -129,11 +129,13 @@ type Pipeline struct {
 	MockRunSTT     func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error)
 
 	// Spool hỗ trợ tải trước file Drive về đĩa cục bộ
-	spool *DriveSpool
+	spool spoolSource
+	// resolveInput: ghi đè ResolveMediaInput (dùng trong test)
+	resolveInput func(string) string
 }
 
 // SetSpool gắn DriveSpool vào pipeline để ưu tiên đọc file spool cục bộ
-func (p *Pipeline) SetSpool(s *DriveSpool) {
+func (p *Pipeline) SetSpool(s spoolSource) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.spool = s
@@ -915,39 +917,8 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			} else if p.MockSliceAudio != nil {
 				err = p.MockSliceAudio(ctx, p.videoPath, bRange, wavPath)
 			} else {
-				// Cắt audio bằng ffmpeg tối ưu Fast Seek:
-				// ffmpeg -ss {startSec} -i {mediaInput} -t {durationSec} -vn -acodec pcm_s16le -ar 16000 -ac 1 -threads 2 -y {outputWav}
-				var args []string
-				sliceTimeout := 60 * time.Second
-				mediaInput := ResolveMediaInput(p.videoPath)
-				useDirectSpool := false
-
-				if IsDrivePath(p.videoPath) && p.spool != nil {
-					fileID := DriveFileIDFromPath(p.videoPath)
-					if localPath, ok := p.spool.GetAvailableMediaInput(ctx, fileID, bRange.ExtractStart, bRange.ExtractLen, p.duration()); ok {
-						mediaInput = localPath
-						useDirectSpool = true
-					}
-				}
-
-				if IsDrivePath(p.videoPath) && !useDirectSpool {
-					// Đọc từ loopback proxy Drive: bật seekable và reconnect để ffmpeg seek HTTP Range nhanh chóng
-					args = append(args, "-seekable", "1", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5")
-					sliceTimeout = 120 * time.Second
-				}
-				args = append(args,
-					"-ss", fmt.Sprintf("%.3f", bRange.ExtractStart),
-					"-i", mediaInput,
-					"-t", fmt.Sprintf("%.3f", bRange.ExtractLen),
-					"-vn",
-					"-acodec", "pcm_s16le",
-					"-ar", "16000",
-					"-ac", "1",
-					"-threads", "2",
-					"-y",
-					wavPath,
-				)
-				_, err = RunCommand(ctx, p.tools.FFmpeg, args, sliceTimeout, nil)
+				// Cắt audio bằng ffmpeg Fast Seek (ưu tiên file spool cục bộ, có kiểm tra kết quả + quay về proxy)
+				err = p.sliceBlock(ctx, bRange, wavPath)
 			}
 			sliceMs := time.Since(tSlice0).Milliseconds()
 
@@ -977,6 +948,21 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			}
 		}
 	}
+}
+
+// sliceBlock cắt WAV cho một block (xem sliceBlockAudio).
+func (p *Pipeline) sliceBlock(ctx context.Context, bRange BlockRange, wavPath string) error {
+	p.mu.Lock()
+	spool, resolve := p.spool, p.resolveInput
+	p.mu.Unlock()
+	_, err := sliceBlockAudio(ctx, sliceParams{
+		tools:        p.tools,
+		videoPath:    p.videoPath,
+		spool:        spool,
+		resolveInput: resolve,
+		durationSec:  p.duration(),
+	}, bRange, wavPath)
+	return err
 }
 
 // shouldParseWhisperTimings: stderr của Whisper chỉ cần phân tích (9 regexp) khi bật telemetry
