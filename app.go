@@ -408,6 +408,14 @@ func (a *App) openMediaLocked(path, probeInput, directURL, title string, knownDu
 	}
 	// Nếu có sẵn file phụ đề Tiếng Việt (_vi.srt / .vi.srt / _vn.srt...), nạp trực tiếp (và ghép cặp với _en.srt nếu có)
 	PopulateStoreFromVietnameseSRT(bs, path, durationSec, a.settings.BlockSec, a.settings.OverlapSec)
+	// Video Google Drive: phụ đề tiếng Việt (_vi.srt) đã tải vào RAM lúc PrepareVideo → nạp thẳng như file cục bộ,
+	// bỏ qua cả Whisper lẫn bước dịch. Ghi đè cache cũ vì phụ đề dựng sẵn là nguồn đúng nhất.
+	if IsDrivePath(path) {
+		if viSegs := GetDriveViSubtitleSegments(path); len(viSegs) > 0 {
+			ok := PopulateStoreFromSegments(bs, viSegs, GetDriveSubtitleSegments(path), durationSec, a.settings.BlockSec, a.settings.OverlapSec, true)
+			DiagLog("[open drive] %s: nạp phụ đề tiếng Việt dựng sẵn (%d câu, nạp được=%v)", title, len(viSegs), ok)
+		}
+	}
 	a.currentStore = bs
 
 	totalBlocks := int(math.Ceil(durationSec / a.settings.BlockSec))

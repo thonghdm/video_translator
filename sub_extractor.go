@@ -153,6 +153,36 @@ func PopulateStoreFromVietnameseSRT(bs *BlockStore, videoPath string, durationSe
 		enSegs, _ = LoadExternalSubtitles(enPath)
 	}
 
+	// File cục bộ: giữ nguyên block đã có (kể cả bản người dùng đã sửa/dịch lại)
+	return PopulateStoreFromSegments(bs, viSegs, enSegs, durationSec, blockSec, overlapSec, false)
+}
+
+// Phụ đề tiếng Việt chỉ phủ tới viEnd. Nếu viEnd < viCoverageRatio * thời lượng video thì coi là file bị cụt:
+// các block bắt đầu sau viEnd + viCoverageMarginSec được để trống cho Whisper + dịch xử lý thay vì đánh dấu xong rỗng.
+// Nếu phụ đề đã phủ gần hết video thì phần còn lại là đoạn im lặng thật (outro...), vẫn đánh dấu xong để khỏi chạy Whisper.
+const (
+	viCoverageRatio     = 0.85
+	viCoverageMarginSec = 10.0
+)
+
+// PopulateStoreFromSegments nạp phụ đề tiếng Việt viSegs (kèm câu gốc enSegs ghép theo mốc thời gian, có thể rỗng)
+// vào BlockStore, đánh dấu các block đã dịch xong. Dùng chung cho file cục bộ (đọc từ đĩa) và Google Drive (đọc từ RAM).
+// overwrite=false: bỏ qua block đã xong; overwrite=true: ghi đè (phụ đề dựng sẵn là nguồn đúng nhất).
+// Trả về true nếu đã nạp ít nhất một block.
+func PopulateStoreFromSegments(bs *BlockStore, viSegs, enSegs []WhisperSegment, durationSec, blockSec, overlapSec float64, overwrite bool) bool {
+	if bs == nil || len(viSegs) == 0 {
+		return false
+	}
+
+	viEnd := 0.0
+	for _, v := range viSegs {
+		if v.EndSec > viEnd {
+			viEnd = v.EndSec
+		}
+	}
+
+	truncated := viEnd < viCoverageRatio*durationSec
+
 	if blockSec <= 0 {
 		blockSec = 30.0
 	}
@@ -166,10 +196,13 @@ func PopulateStoreFromVietnameseSRT(bs *BlockStore, videoPath string, durationSe
 
 	pending := make(map[int][]SubtitleItem)
 	for b := 0; b < totalBlocks; b++ {
-		if bs.IsBlockDone(b) {
+		if !overwrite && bs.IsBlockDone(b) {
 			continue
 		}
 		bRange := ComputeBlockRange(b, blockSec, overlapSec, durationSec)
+		if truncated && bRange.OwnerStart >= viEnd+viCoverageMarginSec {
+			continue // phụ đề không phủ tới block này → để pipeline tự xử lý
+		}
 		var items []SubtitleItem
 		seq := 0
 		for i, vSeg := range viSegs {
@@ -215,7 +248,7 @@ func PopulateStoreFromVietnameseSRT(bs *BlockStore, videoPath string, durationSe
 	// BUG-14: nạp RAM ngay, ghi đĩa ở nền (không chặn OpenVideo / không giữ a.mu qua ~120 lần ghi file)
 	bs.SaveBlocksDeferred(pending)
 
-	return true
+	return len(pending) > 0
 }
 
 // ResolveVideoFromSubtitlePath tìm file video .mp4/.mkv tương ứng nếu người dùng chọn/kéo thả file _en.srt hoặc _vi.srt
