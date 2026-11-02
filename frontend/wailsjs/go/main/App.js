@@ -10,6 +10,10 @@ export function CancelModelDownload() {
   return window['go']['main']['App']['CancelModelDownload']();
 }
 
+export function CancelPlayback() {
+  return window['go']['main']['App']['CancelPlayback']();
+}
+
 export function CheckForUpdate() {
   return window['go']['main']['App']['CheckForUpdate']();
 }
@@ -72,6 +76,10 @@ export function OpenDriveVideo(arg1, arg2, arg3) {
 
 export function OpenVideo(arg1) {
   return window['go']['main']['App']['OpenVideo'](arg1);
+}
+
+export function PreparePlayback(arg1, arg2) {
+  return window['go']['main']['App']['PreparePlayback'](arg1, arg2);
 }
 
 export function ResolveDriveLink(arg1) {
