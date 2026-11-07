@@ -77,7 +77,7 @@ const nextReqId = (p: string) => `${p}_${Date.now().toString(36)}_${(reqSeq++).t
 export class YouTubeHookClient {
   /** videoId → các response timedtext đã bắt (mới nhất ở cuối) */
   private readonly captured = new Map<string, Captured[]>();
-  private readonly pending = new Map<string, { resolve: (v: any) => void; timer: ReturnType<typeof setTimeout> }>();
+  private readonly pending = new Map<string, { resolve: (v: Record<string, unknown>) => void; timer: ReturnType<typeof setTimeout> }>();
   private readonly listeners = new Set<(c: Captured) => void>();
   private readonly onMessage = (event: MessageEvent) => this.handleMessage(event);
   private disposed = false;
@@ -128,7 +128,7 @@ export class YouTubeHookClient {
     }
   }
 
-  private request<T>(kind: string, extra: Record<string, unknown>, timeoutMs: number, map: (msg: any) => T, fallback: T): Promise<T> {
+  private request<T>(kind: string, extra: Record<string, unknown>, timeoutMs: number, map: (msg: Record<string, unknown>) => T, fallback: T): Promise<T> {
     if (this.disposed) return Promise.resolve(fallback);
     const reqId = nextReqId(kind);
     return new Promise<T>((resolve) => {

@@ -341,3 +341,33 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
    - Nếu không hiện: DevTools → Console → ô chọn context (góc trên trái) → chọn frame `www.youtube.com/embed/...` → chạy `document.getElementById('movie_player').getPlayerResponse()?.captions` và `performance.getEntriesByType('resource').filter(e=>e.name.includes('timedtext')).map(e=>e.name)`. Gửi kết quả để sửa tiếp.
 2. **Google Drive:** mở một video `.mp4` trên Drive có phụ đề (hoặc upload phụ đề `.srt` cùng video) → Preview → bấm play. Làm như bước 1 nhưng với frame `youtube.googleapis.com/embed/...` hoặc `drive.google.com/...`.
 3. **Udemy/Coursera:** mở một bài giảng có phụ đề tiếng Anh → bấm play. Phụ đề phải hiện đúng trong khung video, kể cả khi fullscreen. Nếu không có phụ đề: rê chuột lên video, dùng "Nhập" để nạp `.srt`.
+
+---
+
+## Phase 11: Hoàn thiện, đóng gói và tài liệu
+
+### 1. Đóng gói (`pnpm run zip`)
+- Tạo script thuần Node.js `scripts/zip.mjs` (chuẩn PKZIP qua `node:fs`, `node:path`, `node:zlib`), không phụ thuộc công cụ hệ thống hoặc thư viện ngoài.
+- Tự động đọc version từ `package.json` và đóng gói toàn bộ thư mục `dist/` thành file ZIP độc lập `release/subtrans-extension-v<version>.zip` (kích thước ~115 KB, 21 files).
+- Kiểm tra giải nén bằng `tar -tf` xác nhận đúng cấu trúc gốc của Chrome Extension (`manifest.json` nằm ngay thư mục gốc của archive).
+- Thêm lệnh `"zip": "npm run build && node scripts/zip.mjs"` vào `package.json`.
+
+### 2. Rà soát chất lượng & Dọn dẹp mã nguồn
+- **Loại bỏ log debug trong bản production**:
+  - Bọc `console.log` tại `src/content/yt-hook.ts` bằng điều kiện `if (import.meta.env?.DEV)`.
+  - Kiểm tra bản build `dist/assets/yt-hook.ts-*.js` xác nhận dead-code elimination đã loại bỏ hoàn toàn chuỗi log.
+- **Làm sạch kiểu dữ liệu TypeScript**:
+  - Loại bỏ các khai báo `: any` trong `src/content/adapters/youtube.ts` (`pending` map và phương thức `request`), thay thế bằng `Record<string, unknown>`.
+  - `pnpm run typecheck` (`tsc --noEmit`) vượt qua với 0 cảnh báo/lỗi.
+  - Toàn bộ 263 unit tests (34 files) tiếp tục vượt qua 100%.
+
+### 3. Tài liệu hướng dẫn (`extension/README.md`)
+- Viết tài liệu đầy đủ bằng tiếng Việt:
+  - Yêu cầu môi trường (Node >= 18, pnpm).
+  - Hướng dẫn build và đóng gói zip.
+  - Hướng dẫn cài đặt Load unpacked trên các trình duyệt Chromium (Chrome, Edge, Brave, Cốc Cốc).
+  - Hướng dẫn lấy và cấu hình Gemini API key (Google AI Studio).
+  - Bảng phím tắt tiện ích (`V`, `G`, `H`, kéo thả, nhấp đúp).
+  - Bảng so sánh tính năng giữa bản Extension và bản Desktop (Wails Go).
+  - Lưu ý về quyền mạng và giới hạn đã biết.
+

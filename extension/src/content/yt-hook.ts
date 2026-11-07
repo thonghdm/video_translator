@@ -232,7 +232,9 @@ type AnyPlayer = {
       }
     });
 
-    console.log("[SubTrans] YT hook loaded in MAIN world");
+    if (import.meta.env?.DEV) {
+      console.log("[SubTrans] YT hook loaded in MAIN world");
+    }
   } catch {
     /* không làm gián đoạn trang */
   }
