@@ -326,11 +326,26 @@ export function setYouTubeNativeCaptionsHidden(hide: boolean, doc: Document = do
 }
 
 export function isYouTubeHost(hostname: string): boolean {
-  return hostname === "www.youtube.com" || hostname === "youtube.com" || hostname === "m.youtube.com";
+  if (!hostname) return false;
+  return (
+    hostname === "www.youtube.com" ||
+    hostname === "youtube.com" ||
+    hostname === "m.youtube.com" ||
+    hostname === "youtube.googleapis.com" ||
+    hostname.endsWith(".youtube.com") ||
+    hostname.endsWith(".youtube-nocookie.com")
+  );
 }
 
 export function isYouTubeWatch(loc: Pick<Location, "hostname" | "pathname" | "href">): boolean {
-  return isYouTubeHost(loc.hostname) && loc.pathname === "/watch" && Boolean(extractVideoId(loc.href));
+  if (!isYouTubeHost(loc.hostname)) return false;
+  const vid = extractVideoId(loc.href);
+  if (!vid) return false;
+  // Trang /watch thông thường
+  if (loc.pathname === "/watch") return true;
+  // Trang /embed/{id} (nhúng YouTube trong Google Drive hoặc các trang web khác)
+  if (loc.pathname.startsWith("/embed/")) return true;
+  return false;
 }
 
 /**

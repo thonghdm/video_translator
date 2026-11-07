@@ -16,6 +16,7 @@ import type { SubtitleMode } from "../shared/types";
 import { Disposer } from "../shared/disposer";
 import { VideoDetector } from "./videoDetector";
 import { createHtml5Adapter } from "./adapters/html5";
+import { createCourseAdapter } from "./adapters/course";
 import {
   createYouTubeAdapter,
   getSharedHookClient,
@@ -338,6 +339,11 @@ class ContentController {
       });
       if (yt.matches(location)) {
         return yt;
+      }
+
+      const course = createCourseAdapter(this.fetchText);
+      if (course.matches(location)) {
+        return course;
       }
     }
     return createHtml5Adapter(this.fetchText);

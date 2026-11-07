@@ -291,3 +291,25 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
 - [ ] `V` xoay vòng 4 chế độ. Gõ chữ `v` trong ô bình luận YouTube: **không** đổi chế độ.
 - [ ] Trên một trang **không có video** (ví dụ GitHub, Gmail): phím `g`/`v` của trang vẫn chạy bình thường.
 - [ ] Xuất 6 loại file từ MiniToolbar: bản Desktop mở đúng.
+
+---
+
+## Phase 9: Google Drive và các nền tảng khóa học (Udemy, Coursera, edX)
+
+### 1. Google Drive & YouTube Embed Player
+- **Cơ chế**: Video preview trên Google Drive sử dụng iframe YouTube player (`youtube.googleapis.com/embed/...` hoặc `drive.google.com/.../preview`).
+- **Triển khai**:
+  - `manifest.config.ts`: Mở rộng `matches` của `yt-hook.ts` (MAIN world) sang `https://*.youtube.com/*`, `https://youtube.googleapis.com/*`, `https://*.youtube-nocookie.com/*`, `https://drive.google.com/*` kèm `all_frames: true`.
+  - `isYouTubeHost`: Nhận diện thêm `youtube.googleapis.com` và `*.youtube-nocookie.com`.
+  - `isYouTubeWatch`: Hỗ trợ đường dẫn `/embed/{id}` bên cạnh `/watch`.
+  - `extractVideoId`: Trích xuất `videoId` linh hoạt từ cả query param `?v=...`, pathname `/embed/...`, và rút gọn `youtu.be/...`.
+
+### 2. Nền tảng khóa học (Udemy / Coursera / edX)
+- **Cơ chế**: Các trang khóa học thường dùng HTML5 video với custom container (VideoJS trên Udemy, `rc-VideoPlayer` trên Coursera).
+- **Triển khai**:
+  - Thêm `src/content/adapters/course.ts` (`createCourseAdapter`):
+    - Tự động phát hiện domain nền tảng (`isCourseHost`).
+    - Tìm container của player (`findCoursePlayerContainer`) để overlay hiển thị chính xác theo tỉ lệ của khung phát bài giảng thay vì tràn màn hình.
+    - **Tự cô lập lỗi**: Mọi thao tác truy xuất `textTracks` được bọc `try...catch` để lỗi cross-origin hay bảo mật không bao giờ ảnh hưởng đến luồng `html5` cơ sở.
+    - Khi video khóa học không có phụ đề gốc: Kết hợp với Phase 8, MiniToolbar vẫn sẵn sàng để người dùng nạp file phụ đề `.srt`/`.vtt` ngoài vào học ngay.
+

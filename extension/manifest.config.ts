@@ -18,10 +18,16 @@ export default defineManifest({
   },
   content_scripts: [
     {
-      matches: ["https://www.youtube.com/*"],
+      matches: [
+        "https://*.youtube.com/*",
+        "https://youtube.googleapis.com/*",
+        "https://*.youtube-nocookie.com/*",
+        "https://drive.google.com/*"
+      ],
       js: ["src/content/yt-hook.ts"],
       run_at: "document_start",
-      world: "MAIN"
+      world: "MAIN",
+      all_frames: true
     },
     {
       matches: ["<all_urls>"],

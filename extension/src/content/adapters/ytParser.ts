@@ -29,15 +29,32 @@ export interface Json3Payload {
   events?: Json3Event[];
 }
 
-/** Trích xuất videoId từ chuỗi URL (ví dụ /watch?v=... hoặc /api/timedtext?v=...) */
+/** Trích xuất videoId từ chuỗi URL (ví dụ /watch?v=..., /embed/..., /api/timedtext?v=..., youtu.be/...) */
 export function extractVideoId(urlStr: string): string | null {
   try {
     const u = new URL(urlStr, "https://www.youtube.com");
-    return u.searchParams.get("v");
+    const v = u.searchParams.get("v");
+    if (v) return v;
+
+    // Hỗ trợ /embed/{id} (YouTube Embed player trên Google Drive hoặc các trang nhúng)
+    const embedMatch = u.pathname.match(/\/embed\/([^/?&#]+)/);
+    if (embedMatch) return embedMatch[1];
+
+    // Hỗ trợ youtu.be/{id}
+    if (u.hostname === "youtu.be" && u.pathname.length > 1) {
+      return u.pathname.slice(1).split("/")[0];
+    }
   } catch {
-    const match = /[?&]v=([^&#]+)/.exec(urlStr);
-    return match ? decodeURIComponent(match[1]) : null;
+    // Fallback regex bên dưới
   }
+
+  const matchV = /[?&]v=([^&#]+)/.exec(urlStr);
+  if (matchV) return decodeURIComponent(matchV[1]);
+
+  const matchEmbed = /\/embed\/([^/?&#]+)/.exec(urlStr);
+  if (matchEmbed) return decodeURIComponent(matchEmbed[1]);
+
+  return null;
 }
 
 export interface TimedtextUrlParams {

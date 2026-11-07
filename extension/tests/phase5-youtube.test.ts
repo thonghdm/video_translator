@@ -183,19 +183,19 @@ describe("yt-hook (MAIN world) trong jsdom", () => {
     expect(await r1.text()).toBe('{"events":[]}');
     const r2 = await window.fetch("https://www.youtube.com/other");
     expect(await r2.text()).toBe("other");
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 50));
     expect(got.filter((m) => m.kind === "timedtext")).toHaveLength(1);
 
     // content script nghe muộn → xin replay → nhận lại bộ đệm
     got.length = 0;
     window.postMessage({ source: "subtrans-cs", kind: "replay" }, location.origin);
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 50));
     expect(got.filter((m) => m.kind === "timedtext")).toHaveLength(1);
 
     // fetchTimedtext chỉ chấp nhận endpoint timedtext cùng origin
     got.length = 0;
     window.postMessage({ source: "subtrans-cs", kind: "fetchTimedtext", reqId: "bad", url: "https://evil.example/x" }, location.origin);
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 50));
     expect(got.find((m) => m.reqId === "bad")).toMatchObject({ ok: false });
 
     // Cài 2 lần không patch chồng
