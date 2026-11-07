@@ -72,6 +72,8 @@ type DriveItem struct {
 	DurationSec   float64 `json:"duration_sec"`  // 0 nếu Drive chưa xử lý xong metadata
 	SubtitleID    string  `json:"subtitle_id"`   // ID file .srt/.vtt trùng tên trong cùng thư mục (nếu có)
 	SubtitleName  string  `json:"subtitle_name"` // tên file phụ đề tìm thấy
+	ViSubtitleID   string  `json:"vi_subtitle_id"`   // ID file phụ đề tiếng Việt đã dịch sẵn (_vi.srt...), nếu có
+	ViSubtitleName string  `json:"vi_subtitle_name"` // tên file phụ đề tiếng Việt
 }
 
 // DriveManager quản lý OAuth2, token, duyệt file và proxy stream Google Drive
@@ -84,10 +86,12 @@ type DriveManager struct {
 	loginActive bool
 
 	streamToken string // token ngẫu nhiên bảo vệ route /drive/stream (chống tiến trình khác trên máy gọi bừa)
-	subCache    map[string][]WhisperSegment
+	subCache    *segmentLRU // phụ đề Drive đã tải, giữ tối đa driveSubCacheMax video gần nhất (BUG-19)
 	names       map[string]string
 	durations   map[string]float64
 	subIDs      map[string]string // videoID -> subtitle fileID (ghi nhận khi quét cây thư mục)
+	viSubIDs    map[string]string // videoID -> fileID phụ đề tiếng Việt
+	viSubCache  *segmentLRU       // phụ đề tiếng Việt đã tải (cùng giới hạn driveSubCacheMax)
 	// Không đặt Timeout tổng vì response là luồng video dài
 	httpClient *http.Client
 }
@@ -113,10 +117,12 @@ func GetDriveManager() *DriveManager {
 		driveMgr = &DriveManager{
 			tokenPath:   filepath.Join(dir, "drive_token.json"),
 			streamToken: hex.EncodeToString(tb),
-			subCache:    make(map[string][]WhisperSegment),
+			subCache:    newSegmentLRU(driveSubCacheMax),
 			names:       make(map[string]string),
 			durations:   make(map[string]float64),
 			subIDs:      make(map[string]string),
+			viSubIDs:    make(map[string]string),
+			viSubCache:  newSegmentLRU(driveSubCacheMax),
 			httpClient: &http.Client{
 				Transport: &http.Transport{
 					Proxy:                 http.ProxyFromEnvironment,
@@ -201,7 +207,18 @@ func GetDriveSubtitleSegments(path string) []WhisperSegment {
 	dm := GetDriveManager()
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
-	return dm.subCache[DriveFileIDFromPath(path)]
+	return dm.subCache.Get(DriveFileIDFromPath(path))
+}
+
+// GetDriveViSubtitleSegments trả về phụ đề tiếng Việt đã dịch sẵn (_vi.srt) đã tải trong RAM cho video Drive (nil nếu không có)
+func GetDriveViSubtitleSegments(path string) []WhisperSegment {
+	if !IsDrivePath(path) {
+		return nil
+	}
+	dm := GetDriveManager()
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	return dm.viSubCache.Get(DriveFileIDFromPath(path))
 }
 
 // StreamURL tạo URL loopback proxy cho 1 fileId
@@ -331,7 +348,8 @@ func (p *persistingTokenSource) lastAccessToken() string {
 func (dm *DriveManager) dropSession() {
 	dm.mu.Lock()
 	dm.src = nil
-	dm.subCache = make(map[string][]WhisperSegment)
+	dm.subCache.Clear()
+	dm.viSubCache.Clear()
 	dm.mu.Unlock()
 
 	dm.fileMu.Lock()
@@ -601,11 +619,6 @@ func openBrowser(target string) error {
 // Duyệt thư mục / lọc video / ghép phụ đề
 // ---------------------------------------------------------------------------
 
-func escapeDriveQuery(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	return strings.ReplaceAll(s, `'`, `\'`)
-}
-
 // ListDriveItems liệt kê thư mục con + video trong folderID:
 // - "" hoặc "root": Drive của tôi (My Drive)
 // - "shared_with_me": Được chia sẻ với tôi (Shared with me)
@@ -631,15 +644,9 @@ func (dm *DriveManager) ListDriveItems(folderID string) ([]DriveItem, error) {
 		return nil, fmt.Errorf("không thể khởi tạo Google Drive client: %w", err)
 	}
 
-	mimeFilter := fmt.Sprintf("(mimeType = '%s' or mimeType = '%s' or mimeType contains 'video/' or name contains '.srt' or name contains '.vtt')",
-		driveFolderMime, driveShortcutMime)
-
-	var q string
-	if folderID == "shared_with_me" {
-		q = fmt.Sprintf("sharedWithMe = true and trashed = false and %s", mimeFilter)
-	} else {
-		q = fmt.Sprintf("'%s' in parents and trashed = false and %s", escapeDriveQuery(folderID), mimeFilter)
-	}
+	// Lưu ý: toán tử `name contains` của Drive chỉ khớp TIỀN TỐ của tên (không khớp đuôi .srt/.vtt),
+	// nên không lọc phụ đề ở phía server mà liệt kê hết rồi lọc theo đuôi ở phía client bên dưới.
+	q := driveListQuery(folderID)
 
 	var files []*drive.File
 	pageToken := ""
@@ -704,6 +711,13 @@ func (dm *DriveManager) ListDriveItems(folderID string) ([]DriveItem, error) {
 	}
 
 	attachSubtitles(videos, subs)
+	matchedSubs := 0
+	for _, v := range videos {
+		if v.SubtitleID != "" {
+			matchedSubs++
+		}
+	}
+	DiagLog("[drive list] thư mục=%s: %d video, %d file phụ đề, %d video ghép được phụ đề", folderID, len(videos), len(subs), matchedSubs)
 
 	dm.mu.Lock()
 	for _, v := range videos {
@@ -722,6 +736,23 @@ func (dm *DriveManager) GetDuration(fileID string) float64 {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 	return dm.durations[fileID]
+}
+
+// SetDuration ghi nhận thời lượng thật (vd. từ <video>.duration) đè lên giá trị ước lượng theo dung lượng file.
+func (dm *DriveManager) SetDuration(fileID string, sec float64) {
+	if fileID == "" || sec <= 0 {
+		return
+	}
+	dm.mu.Lock()
+	dm.durations[fileID] = sec
+	dm.mu.Unlock()
+}
+
+// ViSubtitleIDFor trả về ID phụ đề tiếng Việt đi kèm đã biết của video (từ lúc quét cây thư mục)
+func (dm *DriveManager) ViSubtitleIDFor(videoID string) string {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	return dm.viSubIDs[videoID]
 }
 
 // SubtitleIDFor trả về ID phụ đề đi kèm đã biết của video (từ lúc quét cây thư mục)
@@ -786,51 +817,20 @@ func (dm *DriveManager) FetchDurationFromDrive(fileID string) float64 {
 	return 1800 // mặc định 30 phút
 }
 
-// attachSubtitles ghép file phụ đề trùng tên (tên video + hậu tố ngôn ngữ tùy chọn) vào từng video
+// attachSubtitles ghép file phụ đề trùng tên (tên video + hậu tố ngôn ngữ tùy chọn) vào từng video:
+// phụ đề gốc (en) vào SubtitleID, phụ đề tiếng Việt đã dịch sẵn (vi) vào ViSubtitleID. Xem matchSubtitles.
 func attachSubtitles(videos []DriveItem, subs []*drive.File) {
 	if len(subs) == 0 {
 		return
 	}
-	enSuffix := map[string]bool{"en": true, "eng": true, "en_us": true, "en-us": true, "english": true}
-	viSuffix := map[string]bool{"vi": true, "vn": true, "vie": true, "vietnamese": true}
-
+	cands := make([]subCandidate, len(subs))
+	for i, f := range subs {
+		cands[i] = subCandidate{ID: f.Id, Name: f.Name}
+	}
 	for i := range videos {
-		vstem := strings.ToLower(strings.TrimSuffix(videos[i].Name, filepath.Ext(videos[i].Name)))
-		bestScore := 0
-		for _, s := range subs {
-			sl := strings.ToLower(s.Name)
-			isSRT := strings.HasSuffix(sl, ".srt")
-			sstem := strings.TrimSuffix(strings.TrimSuffix(sl, ".srt"), ".vtt")
-
-			score := 0
-			if sstem == vstem {
-				score = 30
-			} else if strings.HasPrefix(sstem, vstem) && len(sstem) > len(vstem) {
-				rest := sstem[len(vstem):]
-				if strings.ContainsRune("._- ", rune(rest[0])) {
-					lang := strings.TrimLeft(rest, "._- ")
-					switch {
-					case enSuffix[lang]:
-						score = 40
-					case viSuffix[lang]:
-						score = 0 // phụ đề đã dịch, không dùng làm nguồn
-					default:
-						score = 10
-					}
-				}
-			}
-			if score == 0 {
-				continue
-			}
-			if isSRT {
-				score++
-			}
-			if score > bestScore {
-				bestScore = score
-				videos[i].SubtitleID = s.Id
-				videos[i].SubtitleName = s.Name
-			}
-		}
+		m := matchSubtitles(videos[i].Name, cands)
+		videos[i].SubtitleID, videos[i].SubtitleName = m.EnID, m.EnName
+		videos[i].ViSubtitleID, videos[i].ViSubtitleName = m.ViID, m.ViName
 	}
 }
 
@@ -906,8 +906,8 @@ func (dm *DriveManager) upstreamGet(ctx context.Context, method, fileID, rangeHd
 	return nil, fmt.Errorf("lỗi mạng khi gọi Google Drive: %w", lastErr)
 }
 
-// fetchDriveSubtitle tải file .srt/.vtt về RAM và parse thành segment (bypass Whisper STT)
-func (dm *DriveManager) fetchDriveSubtitle(videoID, subID string) ([]WhisperSegment, error) {
+// fetchSubtitleSegs tải file .srt/.vtt về RAM và parse thành segment (không ghi đĩa)
+func (dm *DriveManager) fetchSubtitleSegs(subID string) ([]WhisperSegment, error) {
 	if !driveFileIDRe.MatchString(subID) {
 		return nil, fmt.Errorf("subtitle ID không hợp lệ")
 	}
@@ -933,30 +933,79 @@ func (dm *DriveManager) fetchDriveSubtitle(videoID, subID string) ([]WhisperSegm
 	if len(segs) == 0 {
 		return nil, fmt.Errorf("file phụ đề trống hoặc sai định dạng")
 	}
+	return segs, nil
+}
+
+// fetchDriveSubtitle tải phụ đề gốc (bypass Whisper STT) vào subCache
+func (dm *DriveManager) fetchDriveSubtitle(videoID, subID string) ([]WhisperSegment, error) {
+	segs, err := dm.fetchSubtitleSegs(subID)
+	if err != nil {
+		return nil, err
+	}
 	dm.mu.Lock()
-	dm.subCache[videoID] = segs
+	dm.subCache.Put(videoID, segs)
+	dm.mu.Unlock()
+	return segs, nil
+}
+
+// fetchDriveViSubtitle tải phụ đề tiếng Việt đã dịch sẵn (bypass cả Whisper lẫn bước dịch) vào viSubCache
+func (dm *DriveManager) fetchDriveViSubtitle(videoID, subID string) ([]WhisperSegment, error) {
+	segs, err := dm.fetchSubtitleSegs(subID)
+	if err != nil {
+		return nil, err
+	}
+	dm.mu.Lock()
+	dm.viSubCache.Put(videoID, segs)
 	dm.mu.Unlock()
 	return segs, nil
 }
 
 // PrepareVideo ghi nhớ tên file và nạp phụ đề đi kèm (nếu có) trước khi mở video.
-// Lỗi tải phụ đề không chặn việc phát: tự động quay về Whisper STT.
+// Phụ đề gốc (subtitleID) và phụ đề tiếng Việt (đã biết từ lúc quét thư mục) được tải song song.
+// Lỗi tải phụ đề không chặn việc phát: tự động quay về Whisper STT / dịch máy.
 func (dm *DriveManager) PrepareVideo(fileID, name, subtitleID string) (hasSub bool) {
 	dm.mu.Lock()
 	if name != "" {
 		dm.names[fileID] = name
 	}
-	delete(dm.subCache, fileID)
-	dm.mu.Unlock()
-
+	dm.subCache.Delete(fileID)
+	dm.viSubCache.Delete(fileID)
+	viID := dm.viSubIDs[fileID]
+	// Người gọi có thể không truyền subtitleID (mở bằng đường dẫn, link dán...): lấy ID đã ghi nhận lúc quét thư mục
 	if subtitleID == "" {
-		return false
+		subtitleID = dm.subIDs[fileID]
 	}
-	if _, err := dm.fetchDriveSubtitle(fileID, subtitleID); err != nil {
-		fmt.Fprintf(os.Stderr, "[drive] bỏ qua phụ đề có sẵn: %v\n", err)
-		return false
+	dm.mu.Unlock()
+	DiagLog("[drive] chuẩn bị video=%s: phụ đề gốc=%q, phụ đề tiếng Việt=%q", fileID, subtitleID, viID)
+
+	var wg sync.WaitGroup
+	var enOK, viOK bool
+	if subtitleID != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := dm.fetchDriveSubtitle(fileID, subtitleID); err != nil {
+				fmt.Fprintf(os.Stderr, "[drive] bỏ qua phụ đề có sẵn: %v\n", err)
+				DiagLog("[drive] video=%s: tải phụ đề %s thất bại, quay về Whisper: %v", fileID, subtitleID, err)
+				return
+			}
+			enOK = true
+		}()
 	}
-	return true
+	if viID != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := dm.fetchDriveViSubtitle(fileID, viID); err != nil {
+				fmt.Fprintf(os.Stderr, "[drive] bỏ qua phụ đề tiếng Việt có sẵn: %v\n", err)
+				DiagLog("[drive] video=%s: tải phụ đề tiếng Việt %s thất bại, quay về dịch máy: %v", fileID, viID, err)
+				return
+			}
+			viOK = true
+		}()
+	}
+	wg.Wait()
+	return enOK || viOK
 }
 
 // ---------------------------------------------------------------------------
@@ -981,6 +1030,12 @@ func ServeDriveStream(w http.ResponseWriter, r *http.Request) {
 	fileID := q.Get("id")
 	if !driveFileIDRe.MatchString(fileID) {
 		http.Error(w, "Invalid file id", http.StatusBadRequest)
+		return
+	}
+
+	// File đang/đã được DriveSpool tải về đĩa bằng 1 kết nối liên tục: phục vụ Range từ đó để trình phát không phải
+	// trả ~0,75s độ trễ Drive cho từng request nhỏ. Không phục vụ được (tua xa, spool hỏng...) thì đi thẳng Drive như cũ.
+	if serveFromSpool(w, r, fileID) {
 		return
 	}
 
@@ -1088,12 +1143,15 @@ func (dm *DriveManager) scanDriveRecursive(folderID, folderName string, depth in
 				Name:     it.Name,
 				Path:     filePath,
 				IsDir:    false,
-				HasCache: HasCachedSubtitles(filePath) || it.SubtitleID != "",
+				HasCache: HasCachedSubtitles(filePath) || it.SubtitleID != "" || it.ViSubtitleID != "",
 			})
 			dm.mu.Lock()
 			dm.names[it.ID] = it.Name
 			if it.SubtitleID != "" {
 				dm.subIDs[it.ID] = it.SubtitleID
+			}
+			if it.ViSubtitleID != "" {
+				dm.viSubIDs[it.ID] = it.ViSubtitleID
 			}
 			if it.DurationSec > 0 {
 				dm.durations[it.ID] = it.DurationSec
@@ -1195,12 +1253,15 @@ func (dm *DriveManager) ScanDriveFolderProgressive(folderID, folderName string, 
 				Name:     it.Name,
 				Path:     filePath,
 				IsDir:    false,
-				HasCache: HasCachedSubtitles(filePath) || it.SubtitleID != "",
+				HasCache: HasCachedSubtitles(filePath) || it.SubtitleID != "" || it.ViSubtitleID != "",
 			})
 			dm.mu.Lock()
 			dm.names[it.ID] = it.Name
 			if it.SubtitleID != "" {
 				dm.subIDs[it.ID] = it.SubtitleID
+			}
+			if it.ViSubtitleID != "" {
+				dm.viSubIDs[it.ID] = it.ViSubtitleID
 			}
 			if it.DurationSec > 0 {
 				dm.durations[it.ID] = it.DurationSec

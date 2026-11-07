@@ -44,7 +44,23 @@ import {
   upsertSubtitles,
   findSubtitleAtTime,
 } from "./lib/subtitles";
+import { shouldReportDuration } from "./lib/duration";
+import {
+  PlaybackPrepState,
+  canPlayMime,
+  createPipelineStarter,
+  DeferredPipelineStarter,
+  describeMediaError,
+  formatPercent,
+  isFixableByTranscode,
+  isSilentVideoDecodeFailure,
+  playbackStageLabel,
+  playedSeconds,
+  resolveTreeSelection,
+  shouldRequestTranscode,
+} from "./lib/playback";
 import { LandingPage } from "./components/LandingPage";
+import { countRender } from "./lib/renderProbe";
 import { SetupWizard } from "./components/SetupWizard";
 import { UpdateNotification } from "./components/UpdateNotification";
 import { GoogleDrivePicker, DriveItem } from "./components/GoogleDrivePicker";
@@ -60,6 +76,10 @@ interface VideoInfo {
   playable: boolean;
   playable_reason: string;
   done_blocks: number[];
+  video_codec?: string;
+  audio_codec?: string;
+  check_mime?: string; // codec phụ thuộc máy (AV1/HEVC): kiểm tra MediaSource.isTypeSupported
+  converted?: boolean; // media_url đang là bản đã chuyển mã
 }
 
 interface PipelineStatus {
@@ -71,6 +91,7 @@ interface PipelineStatus {
   ahead_sec: number;
   video: string;
   translator_mode?: "api" | "cloud" | "local_ai";
+  translator_reason?: string;
 }
 
 export interface FolderNode {
@@ -129,6 +150,10 @@ declare global {
             sec: number,
             playing: boolean,
           ) => Promise<void>;
+          UpdateVideoDuration?: (path: string, sec: number) => Promise<void>;
+          PreparePlayback?: (path: string, force: boolean) => Promise<void>;
+          CancelPlayback?: () => Promise<void>;
+          LogPlaybackEvent?: (path: string, event: string, ms: number) => Promise<void>;
           StopPipeline: () => Promise<void>;
           LoadCachedSubtitles: (path: string) => Promise<SubtitleItem[]>;
           ExportSRT: (path: string, mode: string) => Promise<string>;
@@ -231,6 +256,7 @@ const FolderTreeItem = memo(
     onSelectVideo: (path: string) => void;
     onRemoveRoot?: (path: string) => void;
   }) => {
+    countRender("FolderTreeItem");
     const [expanded, setExpanded] = useState<boolean>(depth <= 1);
     const activeItemRef = useRef<HTMLDivElement>(null);
     const isExpanded = forceExpand || expanded;
@@ -364,6 +390,56 @@ const FolderTreeItem = memo(
   },
 );
 
+// So sánh pipeline_status: backend bắn mỗi 500ms kể cả khi chẳng có gì đổi.
+// ahead_sec chỉ hiển thị làm tròn theo giây nên so sánh theo Math.round.
+function isSamePipelineStatus(
+  a: PipelineStatus | null,
+  b: PipelineStatus,
+): boolean {
+  return (
+    !!a &&
+    a.state === b.state &&
+    a.message === b.message &&
+    a.block === b.block &&
+    a.done_blocks === b.done_blocks &&
+    a.total_blocks === b.total_blocks &&
+    a.video === b.video &&
+    a.translator_mode === b.translator_mode &&
+    a.translator_reason === b.translator_reason &&
+    Math.round(a.ahead_sec) === Math.round(b.ahead_sec)
+  );
+}
+
+// Dải vàng các block đã dịch xong trên seekbar (memo: không dựng lại tối đa ~120 thẻ div mỗi nhịp currentTime)
+const DoneBlocksStrip = memo(
+  ({
+    doneBlocks,
+    duration,
+    blockSec,
+  }: {
+    doneBlocks: number[];
+    duration: number;
+    blockSec: number;
+  }) => {
+    if (duration <= 0) return null;
+    return (
+      <>
+        {doneBlocks.map((b) => {
+          const left = ((b * blockSec) / duration) * 100;
+          const width = (blockSec / duration) * 100;
+          return (
+            <div
+              key={b}
+              style={{ left: `${left}%`, width: `${width}%` }}
+              className="absolute top-0 bottom-0 bg-amber-500/35"
+            />
+          );
+        })}
+      </>
+    );
+  },
+);
+
 // Panel cây thư mục khóa học bên trái
 const CourseTreePanel = memo(
   ({
@@ -391,6 +467,7 @@ const CourseTreePanel = memo(
     onClearAll: () => void;
     onClose: () => void;
   }) => {
+    countRender("CourseTreePanel");
     const [searchQuery, setSearchQuery] = useState<string>("");
     const allVideos = useMemo(() => flattenVideoNodes(roots), [roots]);
     const filteredRoots = useMemo(
@@ -532,6 +609,7 @@ const SubtitleListPanel = memo(
     onSeek: (sec: number) => void;
     onClose: () => void;
   }) => {
+    countRender("SubtitleListPanel");
     const activeItemRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -608,6 +686,7 @@ const SubtitleListPanel = memo(
 );
 
 export const App: React.FC = () => {
+  countRender("App");
   // Navigation View: 'landing' (Giới thiệu & Tính năng) hoặc 'player' (Trình phát video)
   const [viewMode, setViewMode] = useState<"landing" | "player">("landing");
 
@@ -655,6 +734,7 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const pipelineStarterRef = useRef<DeferredPipelineStarter | null>(null);
   const pendingAutoPlayRef = useRef<string | null>(null);
   const currentVideoPathRef = useRef<string | undefined>(undefined);
   currentVideoPathRef.current = videoInfo?.path;
@@ -680,6 +760,16 @@ export const App: React.FC = () => {
   );
   const [doneBlocks, setDoneBlocks] = useState<number[]>([]);
   const doneBlocksRef = useRef<number[]>([]);
+  // Ref luôn trỏ giá trị mới nhất để vòng syncFrame / listener keydown không phải hủy-đăng ký lại
+  const subtitlesRef = useRef<SubtitleItem[]>([]);
+  const subtitleOffsetRef = useRef<number>(0);
+  const currentTimeRef = useRef<number>(0);
+  subtitlesRef.current = subtitles;
+  subtitleOffsetRef.current = subtitleOffset;
+  currentTimeRef.current = currentTime;
+  doneBlocksRef.current = doneBlocks;
+  const currentSubtitleRef = useRef<SubtitleItem | null>(null);
+  currentSubtitleRef.current = currentSubtitle;
 
   // Refs
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -687,7 +777,23 @@ export const App: React.FC = () => {
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const seekDebounceTimerRef = useRef<any>(null);
   const lastPlayheadUpdateRef = useRef<number>(0);
+  // BUG-08: đồng bộ thời lượng thật của <video> về backend (video Drive mở với giá trị ước lượng)
+  const videoInfoRef = useRef<VideoInfo | null>(null);
+  videoInfoRef.current = videoInfo;
+  const reportedDurationRef = useRef<{ path: string; sec: number } | null>(null);
+  const reportRealDuration = useCallback((real: number) => {
+    const info = videoInfoRef.current;
+    if (!info?.path) return;
+    const last =
+      reportedDurationRef.current?.path === info.path
+        ? reportedDurationRef.current.sec
+        : undefined;
+    if (!shouldReportDuration(real, info.duration_sec, last)) return;
+    reportedDurationRef.current = { path: info.path, sec: real };
+    void window.go?.main?.App?.UpdateVideoDuration?.(info.path, real);
+  }, []);
   const lastUiTimeRef = useRef<number>(0);
+  const lastLoggedTranslatorReasonRef = useRef<string>("");
 
   // Danh sách video phẳng theo thứ tự từ cây thư mục
   const playlistVideos = useMemo(
@@ -705,6 +811,324 @@ export const App: React.FC = () => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(""), 2500);
   }, []);
+
+  // ---------------------------------------------------------------------------
+  // Nhật ký thời gian tải video (ghi vào %LOCALAPPDATA%\SubTrans\logs\playback_timing.log)
+  // để biết chính xác video chậm ở bước nào: gọi backend, tải dữ liệu, giải mã khung hình...
+  // ---------------------------------------------------------------------------
+  const openT0Ref = useRef<number>(0);
+  const openPathRef = useRef<string>("");
+  const loggedEventsRef = useRef<Set<string>>(new Set());
+  const waitingCountRef = useRef<number>(0);
+  const logPlayback = useCallback((event: string, once = true) => {
+    const path = openPathRef.current;
+    if (!path) return;
+    if (once) {
+      if (loggedEventsRef.current.has(event)) return;
+      loggedEventsRef.current.add(event);
+    }
+    const ms = performance.now() - openT0Ref.current;
+    void window.go?.main?.App?.LogPlaybackEvent?.(path, event, ms);
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Phát video: chuyển mã nền khi WebView2 không giải mã được (AV1/HEVC/10-bit/MKV/AVI/AC3...)
+  // Pipeline phụ đề luôn đọc audio từ file gốc nên vẫn chạy bình thường trong lúc chuyển mã.
+  // ---------------------------------------------------------------------------
+  const [playbackPrep, setPlaybackPrep] = useState<PlaybackPrepState | null>(
+    null,
+  );
+  // pending: đang chờ backend chuyển mã; forced: đã thử mã hóa lại toàn bộ hình (không thử lần nữa)
+  const playbackAttemptRef = useRef<{
+    path: string;
+    forced: boolean;
+    pending: boolean;
+  }>({ path: "", forced: false, pending: false });
+  // URL mà thẻ <video> đang phát: dùng để bỏ qua lỗi của src cũ khi vừa đổi src
+  const activeMediaUrlRef = useRef<string>("");
+
+  const requestPlayback = useCallback(
+    (path: string, force: boolean, reason?: string) => {
+      // Tuyệt đối không chuyển mã video Google Drive (tránh tải cả file qua mạng làm nghẽn app)
+      if (!shouldRequestTranscode(path)) {
+        console.warn("[Video] Bỏ qua chuyển mã nền cho video Google Drive:", path);
+        return;
+      }
+      const att = playbackAttemptRef.current;
+      const same = att.path === path;
+      if (same && att.pending) return;
+      playbackAttemptRef.current = {
+        path,
+        forced: (same && att.forced) || force,
+        pending: true,
+      };
+      setPlaybackPrep({ path, percent: 0, stage: "probe", reason });
+      const prepare = window.go?.main?.App?.PreparePlayback;
+      if (!prepare) {
+        playbackAttemptRef.current.pending = false;
+        setPlaybackPrep({
+          path,
+          percent: 0,
+          stage: "probe",
+          reason,
+          error: "Bản backend hiện tại chưa hỗ trợ chuyển mã (cần build lại app).",
+        });
+        return;
+      }
+      prepare(path, force).catch((err: any) => {
+        playbackAttemptRef.current.pending = false;
+        setPlaybackPrep({
+          path,
+          percent: 0,
+          stage: "probe",
+          reason,
+          error: String(err?.message || err),
+        });
+      });
+    },
+    [],
+  );
+
+  const cancelPlaybackPrep = useCallback(() => {
+    playbackAttemptRef.current.pending = false;
+    setPlaybackPrep(null);
+    void window.go?.main?.App?.CancelPlayback?.();
+  }, []);
+
+  // Đổi src sang bản đã chuyển mã, giữ nguyên vị trí đang xem
+  const swapVideoSource = useCallback((url: string) => {
+    const v = videoRef.current;
+    if (!v) return;
+    const resumeAt = v.currentTime || 0;
+    // File gốc lỗi / chưa tải được thì cũng tự phát bản mới
+    const resume = !v.paused || v.error != null || v.readyState === 0;
+    activeMediaUrlRef.current = url;
+    v.addEventListener(
+      "loadedmetadata",
+      () => {
+        if (resumeAt > 0.5 && isFinite(v.duration)) {
+          v.currentTime = Math.min(resumeAt, Math.max(0, v.duration - 0.25));
+        }
+        if (resume) {
+          v.play()
+            .then(() => setIsPlaying(true))
+            .catch((err) => console.warn("[Video] play() sau khi đổi src lỗi:", err));
+        }
+      },
+      { once: true },
+    );
+    v.src = url;
+  }, []);
+
+  const handleVideoError = useCallback(
+    (e: React.SyntheticEvent<HTMLVideoElement>) => {
+      const el = e.currentTarget;
+      const info = videoInfoRef.current;
+      const mediaErr = el.error;
+      if (!info?.path || !mediaErr) return;
+      // Lỗi của src cũ (vừa đổi video / đổi sang bản chuyển mã) -> bỏ qua
+      if (
+        activeMediaUrlRef.current &&
+        el.currentSrc &&
+        el.currentSrc !== activeMediaUrlRef.current
+      ) {
+        return;
+      }
+      const msg = describeMediaError(mediaErr.code, mediaErr.message);
+      logPlayback(`<video> error code=${mediaErr.code} ${mediaErr.message || ""}`);
+      console.warn("[Video] MediaError", mediaErr.code, mediaErr.message, {
+        path: info.path,
+        video_codec: info.video_codec,
+        audio_codec: info.audio_codec,
+        src: el.currentSrc,
+      });
+
+      // Với video Google Drive: không gọi requestPlayback chuyển mã toàn bộ file qua mạng; chỉ báo lỗi
+      if (info.path.startsWith("gdrive://")) {
+        if (mediaErr.code !== 1) {
+          showToast(`Lỗi phát video Google Drive: ${msg}`);
+        }
+        return;
+      }
+
+      const att = playbackAttemptRef.current;
+      // Đang chuyển mã: file gốc lỗi là chuyện dự kiến
+      if (att.path === info.path && att.pending) return;
+      if (!isFixableByTranscode(mediaErr.code)) {
+        if (mediaErr.code !== 1) showToast(msg);
+        return;
+      }
+      if (att.path === info.path && att.forced) {
+        setPlaybackPrep({
+          path: info.path,
+          percent: 0,
+          stage: "transcode",
+          error: `Video vẫn không phát được sau khi chuyển mã: ${msg}`,
+        });
+        return;
+      }
+      requestPlayback(info.path, true, msg);
+    },
+    [requestPlayback, showToast, logPlayback],
+  );
+
+  // Ghi các mốc tải của thẻ <video> (mỗi sự kiện 1 lần / video; waiting/stalled tối đa 15 lần)
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !videoInfo?.path) return;
+    const once = (name: string, label: string) => {
+      const h = () => {
+        logPlayback(label);
+        if (name === "playing") {
+          pipelineStarterRef.current?.onPlaying();
+        }
+        if (name === "loadeddata" && (v as any).requestVideoFrameCallback) {
+          (v as any).requestVideoFrameCallback(() =>
+            logPlayback(`khung hình đầu tiên hiện ra (${v.videoWidth}x${v.videoHeight})`),
+          );
+        }
+      };
+      v.addEventListener(name, h);
+      return () => v.removeEventListener(name, h);
+    };
+    const offs = [
+      once("loadstart", "<video> loadstart (bắt đầu tải)"),
+      once("loadedmetadata", "<video> loadedmetadata"),
+      once("loadeddata", "<video> loadeddata"),
+      once("canplay", "<video> canplay"),
+      once("playing", "<video> playing"),
+    ];
+    const onWait = (e: Event) => {
+      if (waitingCountRef.current >= 15) return;
+      waitingCountRef.current += 1;
+      let buffered = "";
+      try {
+        for (let i = 0; i < v.buffered.length; i++) {
+          buffered += `[${v.buffered.start(i).toFixed(1)}-${v.buffered.end(i).toFixed(1)}]`;
+        }
+      } catch {
+        /* bỏ qua */
+      }
+      logPlayback(
+        `<video> ${e.type} t=${v.currentTime.toFixed(1)}s rs=${v.readyState} ns=${v.networkState} buf=${buffered || "-"}`,
+        false,
+      );
+    };
+    v.addEventListener("waiting", onWait);
+    v.addEventListener("stalled", onWait);
+    return () => {
+      offs.forEach((off) => off());
+      v.removeEventListener("waiting", onWait);
+      v.removeEventListener("stalled", onWait);
+    };
+  }, [videoInfo?.path, logPlayback]);
+
+  // Bắt trường hợp "chỉ có tiếng, màn hình đen": WebView2 không bắn onError khi bỏ luồng hình
+  // không giải mã được, nên kiểm tra 1 lần cho mỗi src sau khi đã phát được ~1 giây.
+  const decodeCheckedSrcRef = useRef<string>("");
+  const handleVideoTimeCheck = useCallback(
+    (e: React.SyntheticEvent<HTMLVideoElement>) => {
+      const v = e.currentTarget;
+      const info = videoInfoRef.current;
+      if (!info?.path || !v.currentSrc) return;
+      if (decodeCheckedSrcRef.current === v.currentSrc) return;
+      if (playedSeconds(v) < 1.0 || v.readyState < 2) return;
+      decodeCheckedSrcRef.current = v.currentSrc;
+      if (activeMediaUrlRef.current && v.currentSrc !== activeMediaUrlRef.current) return;
+      // Backend biết file có hình không (ffprobe); video Drive chưa probe thì coi như có hình
+      const expectVideo = !!info.video_codec || info.path.startsWith("gdrive://");
+      if (!isSilentVideoDecodeFailure(v, expectVideo)) return;
+
+      // Với video Google Drive: không gọi requestPlayback chuyển mã qua mạng; chỉ ghi log cảnh báo
+      if (info.path.startsWith("gdrive://")) {
+        console.warn("[Video] Video Google Drive chưa giải mã được hình (có thể do mạng đang tải chậm):", {
+          path: info.path,
+          src: v.currentSrc,
+        });
+        return;
+      }
+
+      const att = playbackAttemptRef.current;
+      if (att.path === info.path && att.pending) return;
+      const msg = `WebView2 không giải mã được hình${
+        info.video_codec ? ` ${info.video_codec.toUpperCase()}` : ""
+      } (chỉ phát được tiếng)`;
+      console.warn("[Video] Không có khung hình nào được giải mã:", {
+        path: info.path,
+        video_codec: info.video_codec,
+        src: v.currentSrc,
+      });
+      if (att.path === info.path && att.forced) {
+        setPlaybackPrep({
+          path: info.path,
+          percent: 0,
+          stage: "transcode",
+          error: `Video vẫn không hiện hình sau khi chuyển mã: ${msg}`,
+        });
+        return;
+      }
+      requestPlayback(info.path, true, msg);
+    },
+    [requestPlayback],
+  );
+
+  // Sự kiện tiến độ / hoàn tất / lỗi của job chuyển mã từ backend
+  useEffect(() => {
+    const rt = window.runtime;
+    if (!rt) return;
+    const offProgress = rt.EventsOn(
+      "playback_progress",
+      (p: { path: string; percent: number; stage: string }) => {
+        if (p.path !== videoInfoRef.current?.path) return;
+        setPlaybackPrep((prev) => ({
+          path: p.path,
+          percent: p.percent,
+          stage: p.stage,
+          reason: prev?.path === p.path ? prev.reason : undefined,
+        }));
+      },
+    );
+    const offReady = rt.EventsOn(
+      "playback_ready",
+      (p: { path: string; media_url: string }) => {
+        if (p.path !== videoInfoRef.current?.path) return;
+        playbackAttemptRef.current.pending = false;
+        swapVideoSource(p.media_url);
+        setVideoInfo((prev) =>
+          prev && prev.path === p.path
+            ? {
+                ...prev,
+                media_url: p.media_url,
+                playable: true,
+                converted: true,
+                check_mime: "",
+              }
+            : prev,
+        );
+        setPlaybackPrep(null);
+        showToast("Đã chuyển mã xong, đang phát bản tương thích");
+      },
+    );
+    const offError = rt.EventsOn(
+      "playback_error",
+      (p: { path: string; error: string }) => {
+        if (p.path !== videoInfoRef.current?.path) return;
+        playbackAttemptRef.current.pending = false;
+        setPlaybackPrep((prev) => ({
+          path: p.path,
+          percent: prev?.percent ?? 0,
+          stage: prev?.stage ?? "transcode",
+          reason: prev?.reason,
+          error: p.error,
+        }));
+      },
+    );
+    return () => {
+      offProgress?.();
+      offReady?.();
+      offError?.();
+    };
+  }, [swapVideoSource, showToast]);
 
   // Vị trí tùy biến của thanh phụ đề (người dùng có thể kéo thả tự do)
   const [subPos, setSubPos] = useState<{ xPct: number; yPct: number } | null>(
@@ -921,6 +1345,19 @@ export const App: React.FC = () => {
 
       if (!selected && !driveItem) return;
 
+      const isDrive = !!driveItem || (typeof selected === "string" && selected.startsWith("gdrive://"));
+      const driveFileID = driveItem?.id || (isDrive ? (selected as string).replace("gdrive://", "") : "");
+
+      openT0Ref.current = performance.now();
+      openPathRef.current = isDrive ? `gdrive://${driveFileID}` : (selected as string);
+      loggedEventsRef.current = new Set();
+      waitingCountRef.current = 0;
+      logPlayback("mở video: bắt đầu");
+      if (pipelineStarterRef.current) {
+        pipelineStarterRef.current.cancel();
+        pipelineStarterRef.current = null;
+      }
+
       try {
         // 1. Reset state cũ
         setSubtitles([]);
@@ -929,13 +1366,14 @@ export const App: React.FC = () => {
         setDoneBlocks([]);
         setCurrentTime(0);
         lastUiTimeRef.current = 0;
+        setPlaybackPrep(null);
 
         // 2. Gọi OpenVideo backend (video Google Drive: stream qua loopback proxy, không tải về đĩa)
-        const info = driveItem
+        const info = isDrive
           ? await window.go?.main?.App?.OpenDriveVideo?.(
-              driveItem.id,
-              driveItem.name,
-              driveItem.subtitle_id || "",
+              driveFileID,
+              driveItem?.name || "",
+              driveItem?.subtitle_id || "",
             )
           : await window.go?.main?.App?.OpenVideo(selected as string);
         if (!info) return;
@@ -948,29 +1386,65 @@ export const App: React.FC = () => {
         setViewMode("player");
 
         // 3. Nạp cache phụ đề nếu có (bao gồm cả phụ đề gốc _en.srt đi kèm)
+        openPathRef.current = info.path;
+        logPlayback("backend OpenVideo trả về");
         const cached = await window.go?.main?.App?.LoadCachedSubtitles(
           info.path,
         );
         if (cached && cached.length > 0) {
           setSubtitles(cached);
         }
+        logPlayback(`nạp cache phụ đề (${cached?.length || 0} câu)`);
 
         // 4. Phát video ngay lập tức (không chờ pipeline)
+        playbackAttemptRef.current = {
+          path: info.path,
+          forced: false,
+          pending: false,
+        };
+        activeMediaUrlRef.current = info.media_url;
         setTimeout(() => {
           if (videoRef.current) {
             videoRef.current.src = info.media_url;
-            videoRef.current.play().catch(() => {});
+            logPlayback("gán src cho <video>");
+            // Lỗi giải mã thật sẽ do onError của <video> xử lý; ở đây chỉ ghi log (ví dụ chặn autoplay)
+            videoRef.current
+              .play()
+              .catch((err) => console.warn("[Video] play() lỗi:", err?.name, err?.message));
             setIsPlaying(true);
           }
         }, 50);
 
-        // 5. Bắt đầu pipeline ngầm
-        await window.go?.main?.App?.StartPipeline(info.path, 0);
+        // 4b. Video WebView2 không phát được -> chuyển mã nền ngay (chỉ áp dụng cho file cục bộ)
+        if (!info.path.startsWith("gdrive://")) {
+          if (!info.playable) {
+            requestPlayback(info.path, false, info.playable_reason);
+          } else if (info.check_mime && !canPlayMime(info.check_mime)) {
+            requestPlayback(
+              info.path,
+              true,
+              `Máy này không giải mã được video ${(info.video_codec || "").toUpperCase()} (thiếu phần cứng hoặc extension của Windows)`,
+            );
+          }
+        }
+
+        // 5. Khởi động pipeline (Player-First: gdrive chờ 'playing' trần 8s, local chạy ngay)
+        pipelineStarterRef.current = createPipelineStarter({
+          path: info.path,
+          isDrive,
+          startPipeline: (p, s) => {
+            logPlayback(`bắt đầu pipeline cho ${isDrive ? "Drive" : "local"}`);
+            window.go?.main?.App?.StartPipeline?.(p, s).catch((err) =>
+              console.error("[Pipeline] Lỗi StartPipeline:", err),
+            );
+          },
+          maxDelayMs: 8000,
+        });
       } catch (err: any) {
         alert(`Không thể mở video: ${err?.message || err}`);
       }
     },
-    [],
+    [requestPlayback, logPlayback],
   );
 
   // Thêm 1 thư mục khóa học vào cây thư mục
@@ -1227,6 +1701,44 @@ export const App: React.FC = () => {
     showToast,
   ]);
 
+  // Các callback ổn định (tham chiếu không đổi giữa các lần render) để React.memo của
+  // LandingPage / CourseTreePanel / FolderTreeItem / SubtitleListPanel thực sự có tác dụng.
+  const handleToggleAutoCollapse = useCallback(() => {
+    setAutoCollapseFolder((v) => {
+      const next = !v;
+      showToast(
+        next
+          ? "Đã BẬT tự ẩn thư mục khi chọn bài"
+          : "Đã TẮT tự ẩn thư mục khi chọn bài",
+      );
+      return next;
+    });
+  }, [showToast]);
+
+  const handleSelectVideoFromTree = useCallback(
+    (path: string) => {
+      const { filePath, driveItem } = resolveTreeSelection(path);
+      handleOpenVideo(filePath, driveItem);
+      if (autoCollapseFolder) {
+        setShowFolderPanel(false);
+      }
+    },
+    [handleOpenVideo, autoCollapseFolder],
+  );
+
+  // Bọc lại để không truyền MouseEvent vào tham số rawLink của handlePasteDriveLink
+  const handleAddDriveLinkFromTree = useCallback(() => {
+    handlePasteDriveLink();
+  }, [handlePasteDriveLink]);
+
+  const handleCloseFolderPanel = useCallback(() => setShowFolderPanel(false), []);
+  const handleCloseSubPanel = useCallback(() => setShowSubPanel(false), []);
+  const handleLandingOpenVideo = useCallback(() => {
+    handleOpenVideo();
+  }, [handleOpenVideo]);
+  const handleLandingOpenYouTube = useCallback(() => setShowYtModal(true), []);
+  const handleLandingSwitchToPlayer = useCallback(() => setViewMode("player"), []);
+
   // Đăng ký lắng nghe sự kiện từ Wails backend
   useEffect(() => {
     if (!window.runtime) return;
@@ -1236,16 +1748,14 @@ export const App: React.FC = () => {
       "new_subtitle_chunk",
       (chunk: any) => {
         if (chunk.video !== videoInfo?.path) return;
+        logPlayback("phụ đề: chunk đầu tiên về");
         setSubtitles((prev) => upsertSubtitles(prev, chunk.items || []));
         if (chunk.final) {
           setDoneBlocks((prev) => {
-            if (!prev.includes(chunk.block)) {
-              const next = [...prev, chunk.block];
-              next.sort((a, b) => a - b);
-              doneBlocksRef.current = next;
-              return next;
-            }
-            return prev;
+            if (prev.includes(chunk.block)) return prev;
+            const next = [...prev, chunk.block];
+            next.sort((a, b) => a - b);
+            return next;
           });
         }
       },
@@ -1256,7 +1766,14 @@ export const App: React.FC = () => {
       "pipeline_status",
       (st: PipelineStatus) => {
         if (st.video !== videoInfo?.path) return;
-        setPipelineStatus(st);
+        if (st.total_blocks > 0 && st.done_blocks >= st.total_blocks) {
+          logPlayback(`phụ đề: xong ${st.done_blocks}/${st.total_blocks} block`);
+        }
+        if (st.translator_reason && st.translator_reason !== lastLoggedTranslatorReasonRef.current) {
+          lastLoggedTranslatorReasonRef.current = st.translator_reason;
+          console.warn(`[Translator] Chế độ dịch chuyển sang "${st.translator_mode}". Lý do:`, st.translator_reason);
+        }
+        setPipelineStatus((prev) => (isSamePipelineStatus(prev, st) ? prev : st));
       },
     );
 
@@ -1287,7 +1804,10 @@ export const App: React.FC = () => {
       }
 
       // Tra cứu phụ đề bằng Binary Search với offset
-      const sub = findSubtitleAtTime(subtitles, mediaTime + subtitleOffset);
+      const sub = findSubtitleAtTime(
+        subtitlesRef.current,
+        mediaTime + subtitleOffsetRef.current,
+      );
       setCurrentSubtitle((prev) =>
         prev?.id === sub?.id &&
         prev?.target_text === sub?.target_text &&
@@ -1327,7 +1847,24 @@ export const App: React.FC = () => {
         cancelAnimationFrame(handle);
       }
     };
-  }, [subtitles, subtitleOffset, videoInfo?.path]);
+  }, [videoInfo?.path]);
+
+  // Khi phụ đề/offset đổi: cập nhật phụ đề hiện tại ngay, không cần khởi động lại vòng syncFrame
+  // (cũng đúng khi video đang tạm dừng, lúc đó không có frame callback nào chạy)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const sub = findSubtitleAtTime(subtitles, video.currentTime + subtitleOffset);
+    const prev = currentSubtitleRef.current;
+    // So sánh trước để không gọi setState thừa (tránh 1 lần chạy lại thân App khi không đổi)
+    if (
+      prev?.id !== sub?.id ||
+      prev?.target_text !== sub?.target_text ||
+      prev?.source_text !== sub?.source_text
+    ) {
+      setCurrentSubtitle(sub);
+    }
+  }, [subtitles, subtitleOffset]);
 
   // Cập nhật volume và playbackRate cho thẻ video DOM
   useEffect(() => {
@@ -1388,11 +1925,11 @@ export const App: React.FC = () => {
           break;
         case "ArrowLeft":
           e.preventDefault();
-          seekVideo(currentTime - (e.shiftKey ? 30 : 5));
+          seekVideo(currentTimeRef.current - (e.shiftKey ? 30 : 5));
           break;
         case "ArrowRight":
           e.preventDefault();
-          seekVideo(currentTime + (e.shiftKey ? 30 : 5));
+          seekVideo(currentTimeRef.current + (e.shiftKey ? 30 : 5));
           break;
         case "PageUp":
           e.preventDefault();
@@ -1464,7 +2001,6 @@ export const App: React.FC = () => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
-    currentTime,
     seekVideo,
     handlePlayAdjacentVideo,
     handleOpenVideo,
@@ -2040,10 +2576,11 @@ export const App: React.FC = () => {
         className={`flex-1 relative overflow-hidden bg-[#0a0c10] flex flex-col ${viewMode === "landing" ? "" : "hidden"}`}
       >
         <LandingPage
-          onOpenVideo={() => handleOpenVideo()}
-          onOpenYouTube={() => setShowYtModal(true)}
-          onSwitchToPlayer={() => setViewMode("player")}
+          onOpenVideo={handleLandingOpenVideo}
+          onOpenYouTube={handleLandingOpenYouTube}
+          onSwitchToPlayer={handleLandingSwitchToPlayer}
           hasLoadedVideo={!!videoInfo?.path}
+          isActive={viewMode === "landing"}
         />
       </div>
 
@@ -2058,28 +2595,13 @@ export const App: React.FC = () => {
             activeVideoPath={videoInfo?.path ?? null}
             completedVideos={completedVideos}
             autoCollapse={autoCollapseFolder}
-            onToggleAutoCollapse={() => {
-              setAutoCollapseFolder((v) => {
-                const next = !v;
-                showToast(
-                  next
-                    ? "Đã BẬT tự ẩn thư mục khi chọn bài"
-                    : "Đã TẮT tự ẩn thư mục khi chọn bài",
-                );
-                return next;
-              });
-            }}
-            onSelectVideo={(path) => {
-              handleOpenVideo(path);
-              if (autoCollapseFolder) {
-                setShowFolderPanel(false);
-              }
-            }}
+            onToggleAutoCollapse={handleToggleAutoCollapse}
+            onSelectVideo={handleSelectVideoFromTree}
             onAddFolder={handleAddFolder}
-            onAddDriveLink={() => handlePasteDriveLink()}
+            onAddDriveLink={handleAddDriveLinkFromTree}
             onRemoveRoot={handleRemoveRootFolder}
             onClearAll={handleClearAllFolders}
-            onClose={() => setShowFolderPanel(false)}
+            onClose={handleCloseFolderPanel}
           />
         ) : (
           /* Nút tai nhỏ ở sát mép trái để bật nhanh lại Cây thư mục khi đang ẩn */
@@ -2103,16 +2625,20 @@ export const App: React.FC = () => {
             onClick={togglePlay}
             muted={isMuted}
             onEnded={handleVideoEnded}
+            onError={handleVideoError}
+            onTimeUpdate={handleVideoTimeCheck}
             onLoadedMetadata={(e) => {
               const d = e.currentTarget.duration;
               if (d && !isNaN(d) && isFinite(d) && d > 0) {
                 setDuration(d);
+                reportRealDuration(d);
               }
             }}
             onDurationChange={(e) => {
               const d = e.currentTarget.duration;
               if (d && !isNaN(d) && isFinite(d) && d > 0) {
                 setDuration(d);
+                reportRealDuration(d);
               }
             }}
           />
@@ -2150,25 +2676,98 @@ export const App: React.FC = () => {
           )}
 
           {/* Codec cảnh báo không tương thích */}
-          {videoInfo && !videoInfo.playable && (
-            <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-6 text-center z-30">
-              <AlertCircle className="w-12 h-12 text-amber-400 mb-3" />
-              <h3 className="text-base font-semibold text-white mb-2">
-                Định dạng không được hỗ trợ phát trực tiếp
-              </h3>
-              <p className="text-xs text-neutral-300 max-w-md mb-4">
-                {videoInfo.playable_reason}
-              </p>
-              <button
-                onClick={() =>
-                  alert("Tính năng chuyển mã nền tự động đang được chuẩn bị.")
-                }
-                className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black text-xs font-bold rounded shadow"
-              >
-                Chuyển mã để phát
-              </button>
-            </div>
-          )}
+          {videoInfo &&
+            (playbackPrep?.path === videoInfo.path || !videoInfo.playable) && (
+              <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center p-6 text-center z-30">
+                {playbackPrep?.path === videoInfo.path && playbackPrep.error ? (
+                  <>
+                    <AlertCircle className="w-12 h-12 text-red-400 mb-3" />
+                    <h3 className="text-base font-semibold text-white mb-2">
+                      Không phát được hình của video này
+                    </h3>
+                    <p className="text-xs text-neutral-300 max-w-md mb-1 break-words">
+                      {playbackPrep.error}
+                    </p>
+                    <p className="text-[11px] text-neutral-500 max-w-md mb-4">
+                      Phụ đề vẫn được tạo từ âm thanh gốc.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          playbackAttemptRef.current = {
+                            path: videoInfo.path,
+                            forced: false,
+                            pending: false,
+                          };
+                          requestPlayback(videoInfo.path, true, playbackPrep.reason);
+                        }}
+                        className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black text-xs font-bold rounded shadow"
+                      >
+                        Thử chuyển mã lại
+                      </button>
+                      <button
+                        onClick={() => setPlaybackPrep(null)}
+                        className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-semibold rounded border border-neutral-700"
+                      >
+                        Đóng
+                      </button>
+                    </div>
+                  </>
+                ) : playbackPrep?.path === videoInfo.path ? (
+                  <>
+                    <Loader2 className="w-10 h-10 text-amber-400 mb-3 animate-spin" />
+                    <h3 className="text-base font-semibold text-white mb-1">
+                      {playbackStageLabel(playbackPrep.stage)}
+                    </h3>
+                    {playbackPrep.reason && (
+                      <p className="text-xs text-neutral-400 max-w-md mb-3 break-words">
+                        {playbackPrep.reason}
+                      </p>
+                    )}
+                    <div className="w-64 h-1.5 bg-neutral-800 rounded-full overflow-hidden mb-1.5">
+                      <div
+                        className={`h-full bg-amber-400 transition-all duration-300 ${
+                          playbackPrep.percent < 0 ? "w-1/3 animate-pulse" : ""
+                        }`}
+                        style={
+                          playbackPrep.percent >= 0
+                            ? { width: `${Math.min(100, playbackPrep.percent)}%` }
+                            : undefined
+                        }
+                      />
+                    </div>
+                    <p className="text-[11px] text-neutral-500 mb-4">
+                      {formatPercent(playbackPrep.percent)} · Phụ đề vẫn chạy song song,
+                      lần sau mở lại video sẽ phát ngay.
+                    </p>
+                    <button
+                      onClick={cancelPlaybackPrep}
+                      className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-semibold rounded border border-neutral-700"
+                    >
+                      Hủy
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <AlertCircle className="w-12 h-12 text-amber-400 mb-3" />
+                    <h3 className="text-base font-semibold text-white mb-2">
+                      Định dạng không được hỗ trợ phát trực tiếp
+                    </h3>
+                    <p className="text-xs text-neutral-300 max-w-md mb-4">
+                      {videoInfo.playable_reason}
+                    </p>
+                    <button
+                      onClick={() =>
+                        requestPlayback(videoInfo.path, false, videoInfo.playable_reason)
+                      }
+                      className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black text-xs font-bold rounded shadow"
+                    >
+                      Chuyển mã để phát
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
           {/* Overlay phụ đề phong cách VLC (Hỗ trợ kéo thả tự do bất kỳ vị trí nào) */}
           {currentSubtitle && subtitleMode !== "off" && (
@@ -2209,9 +2808,9 @@ export const App: React.FC = () => {
                 className="absolute -top-2 right-2.5 flex items-center gap-1 bg-black/85 border border-white/10 rounded-full px-1.5 py-0.5 text-[9px] pointer-events-none shadow-sm"
                 title={
                   pipelineStatus?.translator_mode === "local_ai"
-                    ? "Dịch bằng Local AI Qwen 2.5 (Offline)"
+                    ? `Dịch bằng Local AI Qwen 2.5 (Offline)${pipelineStatus?.translator_reason ? ` - Lý do: ${pipelineStatus.translator_reason}` : ""}`
                     : pipelineStatus?.translator_mode === "cloud"
-                    ? "Dịch bằng Gemini Cloud (Dự phòng)"
+                    ? `Dịch bằng Gemini Cloud (Dự phòng)${pipelineStatus?.translator_reason ? ` - Lý do: ${pipelineStatus.translator_reason}` : ""}`
                     : "Dịch bằng API Google Cloud siêu tốc"
                 }
               >
@@ -2267,7 +2866,7 @@ export const App: React.FC = () => {
             subtitles={subtitles}
             activeId={currentSubtitle?.id ?? null}
             onSeek={seekVideo}
-            onClose={() => setShowSubPanel(false)}
+            onClose={handleCloseSubPanel}
           />
         )}
       </div>
@@ -2280,19 +2879,11 @@ export const App: React.FC = () => {
             {/* Thanh nền tổng thời gian */}
             <div className="w-full h-1.5 bg-neutral-800 rounded relative overflow-hidden">
               {/* Dải màu hiển thị các block đã hoàn tất xử lý */}
-              {duration > 0 &&
-                doneBlocks.map((b) => {
-                  const blockSec = videoInfo?.block_sec || 30;
-                  const left = ((b * blockSec) / duration) * 100;
-                  const width = (blockSec / duration) * 100;
-                  return (
-                    <div
-                      key={b}
-                      style={{ left: `${left}%`, width: `${width}%` }}
-                      className="absolute top-0 bottom-0 bg-amber-500/35"
-                    />
-                  );
-                })}
+              <DoneBlocksStrip
+                doneBlocks={doneBlocks}
+                duration={duration}
+                blockSec={videoInfo?.block_sec || 30}
+              />
 
               {/* Thanh tiến độ đang phát */}
               <div

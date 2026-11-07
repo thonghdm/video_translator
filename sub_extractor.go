@@ -153,6 +153,36 @@ func PopulateStoreFromVietnameseSRT(bs *BlockStore, videoPath string, durationSe
 		enSegs, _ = LoadExternalSubtitles(enPath)
 	}
 
+	// File cục bộ: giữ nguyên block đã có (kể cả bản người dùng đã sửa/dịch lại)
+	return PopulateStoreFromSegments(bs, viSegs, enSegs, durationSec, blockSec, overlapSec, false)
+}
+
+// Phụ đề tiếng Việt chỉ phủ tới viEnd. Nếu viEnd < viCoverageRatio * thời lượng video thì coi là file bị cụt:
+// các block bắt đầu sau viEnd + viCoverageMarginSec được để trống cho Whisper + dịch xử lý thay vì đánh dấu xong rỗng.
+// Nếu phụ đề đã phủ gần hết video thì phần còn lại là đoạn im lặng thật (outro...), vẫn đánh dấu xong để khỏi chạy Whisper.
+const (
+	viCoverageRatio     = 0.85
+	viCoverageMarginSec = 10.0
+)
+
+// PopulateStoreFromSegments nạp phụ đề tiếng Việt viSegs (kèm câu gốc enSegs ghép theo mốc thời gian, có thể rỗng)
+// vào BlockStore, đánh dấu các block đã dịch xong. Dùng chung cho file cục bộ (đọc từ đĩa) và Google Drive (đọc từ RAM).
+// overwrite=false: bỏ qua block đã xong; overwrite=true: ghi đè (phụ đề dựng sẵn là nguồn đúng nhất).
+// Trả về true nếu đã nạp ít nhất một block.
+func PopulateStoreFromSegments(bs *BlockStore, viSegs, enSegs []WhisperSegment, durationSec, blockSec, overlapSec float64, overwrite bool) bool {
+	if bs == nil || len(viSegs) == 0 {
+		return false
+	}
+
+	viEnd := 0.0
+	for _, v := range viSegs {
+		if v.EndSec > viEnd {
+			viEnd = v.EndSec
+		}
+	}
+
+	truncated := viEnd < viCoverageRatio*durationSec
+
 	if blockSec <= 0 {
 		blockSec = 30.0
 	}
@@ -164,11 +194,15 @@ func PopulateStoreFromVietnameseSRT(bs *BlockStore, videoPath string, durationSe
 		totalBlocks = 1
 	}
 
+	pending := make(map[int][]SubtitleItem)
 	for b := 0; b < totalBlocks; b++ {
-		if bs.IsBlockDone(b) {
+		if !overwrite && bs.IsBlockDone(b) {
 			continue
 		}
 		bRange := ComputeBlockRange(b, blockSec, overlapSec, durationSec)
+		if truncated && bRange.OwnerStart >= viEnd+viCoverageMarginSec {
+			continue // phụ đề không phủ tới block này → để pipeline tự xử lý
+		}
 		var items []SubtitleItem
 		seq := 0
 		for i, vSeg := range viSegs {
@@ -208,10 +242,13 @@ func PopulateStoreFromVietnameseSRT(bs *BlockStore, videoPath string, durationSe
 			})
 			seq++
 		}
-		_ = bs.SaveBlock(b, items)
+		pending[b] = items
 	}
 
-	return true
+	// BUG-14: nạp RAM ngay, ghi đĩa ở nền (không chặn OpenVideo / không giữ a.mu qua ~120 lần ghi file)
+	bs.SaveBlocksDeferred(pending)
+
+	return len(pending) > 0
 }
 
 // ResolveVideoFromSubtitlePath tìm file video .mp4/.mkv tương ứng nếu người dùng chọn/kéo thả file _en.srt hoặc _vi.srt
@@ -321,4 +358,64 @@ func parseHMSMs(hStr, mStr, sStr, msStr string) float64 {
 	s, _ := strconv.Atoi(sStr)
 	ms, _ := strconv.Atoi(msStr)
 	return float64(h)*3600.0 + float64(m)*60.0 + float64(s) + float64(ms)/1000.0
+}
+
+// externalSubtitleIndex gom sẵn các file .srt/.vtt của MỘT thư mục từ danh sách os.ReadDir đã có,
+// để kiểm tra phụ đề đi kèm của hàng trăm video mà không phải os.Stat/os.ReadDir lặp lại cho từng video (BUG-10).
+type externalSubtitleIndex struct {
+	dir  string
+	subs []indexedSubtitle // chỉ các file *.srt / *.vtt (tên đã hạ chữ thường)
+}
+
+type indexedSubtitle struct {
+	lowerName string
+	entry     os.DirEntry
+}
+
+func newExternalSubtitleIndex(dir string, entries []os.DirEntry) *externalSubtitleIndex {
+	idx := &externalSubtitleIndex{dir: dir}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		lower := strings.ToLower(e.Name())
+		if strings.HasSuffix(lower, ".srt") || strings.HasSuffix(lower, ".vtt") {
+			idx.subs = append(idx.subs, indexedSubtitle{lowerName: lower, entry: e})
+		}
+	}
+	return idx
+}
+
+func isViSubtitleName(lowerName string) bool {
+	return strings.Contains(lowerName, "_vi.") || strings.Contains(lowerName, ".vi.") || strings.Contains(lowerName, "-vi.") ||
+		strings.Contains(lowerName, "_vn.") || strings.Contains(lowerName, ".vn.") || strings.Contains(lowerName, "-vn.") ||
+		strings.Contains(lowerName, "_vie.") || strings.Contains(lowerName, ".vie.")
+}
+
+func isNonEnglishExportName(lowerName string) bool {
+	return isViSubtitleName(lowerName) || strings.Contains(lowerName, ".bilingual.")
+}
+
+// HasExternalSubtitle tương đương
+// `FindExternalSubtitleFile(p) != "" || FindExternalVietnameseSubtitleFile(p) != ""` cho file video
+// nằm trong thư mục của index, nhưng chỉ duyệt danh sách đã nạp trong RAM; os.Stat chỉ dùng
+// (qua DirEntry.Info) cho các file thực sự khớp tiền tố tên video để kiểm tra kích thước > 10 byte.
+func (x *externalSubtitleIndex) HasExternalSubtitle(videoFileName string) bool {
+	ext := filepath.Ext(videoFileName)
+	lowerBase := strings.ToLower(strings.TrimSuffix(videoFileName, ext))
+	for _, s := range x.subs {
+		if !strings.HasPrefix(s.lowerName, lowerBase) {
+			continue
+		}
+		// Phụ đề EN: mọi .srt/.vtt khớp tiền tố trừ bản .vi/.vn/.vie/.bilingual đã xuất;
+		// phụ đề VI: file khớp tiền tố có dấu hiệu .vi/.vn/.vie. Hợp của hai tập = khớp tiền tố
+		// và (không thuộc nhóm loại trừ EN hoặc là file VI).
+		if isNonEnglishExportName(s.lowerName) && !isViSubtitleName(s.lowerName) {
+			continue
+		}
+		if fi, err := s.entry.Info(); err == nil && fi.Size() > 10 {
+			return true
+		}
+	}
+	return false
 }

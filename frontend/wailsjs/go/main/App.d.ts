@@ -6,6 +6,8 @@ export function ApplyUpdate(arg1:string):Promise<void>;
 
 export function CancelModelDownload():Promise<void>;
 
+export function CancelPlayback():Promise<void>;
+
 export function CheckForUpdate():Promise<main.UpdateCheckResult>;
 
 export function CheckModelsReady():Promise<boolean>;
@@ -30,6 +32,8 @@ export function ListDriveItems(arg1:string):Promise<Array<main.DriveItem>>;
 
 export function LoadCachedSubtitles(arg1:string):Promise<Array<main.SubtitleItem>>;
 
+export function LogPlaybackEvent(arg1:string,arg2:string,arg3:number):Promise<void>;
+
 export function LoginGoogleDrive():Promise<void>;
 
 export function LogoutGoogleDrive():Promise<void>;
@@ -37,6 +41,8 @@ export function LogoutGoogleDrive():Promise<void>;
 export function OpenDriveVideo(arg1:string,arg2:string,arg3:string):Promise<main.VideoInfo>;
 
 export function OpenVideo(arg1:string):Promise<main.VideoInfo>;
+
+export function PreparePlayback(arg1:string,arg2:boolean):Promise<void>;
 
 export function ResolveDriveLink(arg1:string):Promise<main.DriveLinkInfo>;
 
@@ -67,3 +73,5 @@ export function StartPipeline(arg1:string,arg2:number):Promise<void>;
 export function StopPipeline():Promise<void>;
 
 export function UpdatePlayhead(arg1:string,arg2:number,arg3:boolean):Promise<void>;
+
+export function UpdateVideoDuration(arg1:string,arg2:number):Promise<void>;

@@ -35,6 +35,7 @@ type SlicerJob struct {
 type AudioJob struct {
 	BlockIdx       int
 	WavPath        string
+	UseCachedSTT   bool // true: block đã có STT trong BlockStore, không cắt WAV / không chạy Whisper
 	Range          BlockRange
 	SliceMs        int64
 	ScheduledAt    time.Time
@@ -61,6 +62,7 @@ type TextJob struct {
 	WhisperThreads int
 	WhisperLangArg string
 	VariantName    string
+	STTCacheHit    bool // Items lấy từ BlockStore (bỏ qua ffmpeg + Whisper)
 }
 
 // PipelineSession đại diện cho một phiên làm việc độc lập của pipeline
@@ -78,7 +80,7 @@ type Pipeline struct {
 	mu          sync.Mutex
 	computeMu   sync.Mutex // Điều phối CPU giữa Whisper và LLM tránh tranh chấp core
 	videoPath   string
-	durationSec float64
+	durationBits atomic.Uint64 // float64 bits; đọc qua duration(), cập nhật qua UpdateDuration()
 	settings    Settings
 	tools       *ToolsPaths
 	blockStore  *BlockStore
@@ -125,6 +127,18 @@ type Pipeline struct {
 	// Custom runners hỗ trợ Mock trong Test tự động
 	MockSliceAudio func(ctx context.Context, videoPath string, bRange BlockRange, outWav string) error
 	MockRunSTT     func(ctx context.Context, wavPath string, bRange BlockRange) ([]WhisperSegment, error)
+
+	// Spool hỗ trợ tải trước file Drive về đĩa cục bộ
+	spool spoolSource
+	// resolveInput: ghi đè ResolveMediaInput (dùng trong test)
+	resolveInput func(string) string
+}
+
+// SetSpool gắn DriveSpool vào pipeline để ưu tiên đọc file spool cục bộ
+func (p *Pipeline) SetSpool(s spoolSource) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.spool = s
 }
 
 // NewPipeline tạo một thực thể Pipeline mới
@@ -182,7 +196,6 @@ func NewPipeline(
 
 	p := &Pipeline{
 		videoPath:        videoPath,
-		durationSec:      durationSec,
 		settings:         settings,
 		tools:            tools,
 		blockStore:       blockStore,
@@ -197,6 +210,7 @@ func NewPipeline(
 		externalSegments: extSegs,
 	}
 	p.pendingSeek.Store(noPendingSeek)
+	p.durationBits.Store(math.Float64bits(durationSec))
 	return p
 }
 
@@ -208,11 +222,34 @@ func (p *Pipeline) triggerSchedule() {
 	}
 }
 
+// duration trả về thời lượng video hiện tại (an toàn đa luồng).
+func (p *Pipeline) duration() float64 {
+	return math.Float64frombits(p.durationBits.Load())
+}
+
+// UpdateDuration cập nhật thời lượng thật của video (vd. từ <video>.duration của frontend
+// khi nguồn là Google Drive và backend chỉ có giá trị ước lượng). Bỏ qua giá trị không hợp lệ.
+// Trả về true nếu giá trị thực sự thay đổi.
+func (p *Pipeline) UpdateDuration(sec float64) bool {
+	if math.IsNaN(sec) || math.IsInf(sec, 0) || sec <= 0 {
+		return false
+	}
+	old := p.duration()
+	if math.Abs(old-sec) < 0.001 {
+		return false
+	}
+	p.durationBits.Store(math.Float64bits(sec))
+	select {
+	case p.wakeSched <- struct{}{}:
+	default:
+	}
+	return true
+}
+
 func (p *Pipeline) emitStatus(block int) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
-	totalBlocks := int(math.Ceil(p.durationSec / p.settings.BlockSec))
+	totalBlocks := int(math.Ceil(p.duration() / p.settings.BlockSec))
 	doneBlocks := len(p.blockStore.GetDoneBlocks())
 
 	aheadSec := p.computeAheadSecLocked()
@@ -226,25 +263,29 @@ func (p *Pipeline) emitStatus(block int) {
 		AheadSec:       aheadSec,
 		Video:          p.videoPath,
 		TranslatorMode: p.currentTranslatorMode(),
+		TranslatorReason: p.currentTranslatorReason(),
 	}
+	onStatus := p.callbacks.OnStatus
+	p.mu.Unlock()
 
-	if p.callbacks.OnStatus != nil {
-		p.callbacks.OnStatus(status)
+	// Gọi callback (Wails IPC / JSON) NGOÀI khóa p.mu để không chặn scheduler và các worker
+	if onStatus != nil {
+		onStatus(status)
 	}
 }
 
 // computeAheadSecLocked tính toán khoảng thời gian đã xong liên tục phía trước playhead
 func (p *Pipeline) computeAheadSecLocked() float64 {
 	curBlock := int(p.playheadSec / p.settings.BlockSec)
-	totalBlocks := int(math.Ceil(p.durationSec / p.settings.BlockSec))
+	totalBlocks := int(math.Ceil(p.duration() / p.settings.BlockSec))
 
 	continuousDoneEnd := p.playheadSec
 
 	for b := curBlock; b < totalBlocks; b++ {
 		if p.blockStore.IsBlockDone(b) || (p.tier2Deferred[b] && p.isTier2PostponedMode()) {
 			bEnd := float64(b+1) * p.settings.BlockSec
-			if bEnd > p.durationSec {
-				bEnd = p.durationSec
+			if bEnd > p.duration() {
+				bEnd = p.duration()
 			}
 			continuousDoneEnd = bEnd
 		} else {
@@ -292,6 +333,7 @@ func (p *Pipeline) Start(startSec float64) error {
 	p.sessionBlockCount = 0
 	p.tier2Deferred = make(map[int]bool)
 	p.activeJobs = make(map[int]bool)
+	p.failedBlocks = make(map[int]int) // phiên mới: các block từng lỗi ở phiên trước được thử lại
 	p.pendingSeek.Store(noPendingSeek)
 
 	p.startSessionWorkers(newSession)
@@ -307,8 +349,8 @@ func (p *Pipeline) RequestSeek(sec float64) {
 	if sec < 0 {
 		sec = 0
 	}
-	if sec > p.durationSec {
-		sec = p.durationSec
+	if sec > p.duration() {
+		sec = p.duration()
 	}
 
 	p.mu.Lock()
@@ -362,8 +404,8 @@ func (p *Pipeline) doSeek(startSec float64) {
 	if startSec < 0 {
 		startSec = 0
 	}
-	if startSec > p.durationSec {
-		startSec = p.durationSec
+	if startSec > p.duration() {
+		startSec = p.duration()
 	}
 
 	p.mu.Lock()
@@ -411,7 +453,7 @@ func (p *Pipeline) doSeek(startSec float64) {
 	tier2WasRunning := false
 	tier2BlockIdx := -1
 	for b := range p.activeJobs {
-		bRange := ComputeBlockRange(b, p.settings.BlockSec, p.settings.OverlapSec, p.durationSec)
+		bRange := ComputeBlockRange(b, p.settings.BlockSec, p.settings.OverlapSec, p.duration())
 		isTier1 := bRange.OwnerStart <= startSec+15.0 && bRange.OwnerEnd >= startSec
 		if !isTier1 {
 			tier2WasRunning = true
@@ -483,8 +525,8 @@ func (p *Pipeline) doSeek(startSec float64) {
 		if startSec < 0 {
 			startSec = 0
 		}
-		if startSec > p.durationSec {
-			startSec = p.durationSec
+		if startSec > p.duration() {
+			startSec = p.duration()
 		}
 	}
 
@@ -626,6 +668,31 @@ func (p *Pipeline) currentTranslatorMode() string {
 	return "api"
 }
 
+// currentTranslatorReason trả về lý do chi tiết khi rớt xuống tầng fallback
+func (p *Pipeline) currentTranslatorReason() string {
+	if m, ok := p.translator.(interface{ FallbackReason() string }); ok {
+		return m.FallbackReason()
+	}
+	return ""
+}
+
+// acquireComputeForLocalLLM giữ computeMu khi bộ dịch đang ở chế độ local_ai (Qwen chạy bằng CPU),
+// để Whisper và LLM không chạy song song tranh core. Các chế độ api/cloud/offline không cần khóa.
+// Chờ theo kiểu TryLock + ctx để không bị kẹt khi session bị hủy (tua video) trong lúc Whisper đang giữ khóa.
+func (p *Pipeline) acquireComputeForLocalLLM(ctx context.Context) (release func(), ok bool) {
+	if p.currentTranslatorMode() != "local_ai" {
+		return func() {}, true
+	}
+	for !p.computeMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return func() {}, false
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	return p.computeMu.Unlock, true
+}
+
 func (p *Pipeline) isTier2PostponedMode() bool {
 	m := p.currentTranslatorMode()
 	return m == "local_ai" || m == "offline"
@@ -709,8 +776,6 @@ func (p *Pipeline) startSessionWorkers(sess *PipelineSession) {
 
 // schedulerLoop chọn block tiếp theo theo quy tắc lookahead và backfill
 func (p *Pipeline) schedulerLoop(ctx context.Context, slicerChan chan<- SlicerJob, sessionID int64) {
-	totalBlocks := int(math.Ceil(p.durationSec / p.settings.BlockSec))
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -718,6 +783,9 @@ func (p *Pipeline) schedulerLoop(ctx context.Context, slicerChan chan<- SlicerJo
 		case <-p.wakeSched:
 		case <-time.After(500 * time.Millisecond):
 		}
+
+		// BUG-08: thời lượng có thể được cập nhật giữa chừng (UpdateDuration) → tính lại mỗi vòng
+		totalBlocks := int(math.Ceil(p.duration() / p.settings.BlockSec))
 
 		p.mu.Lock()
 		playheadBlock := int(p.playheadSec / p.settings.BlockSec)
@@ -824,39 +892,33 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			blockIdx := sJob.BlockIdx
 			queueWaitMs := time.Since(sJob.ScheduledAt).Milliseconds()
 
-			bRange := ComputeBlockRange(blockIdx, p.settings.BlockSec, p.settings.OverlapSec, p.durationSec)
+			// BUG-08: thời lượng thật ngắn hơn ước lượng → bỏ các job đã xếp hàng nhưng nằm ngoài video
+			if float64(blockIdx)*p.settings.BlockSec >= p.duration() {
+				p.mu.Lock()
+				delete(p.activeJobs, blockIdx)
+				p.mu.Unlock()
+				continue
+			}
+
+			bRange := ComputeBlockRange(blockIdx, p.settings.BlockSec, p.settings.OverlapSec, p.duration())
 			wavPath := filepath.Join(p.tools.TempDir, fmt.Sprintf("block_%d_%d.wav", sJob.SessionID, blockIdx))
 
 			tSlice0 := time.Now()
 			var err error
-			if len(p.externalSegments) > 0 && p.MockSliceAudio == nil {
+			// Block đã có kết quả STT (ví dụ dịch bù Tier-2 / thử lại sau lỗi dịch): bỏ qua ffmpeg
+			useCachedSTT := false
+			if len(p.externalSegments) == 0 && p.blockStore != nil {
+				_, useCachedSTT = p.blockStore.GetBlockItems(blockIdx)
+			}
+			if useCachedSTT {
+				// không cắt WAV
+			} else if len(p.externalSegments) > 0 && p.MockSliceAudio == nil {
 				// Đã có sẵn file phụ đề gốc (.srt/.vtt) -> bỏ qua cắt WAV bằng ffmpeg
 			} else if p.MockSliceAudio != nil {
 				err = p.MockSliceAudio(ctx, p.videoPath, bRange, wavPath)
 			} else {
-				// Cắt audio bằng ffmpeg tối ưu Fast Seek:
-				// ffmpeg -ss {startSec} -i {mediaInput} -t {durationSec} -vn -acodec pcm_s16le -ar 16000 -ac 1 -threads 2 -y {outputWav}
-				var args []string
-				sliceTimeout := 60 * time.Second
-				mediaInput := ResolveMediaInput(p.videoPath)
-				if IsDrivePath(p.videoPath) {
-					// Đọc từ loopback proxy Drive: bật seekable và reconnect để ffmpeg seek HTTP Range nhanh chóng
-					args = append(args, "-seekable", "1", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5")
-					sliceTimeout = 120 * time.Second
-				}
-				args = append(args,
-					"-ss", fmt.Sprintf("%.3f", bRange.ExtractStart),
-					"-i", mediaInput,
-					"-t", fmt.Sprintf("%.3f", bRange.ExtractLen),
-					"-vn",
-					"-acodec", "pcm_s16le",
-					"-ar", "16000",
-					"-ac", "1",
-					"-threads", "2",
-					"-y",
-					wavPath,
-				)
-				_, err = RunCommand(ctx, p.tools.FFmpeg, args, sliceTimeout, nil)
+				// Cắt audio bằng ffmpeg Fast Seek (ưu tiên file spool cục bộ, có kiểm tra kết quả + quay về proxy)
+				err = p.sliceBlock(ctx, bRange, wavPath)
 			}
 			sliceMs := time.Since(tSlice0).Milliseconds()
 
@@ -875,6 +937,7 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			case outChan <- AudioJob{
 				BlockIdx:       blockIdx,
 				WavPath:        wavPath,
+				UseCachedSTT:   useCachedSTT,
 				Range:          bRange,
 				SliceMs:        sliceMs,
 				ScheduledAt:    sJob.ScheduledAt,
@@ -885,6 +948,28 @@ func (p *Pipeline) slicerWorker(ctx context.Context, inChan <-chan SlicerJob, ou
 			}
 		}
 	}
+}
+
+// sliceBlock cắt WAV cho một block (xem sliceBlockAudio).
+func (p *Pipeline) sliceBlock(ctx context.Context, bRange BlockRange, wavPath string) error {
+	p.mu.Lock()
+	spool, resolve := p.spool, p.resolveInput
+	p.mu.Unlock()
+	_, err := sliceBlockAudio(ctx, sliceParams{
+		tools:        p.tools,
+		videoPath:    p.videoPath,
+		spool:        spool,
+		resolveInput: resolve,
+		durationSec:  p.duration(),
+	}, bRange, wavPath)
+	return err
+}
+
+// shouldParseWhisperTimings: stderr của Whisper chỉ cần phân tích (9 regexp) khi bật telemetry
+// hoặc khi còn đang tự nhận diện ngôn ngữ (-l auto) để lấy ngôn ngữ + xác suất cho detect-once.
+// Khi đã chốt ngôn ngữ cố định, bỏ qua bước này ở mọi block.
+func shouldParseWhisperTimings(lang string) bool {
+	return IsTelemetryEnabled() || lang == "auto"
 }
 
 // sttWorker chạy Whisper CLI
@@ -904,6 +989,45 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 		case job, ok := <-inChan:
 			if !ok {
 				return
+			}
+
+			if job.UseCachedSTT {
+				cached, ok := p.blockStore.GetBlockItems(job.BlockIdx)
+				if !ok {
+					p.handleBlockFailure(job.BlockIdx, "stt", errors.New("cached STT result disappeared"), job.SessionID)
+					continue
+				}
+				p.mu.Lock()
+				cachedLang := p.detectedOnceLang
+				p.mu.Unlock()
+				if p.callbacks.OnChunk != nil {
+					p.callbacks.OnChunk(SubtitleChunkPayload{
+						Video: p.videoPath,
+						Block: job.BlockIdx,
+						Items: cached,
+						Final: false,
+					})
+					p.recordFirstSubLatency(job.SessionID, len(cached))
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case outChan <- TextJob{
+					BlockIdx:       job.BlockIdx,
+					Items:          cached,
+					Range:          job.Range,
+					SliceMs:        job.SliceMs,
+					DetectedLang:   cachedLang,
+					ScheduledAt:    job.ScheduledAt,
+					QueueWaitMs:    job.QueueWaitMs,
+					OrderInSession: job.OrderInSession,
+					SessionID:      job.SessionID,
+					WhisperLangArg: "cache",
+					VariantName:    os.Getenv("VT_VARIANT_NAME"),
+					STTCacheHit:    true,
+				}:
+				}
+				continue
 			}
 
 			tStt0 := time.Now()
@@ -941,23 +1065,22 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 					lang = "en"
 					detectedLang = "en"
 				default:
-					lang = "auto"
+					// "auto" (mặc định): áp dụng cơ chế detect-once
+					// Sau khi block đầu tiên phát hiện được ngôn ngữ, truyền thẳng mã ngôn ngữ đó
+					// cho các block tiếp theo để loại bỏ bước chạy encode nhận diện ngôn ngữ dư thừa.
+					p.mu.Lock()
+					if p.detectedOnceLang != "" {
+						lang = p.detectedOnceLang
+						detectedLang = p.detectedOnceLang
+					} else {
+						lang = "auto"
+					}
+					p.mu.Unlock()
 				}
 
-				if envLang := strings.ToLower(strings.TrimSpace(os.Getenv("VT_WHISPER_LANG"))); envLang != "" {
-					if envLang == "detect-once" {
-						p.mu.Lock()
-						if p.detectedOnceLang != "" {
-							lang = p.detectedOnceLang
-							detectedLang = p.detectedOnceLang
-						} else {
-							lang = "auto"
-						}
-						p.mu.Unlock()
-					} else {
-						lang = envLang
-						detectedLang = envLang
-					}
+				if envLang := strings.ToLower(strings.TrimSpace(os.Getenv("VT_WHISPER_LANG"))); envLang != "" && envLang != "detect-once" {
+					lang = envLang
+					detectedLang = envLang
 				}
 				langArg = lang
 
@@ -986,18 +1109,11 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 				p.computeMu.Unlock()
 
 				err = cmdErr
-				if runRes != nil && runRes.FullStderr != "" {
+				if runRes != nil && runRes.FullStderr != "" && shouldParseWhisperTimings(lang) {
 					whisperTimings = ParseWhisperTimings(runRes.FullStderr)
 					SaveWhisperStderrSample(runRes.FullStderr)
-					if whisperTimings.DetectedLang != "" {
-						p.mu.Lock()
-						if p.detectedOnceLang == "" {
-							p.detectedOnceLang = whisperTimings.DetectedLang
-						}
-						p.mu.Unlock()
-						if detectedLang == "" || detectedLang == "auto" {
-							detectedLang = whisperTimings.DetectedLang
-						}
+					if whisperTimings.DetectedLang != "" && (detectedLang == "" || detectedLang == "auto") {
+						detectedLang = whisperTimings.DetectedLang
 					}
 				}
 
@@ -1045,6 +1161,19 @@ func (p *Pipeline) sttWorker(ctx context.Context, inChan <-chan AudioJob, outCha
 
 			// Lọc theo quy tắc điểm giữa, bỏ ảo giác
 			filtered := FilterAndDeduplicateSegments(segments, job.Range)
+
+			// Chỉ chốt detectedOnceLang khi block có câu thoại thực sự sau khi lọc ảo giác
+			// và xác suất nhận diện ngôn ngữ (nếu có) không quá thấp (>= 0.25), tránh chốt nhầm ngôn ngữ ở block intro nhạc không lời.
+			if len(filtered) > 0 && detectedLang != "" && detectedLang != "auto" {
+				confident := whisperTimings.DetectedLangP == nil || *whisperTimings.DetectedLangP >= 0.25
+				if confident {
+					p.mu.Lock()
+					if p.detectedOnceLang == "" {
+						p.detectedOnceLang = detectedLang
+					}
+					p.mu.Unlock()
+				}
+			}
 
 			var items []SubtitleItem
 			for seq, s := range filtered {
@@ -1238,10 +1367,30 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 			}
 
 			okCount := 0
-			if p.translator != nil && len(job.Items) > 0 {
-				batches, nTier1 := BuildTwoTierBatches(job.Items, curPlayhead, isTier1Block)
+			// Chỉ dịch những câu chưa có bản dịch (block đọc lại từ BlockStore có thể đã dịch dở Tier-1)
+			var pendingIdx []int
+			for i, it := range job.Items {
+				if it.Translated && it.TargetText != "" {
+					if strings.TrimSpace(it.SourceText) != "" && !isIgnoredSubtitle(it.SourceText) {
+						okCount++
+					}
+					continue
+				}
+				pendingIdx = append(pendingIdx, i)
+			}
+			if p.translator != nil && len(pendingIdx) > 0 {
+				pendingItems := make([]SubtitleItem, len(pendingIdx))
+				for k, i := range pendingIdx {
+					pendingItems[k] = job.Items[i]
+				}
+				batches, nTier1 := BuildTwoTierBatches(pendingItems, curPlayhead, isTier1Block)
+				for b := range batches {
+					for k := range batches[b] {
+						batches[b][k] = pendingIdx[batches[b][k]]
+					}
+				}
 
-				for bIdx, indices := range batches {
+				for bIdx := 0; bIdx < len(batches); bIdx++ {
 					if ctx.Err() != nil {
 						return
 					}
@@ -1252,21 +1401,42 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 						if p.isTier2PostponedMode() {
 							break
 						}
-						if bIdx > 0 && p.MockRunSTT == nil {
+						// Người dùng có thể đã tua ngắn trong block này (Smart Fast-Path 2 giữ nguyên session)
+						// kể từ lúc chia batch: đọc lại playhead, đưa batch chứa câu sắp phát lên trước
+						// và bỏ nhịp nghỉ để hiện phụ đề ngay.
+						p.mu.Lock()
+						nowPlayhead := p.playheadSec
+						p.mu.Unlock()
+						urgent := false
+						if k := pickUrgentBatch(job.Items, batches, bIdx, nowPlayhead); k >= 0 {
+							if k != bIdx {
+								batches[bIdx], batches[k] = batches[k], batches[bIdx]
+							}
+							urgent = true
+						}
+						if !urgent && bIdx > 0 && p.MockRunSTT == nil {
 							if !sleepCtx(ctx, jitter(300*time.Millisecond)) {
 								return
 							}
 						}
 					}
+					indices := batches[bIdx]
 
 					batchLines := make([]string, len(indices))
 					for k, itemIdx := range indices {
 						batchLines[k] = job.Items[itemIdx].SourceText
 					}
 
+					// Local LLM chạy trên CPU: xếp hàng sau Whisper qua computeMu để 2 tiến trình
+					// không tranh nhau toàn bộ core (nhả ngay khi người dùng tua / hủy session).
+					releaseCompute, gotCompute := p.acquireComputeForLocalLLM(ctx)
+					if !gotCompute {
+						return
+					}
 					tBatch0 := time.Now()
 					targets, _ := p.translator.TranslateBatch(ctx, batchLines)
 					batchMs := time.Since(tBatch0).Milliseconds()
+					releaseCompute()
 
 					if ctx.Err() != nil {
 						return
@@ -1320,12 +1490,35 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				}
 			}
 
-			// Nếu chưa dịch xong toàn bộ các câu có text VÀ đang ở chế độ hoãn (local_ai/offline):
-			// Đánh dấu hoãn block để scheduler không lặp lại vô ích (áp dụng cho cả hoãn Tier-2 lẫn lỗi Tier-1)
-			if okCount < hasTextCount && p.isTier2PostponedMode() {
+			// Nếu chưa dịch xong toàn bộ các câu có text:
+			if okCount < hasTextCount {
+				p.mu.Lock()
+				var retryCount int
+				if p.session != nil && p.session.id == job.SessionID {
+					if p.isTier2PostponedMode() {
+						// Đang ở chế độ hoãn (local_ai/offline): Đánh dấu hoãn block để scheduler không lặp lại vô ích
+						p.tier2Deferred[job.BlockIdx] = true
+					} else {
+						// Đang ở chế độ api/cloud: Tăng failedBlocks để scheduler không lặp vô tận (tối đa 2 lần thử lại)
+						p.failedBlocks[job.BlockIdx]++
+						retryCount = p.failedBlocks[job.BlockIdx]
+					}
+				}
+				p.mu.Unlock()
+
+				if retryCount > 0 && p.callbacks.OnError != nil {
+					p.callbacks.OnError(PipelineError{
+						Block:   job.BlockIdx,
+						Stage:   "translate",
+						Message: fmt.Sprintf("Dịch block %d không đầy đủ ở lần thử %d (%d/%d câu thành công)", job.BlockIdx, retryCount, okCount, hasTextCount),
+						Fatal:   retryCount >= 2,
+						Video:   p.videoPath,
+					})
+				}
+			} else {
 				p.mu.Lock()
 				if p.session != nil && p.session.id == job.SessionID {
-					p.tier2Deferred[job.BlockIdx] = true
+					delete(p.failedBlocks, job.BlockIdx)
 				}
 				p.mu.Unlock()
 			}
@@ -1367,7 +1560,7 @@ func (p *Pipeline) translatorWorker(ctx context.Context, inChan <-chan TextJob) 
 				WhisperThreads:        job.WhisperThreads,
 				WhisperLangArg:        job.WhisperLangArg,
 				VariantName:           job.VariantName,
-				CacheHit:              false,
+				CacheHit:              job.STTCacheHit,
 				FfmpegCutMs:           job.SliceMs,
 				WhisperWallMs:         job.WhisperWallMs,
 				WhisperLoadMs:         job.WhisperTimings.LoadMs,
@@ -1447,6 +1640,24 @@ func (p *Pipeline) handleBlockFailure(blockIdx int, stage string, err error, ses
 	p.triggerSchedule()
 }
 
+// inPlayWindow: câu nằm trong vùng ưu tiên Tier-1 [playhead-1s, playhead+15s].
+func inPlayWindow(it SubtitleItem, playheadSec float64) bool {
+	return it.EndSec >= playheadSec-1.0 && it.StartSec <= playheadSec+15.0
+}
+
+// pickUrgentBatch trả về chỉ số batch đầu tiên trong batches[from:] có chứa câu thuộc vùng Tier-1
+// tính theo playhead HIỆN TẠI (có thể chính là from), hoặc -1 nếu không có batch nào.
+func pickUrgentBatch(items []SubtitleItem, batches [][]int, from int, playheadSec float64) int {
+	for k := from; k < len(batches); k++ {
+		for _, idx := range batches[k] {
+			if inPlayWindow(items[idx], playheadSec) {
+				return k
+			}
+		}
+	}
+	return -1
+}
+
 // BuildTwoTierBatches chia danh sách câu trong block theo mô hình Two-Tier Lookahead:
 // - Tier 1 (High Priority): Ưu tiên gom cụm nhỏ (tối đa 3 câu / 240 ký tự) cho các câu nằm trong vùng [playheadSec - 1s, playheadSec + 15s] để hiển thị tức thì.
 // - Tier 2 (Low Priority): Các câu phía trước (ahead) dịch trước, các câu đã qua (behind) dịch sau. Giảm batch còn 5 câu / 400 ký tự để giảm tỉ lệ lệch dòng.
@@ -1459,7 +1670,7 @@ func BuildTwoTierBatches(items []SubtitleItem, playheadSec float64, isTier1Block
 	var tier1, ahead, behind []int
 	for i, it := range items {
 		switch {
-		case isTier1Block && it.EndSec >= playheadSec-1.0 && it.StartSec <= playheadSec+15.0:
+		case isTier1Block && inPlayWindow(it, playheadSec):
 			tier1 = append(tier1, i)
 		case isTier1Block && it.EndSec < playheadSec-1.0:
 			behind = append(behind, i)

@@ -178,6 +178,10 @@ export namespace main {
 	    playable: boolean;
 	    playable_reason: string;
 	    done_blocks: number[];
+	    video_codec?: string;
+	    audio_codec?: string;
+	    check_mime?: string;
+	    converted?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new VideoInfo(source);
@@ -194,6 +198,10 @@ export namespace main {
 	        this.playable = source["playable"];
 	        this.playable_reason = source["playable_reason"];
 	        this.done_blocks = source["done_blocks"];
+	        this.video_codec = source["video_codec"];
+	        this.audio_codec = source["audio_codec"];
+	        this.check_mime = source["check_mime"];
+	        this.converted = source["converted"];
 	    }
 	}
 

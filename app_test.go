@@ -28,6 +28,7 @@ func Test_FormatSRTTime(t *testing.T) {
 
 // Test_ScanVideoFolder_NaturalSort kiểm tra quét cây thư mục và sắp xếp tự nhiên (Bài 2 đứng trước Bài 10)
 func Test_ScanVideoFolder_NaturalSort(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	rootDir := t.TempDir()
 	mod2 := filepath.Join(rootDir, "Module 2")
 	mod10 := filepath.Join(rootDir, "Module 10")
@@ -59,6 +60,7 @@ func Test_ScanVideoFolder_NaturalSort(t *testing.T) {
 
 // Test_ParseSRTorVTT_And_MergeBrokenSegments kiểm tra đọc file _en.srt đi kèm và gộp câu đứt đoạn
 func Test_ParseSRTorVTT_And_MergeBrokenSegments(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
 	tempDir := t.TempDir()
 	vidPath := filepath.Join(tempDir, "001 Introduction.mp4")
 	srtPath := filepath.Join(tempDir, "001 Introduction_en.srt")
@@ -131,6 +133,7 @@ trong khóa học EKS Kubernetes Masterclass này.
 	if err != nil {
 		t.Fatalf("Lỗi tạo BlockStore: %v", err)
 	}
+	t.Cleanup(bs.WaitPersist) // BUG-14: file block được ghi nền; đợi xong trước khi dọn thư mục tạm
 	if !PopulateStoreFromVietnameseSRT(bs, vidPath, 30.0, 30.0, 2.0) {
 		t.Fatalf("Kỳ vọng nạp thành công phụ đề từ _vi.srt")
 	}
@@ -193,6 +196,8 @@ func Test_TwoTierLookaheadBatches_And_Metrics(t *testing.T) {
 
 // Test_App_GeminiConfig_Integration kiểm tra tích hợp Gemini vào App và FastHybridTranslator qua cấu hình Settings
 func Test_App_GeminiConfig_Integration(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GEMINI_ENABLED", "")
 	tempDir := t.TempDir()
 	settingsFile := filepath.Join(tempDir, "settings.json")
 

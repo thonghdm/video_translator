@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -30,6 +31,9 @@ type BlockStore struct {
 	blocksDir string
 	meta      CacheMeta
 	itemsMap  map[int][]SubtitleItem // blockIdx -> items
+
+	diskMu    sync.Mutex     // tuần tự hóa ghi file block (SaveBlock + flush nền)
+	persistWg sync.WaitGroup // đợi các lần flush nền hoàn tất
 }
 
 // ComputeVideoHash tính mã SHA-1 định danh video dựa trên đường dẫn + kích thước + mtime
@@ -171,6 +175,31 @@ func (bs *BlockStore) IsBlockDone(block int) bool {
 	return true
 }
 
+// GetBlockItems trả về bản sao danh sách câu đã lưu của block nếu block đã có kết quả STT
+// (ít nhất một câu có SourceText). Dùng để không chạy lại ffmpeg + Whisper khi dịch bù / thử lại block.
+// Block im lặng (không có câu nào) hoặc chưa từng chạy trả về false.
+func (bs *BlockStore) GetBlockItems(block int) ([]SubtitleItem, bool) {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	items, exists := bs.itemsMap[block]
+	if !exists {
+		return nil, false
+	}
+	hasSTT := false
+	for _, it := range items {
+		if it.SourceText != "" {
+			hasSTT = true
+			break
+		}
+	}
+	if !hasSTT {
+		return nil, false
+	}
+	out := make([]SubtitleItem, len(items))
+	copy(out, items)
+	return out, true
+}
+
 // GetDoneBlocks trả về danh sách chỉ số các block đã xong
 func (bs *BlockStore) GetDoneBlocks() []int {
 	bs.mu.RLock()
@@ -197,6 +226,22 @@ func (bs *BlockStore) SaveBlock(block int, items []SubtitleItem) error {
 	bs.mu.Lock()
 	bs.itemsMap[block] = items
 	bs.mu.Unlock()
+	return bs.persistBlock(block)
+}
+
+// persistBlock ghi trạng thái RAM HIỆN TẠI của block xuống đĩa (ghi tmp + rename nguyên tử).
+// Luôn đọc lại từ RAM bên trong diskMu nên lần ghi sau cùng luôn là dữ liệu mới nhất,
+// dù SaveBlock và flush nền chạy đan xen.
+func (bs *BlockStore) persistBlock(block int) error {
+	bs.diskMu.Lock()
+	defer bs.diskMu.Unlock()
+
+	bs.mu.RLock()
+	items, ok := bs.itemsMap[block]
+	bs.mu.RUnlock()
+	if !ok {
+		return nil
+	}
 
 	data, err := json.MarshalIndent(items, "", "  ")
 	if err != nil {
@@ -218,6 +263,36 @@ func (bs *BlockStore) SaveBlock(block int, items []SubtitleItem) error {
 
 	return nil
 }
+
+// SaveBlocksDeferred nạp nhiều block vào RAM NGAY (một lần khóa, UI/Pipeline đọc được tức thì)
+// rồi ghi các file JSON xuống đĩa ở goroutine nền, không chặn người gọi (BUG-14).
+// Dùng WaitPersist() để đợi ghi xong (test, hoặc trước khi đóng store).
+func (bs *BlockStore) SaveBlocksDeferred(blocks map[int][]SubtitleItem) {
+	if len(blocks) == 0 {
+		return
+	}
+	order := make([]int, 0, len(blocks))
+	bs.mu.Lock()
+	for b, items := range blocks {
+		bs.itemsMap[b] = items
+		order = append(order, b)
+	}
+	bs.mu.Unlock()
+	sort.Ints(order)
+
+	bs.persistWg.Add(1)
+	go func() {
+		defer bs.persistWg.Done()
+		for _, b := range order {
+			if err := bs.persistBlock(b); err != nil {
+				log.Printf("[BlockStore] ghi nền block %d lỗi: %v", b, err)
+			}
+		}
+	}()
+}
+
+// WaitPersist chặn cho tới khi mọi lần ghi nền của SaveBlocksDeferred hoàn tất.
+func (bs *BlockStore) WaitPersist() { bs.persistWg.Wait() }
 
 // GetAllItemsSorted trả về toàn bộ phụ đề đã sắp xếp theo start_sec
 func (bs *BlockStore) GetAllItemsSorted() []SubtitleItem {

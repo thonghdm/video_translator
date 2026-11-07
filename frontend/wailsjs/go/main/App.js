@@ -10,6 +10,10 @@ export function CancelModelDownload() {
   return window['go']['main']['App']['CancelModelDownload']();
 }
 
+export function CancelPlayback() {
+  return window['go']['main']['App']['CancelPlayback']();
+}
+
 export function CheckForUpdate() {
   return window['go']['main']['App']['CheckForUpdate']();
 }
@@ -58,6 +62,10 @@ export function LoadCachedSubtitles(arg1) {
   return window['go']['main']['App']['LoadCachedSubtitles'](arg1);
 }
 
+export function LogPlaybackEvent(arg1, arg2, arg3) {
+  return window['go']['main']['App']['LogPlaybackEvent'](arg1, arg2, arg3);
+}
+
 export function LoginGoogleDrive() {
   return window['go']['main']['App']['LoginGoogleDrive']();
 }
@@ -72,6 +80,10 @@ export function OpenDriveVideo(arg1, arg2, arg3) {
 
 export function OpenVideo(arg1) {
   return window['go']['main']['App']['OpenVideo'](arg1);
+}
+
+export function PreparePlayback(arg1, arg2) {
+  return window['go']['main']['App']['PreparePlayback'](arg1, arg2);
 }
 
 export function ResolveDriveLink(arg1) {
@@ -132,4 +144,8 @@ export function StopPipeline() {
 
 export function UpdatePlayhead(arg1, arg2, arg3) {
   return window['go']['main']['App']['UpdatePlayhead'](arg1, arg2, arg3);
+}
+
+export function UpdateVideoDuration(arg1, arg2) {
+  return window['go']['main']['App']['UpdateVideoDuration'](arg1, arg2);
 }

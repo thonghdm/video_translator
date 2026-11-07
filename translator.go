@@ -90,6 +90,7 @@ type FastHybridTranslator struct {
 	gemini          atomic.Pointer[GeminiClient] // Tầng Gemini Cloud (dự phòng khi GTX bị rate limit)
 	fbFailUntil     atomic.Int64 // không thử init Qwen lại trước mốc này
 	mismatchCount   atomic.Int64 // số lần batch bị lệch dòng phải dịch từng dòng
+	fallbackReason  atomic.Pointer[string] // Lưu lý do lỗi khi fallback sang Local AI / Cloud
 }
 
 // NewFastHybridTranslator khởi tạo bộ dịch lai siêu tốc (tiết kiệm 1.2GB RAM khi có mạng, tự bật Local LLM khi offline)
@@ -166,6 +167,23 @@ func (f *FastHybridTranslator) setMode(m string) {
 	f.modeMu.Unlock()
 	if old != m {
 		log.Printf("[Translator] Chuyển chế độ hoạt động: %s -> %s", old, m)
+	}
+}
+
+// FallbackReason trả về lý do chi tiết khi rớt xuống chế độ fallback (local_ai hoặc cloud)
+func (f *FastHybridTranslator) FallbackReason() string {
+	p := f.fallbackReason.Load()
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+func (f *FastHybridTranslator) setFallbackReason(reason string) {
+	if reason == "" {
+		f.fallbackReason.Store(nil)
+	} else {
+		f.fallbackReason.Store(&reason)
 	}
 }
 
@@ -298,7 +316,14 @@ func (f *FastHybridTranslator) gtxReport(err error, isProbe bool) {
 func (f *FastHybridTranslator) viaGoogle(ctx context.Context, lines []string) ([]string, error) {
 	allowed, isProbe := f.allowGtxRequest()
 	if !allowed {
-		return nil, fmt.Errorf("%w: breaker open", ErrRateLimited)
+		var waitMsg string
+		if f.gtxBreaker != nil {
+			rem := time.Until(time.Unix(0, f.gtxBreaker.blockedUntil.Load()))
+			if rem > 0 {
+				waitMsg = fmt.Sprintf(" (đang khóa trong %v)", rem.Round(time.Second))
+			}
+		}
+		return nil, fmt.Errorf("%w: breaker open%s", ErrRateLimited, waitMsg)
 	}
 	out, err := f.googleBatchOrPerLine(ctx, lines)
 	f.gtxReport(err, isProbe)
@@ -307,6 +332,9 @@ func (f *FastHybridTranslator) viaGoogle(ctx context.Context, lines []string) ([
 	}
 	return out, err
 }
+
+// perLinePause là nhịp nghỉ chống burst giữa các request dịch từng dòng trong cùng một batch nhỏ (3-5 câu).
+const perLinePause = 60 * time.Millisecond
 
 func (f *FastHybridTranslator) googleBatchOrPerLine(ctx context.Context, lines []string) ([]string, error) {
 	batchOut, err := f.translateFastGTX(ctx, strings.Join(lines, "\n"))
@@ -331,10 +359,19 @@ func (f *FastHybridTranslator) googleBatchOrPerLine(ctx context.Context, lines [
 	// Đo tỉ lệ lệch dòng
 	f.mismatchCount.Add(1)
 
-	// Lệch dòng: dịch từng dòng có nhịp nghỉ (chống burst)
+	// Lệch dòng: dịch từng dòng có nhịp nghỉ (chống burst).
+	// - Dòng đã có trong cache thì dùng luôn: không tốn HTTP và không cần nghỉ.
+	// - Chỉ nghỉ giữa hai request HTTP thật sự liên tiếp.
+	// - Lưu cache ngay từng dòng đã dịch được, để nếu dòng sau lỗi thì lần thử lại
+	//   (hoặc tầng sau) không phải dịch lại những dòng này.
 	out := make([]string, len(lines))
+	needPause := false
 	for i, l := range lines {
-		if i > 0 && !sleepCtx(ctx, jitter(150*time.Millisecond)) {
+		if c, ok := f.getCached(l); ok {
+			out[i] = c
+			continue
+		}
+		if needPause && !sleepCtx(ctx, jitter(perLinePause)) {
 			return nil, ctx.Err()
 		}
 		if err := ctx.Err(); err != nil {
@@ -348,6 +385,8 @@ func (f *FastHybridTranslator) googleBatchOrPerLine(ctx context.Context, lines [
 			return nil, errEmptyTranslation
 		}
 		out[i] = s
+		f.setCached(l, s)
+		needPause = true
 	}
 	return out, nil
 }
@@ -519,6 +558,9 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 
 		if err != nil {
 			lastErr = err
+			reason := fmt.Sprintf("[%s lỗi: %v]", t.name, err)
+			log.Printf("[Translator] %s -> chuyển tầng tiếp theo", reason)
+			f.setFallbackReason(reason)
 			// Phân loại lỗi của GTX: nếu là errKindNetwork (mất mạng Internet),
 			// bỏ qua tầng Cloud (Gemini) vì cả hai cùng cần mạng, xuống thẳng Qwen (Local AI)
 			if t.name == "api" && classifyErr(err) == errKindNetwork {
@@ -547,6 +589,9 @@ func (f *FastHybridTranslator) translateWithTiers(ctx context.Context, lines []s
 		// Chỉ đặt mode khi tầng dịch thành công ít nhất một câu (không đặt khi trả rỗng hoàn toàn)
 		if translatedCount > 0 {
 			f.setMode(t.name)
+			if t.name == "api" {
+				f.setFallbackReason("") // Xóa lý do fallback khi tầng chính (API) hoạt động tốt
+			}
 		}
 
 		if !t.fillGaps {

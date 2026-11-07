@@ -22,6 +22,31 @@ type VideoInfo struct {
 	Playable       bool    `json:"playable"`
 	PlayableReason string  `json:"playable_reason"` // ví dụ "audio codec ac3 không được WebView2 hỗ trợ"
 	DoneBlocks     []int   `json:"done_blocks"`     // lấy từ cache có sẵn
+	VideoCodec     string  `json:"video_codec,omitempty"`
+	AudioCodec     string  `json:"audio_codec,omitempty"`
+	// CheckMIME: codec phụ thuộc máy (AV1/HEVC) -> frontend kiểm tra MediaSource.isTypeSupported trước khi phát
+	CheckMIME string `json:"check_mime,omitempty"`
+	// Converted: media_url đang trỏ tới bản đã chuyển mã có sẵn trong cache
+	Converted bool `json:"converted,omitempty"`
+}
+
+// PlaybackProgress payload cho sự kiện "playback_progress" (chuyển mã nền để phát hình)
+type PlaybackProgress struct {
+	Path    string  `json:"path"`
+	Percent float64 `json:"percent"` // 0..100, âm nếu chưa biết
+	Stage   string  `json:"stage"`   // "probe" | "remux" | "transcode"
+}
+
+// PlaybackReady payload cho sự kiện "playback_ready"
+type PlaybackReady struct {
+	Path     string `json:"path"`
+	MediaURL string `json:"media_url"`
+}
+
+// PlaybackFailed payload cho sự kiện "playback_error"
+type PlaybackFailed struct {
+	Path  string `json:"path"`
+	Error string `json:"error"`
 }
 
 // Settings cấu hình ứng dụng lưu trong %LOCALAPPDATA%\SubTrans\settings.json
@@ -48,7 +73,8 @@ type PipelineStatus struct {
 	TotalBlocks int     `json:"total_blocks"`
 	AheadSec       float64 `json:"ahead_sec"`
 	Video          string  `json:"video"`
-	TranslatorMode string  `json:"translator_mode,omitempty"` // "api" | "cloud" | "local_ai"
+	TranslatorMode string  `json:"translator_mode,omitempty"`   // "api" | "cloud" | "local_ai"
+	TranslatorReason string `json:"translator_reason,omitempty"` // lý do chi tiết khi rớt xuống mode fallback
 }
 
 // PipelineError payload cho sự kiện pipeline_error

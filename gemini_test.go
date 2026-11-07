@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -655,5 +657,91 @@ func Test_ParseRetryDelayFromBody(t *testing.T) {
 		if got != c.expected {
 			t.Errorf("parseRetryDelayFromBody(%q) = %v, kỳ vọng %v", c.body, got, c.expected)
 		}
+	}
+}
+
+// --- BUG-17: GeminiClient mặc định phải dùng sharedHTTPTransport và drain body ---
+
+func newGeminiConnCountingServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var newConns atomic.Int32
+	srv := httptest.NewUnstartedServer(handler)
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv, &newConns
+}
+
+func geminiOKHandler(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.Copy(io.Discard, r.Body)
+	payload, _ := json.Marshal(geminiResponse{Candidates: []geminiCandidate{{Content: geminiCandidateContent{
+		Parts: []geminiCandidatePart{{Text: `[{"id": 0, "vi": "Chào"}]`}},
+	}}}})
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(payload)
+}
+
+func TestGemini_DefaultClient_UsesSharedTransport(t *testing.T) {
+	g := NewGeminiClient(DefaultGeminiConfig(), nil)
+	if g.client.Transport != http.RoundTripper(sharedHTTPTransport) {
+		t.Fatalf("GeminiClient mặc định phải dùng sharedHTTPTransport, nhận: %T", g.client.Transport)
+	}
+}
+
+// 6 request đồng thời x 2 đợt: transport mặc định chỉ giữ 2 idle conn/host nên đợt 2 phải mở lại kết nối.
+func TestGemini_DefaultClient_ReusesConnectionsAcrossWaves(t *testing.T) {
+	srv, newConns := newGeminiConnCountingServer(t, geminiOKHandler)
+	cfg := DefaultGeminiConfig()
+	cfg.Endpoint = srv.URL
+	g := NewGeminiClient(cfg, nil)
+
+	wave := func() {
+		var wg sync.WaitGroup
+		for i := 0; i < 6; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := g.doRequest(context.Background(), []GeminiItem{{ID: 0, Text: "Hi"}}, nil); err != nil {
+					t.Errorf("doRequest lỗi: %v", err)
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	wave()
+	afterFirst := newConns.Load()
+	time.Sleep(50 * time.Millisecond)
+	wave()
+	t.Logf("kết nối mới: đợt 1=%d, tổng sau đợt 2=%d", afterFirst, newConns.Load())
+	if newConns.Load() != afterFirst {
+		t.Fatalf("đợt 2 phải tái sử dụng kết nối idle (đợt 1=%d, tổng=%d)", afterFirst, newConns.Load())
+	}
+}
+
+// 429 kèm body lớn hơn giới hạn đọc 64KB: phải drain phần dư để kết nối được tái sử dụng.
+func TestGemini_429LargeBody_ConnectionReused(t *testing.T) {
+	srv, newConns := newGeminiConnCountingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 200<<10))
+	})
+	cfg := DefaultGeminiConfig()
+	cfg.Endpoint = srv.URL
+	g := NewGeminiClient(cfg, nil)
+
+	for i := 0; i < 3; i++ {
+		_, err := g.doRequest(context.Background(), []GeminiItem{{ID: 0, Text: "Hi"}}, nil)
+		var rl *RateLimitError
+		if !errors.As(err, &rl) {
+			t.Fatalf("kỳ vọng RateLimitError, nhận: %v", err)
+		}
+	}
+	t.Logf("kết nối mới sau 3 request 429: %d", newConns.Load())
+	if newConns.Load() != 1 {
+		t.Fatalf("3 request tuần tự phải dùng chung 1 kết nối, thực tế mở %d", newConns.Load())
 	}
 }

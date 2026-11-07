@@ -61,3 +61,29 @@ func Test_RunCommand_TimeoutAndKill(t *testing.T) {
 		t.Errorf("Thời gian chạy vượt quá mong đợi: %v (tiến trình có thể chưa bị kill kịp thời)", elapsed)
 	}
 }
+
+// Test_BUG11_RunCommand_CapturesFullStderrBeforeExit đảm bảo RunCommand đợi goroutine đọc hết stderrPipe
+// trước khi gọi cmd.Wait(), không làm mất dòng cuối của stderr khi tiến trình xuất lượng lớn log rồi thoát ngay.
+func Test_BUG11_RunCommand_CapturesFullStderrBeforeExit(t *testing.T) {
+	ctx := context.Background()
+
+	var bin string
+	var args []string
+	if runtime.GOOS == "windows" {
+		bin = "cmd.exe"
+		args = []string{"/C", "for /L %i in (1,1,200) do @echo whisper_print_timings: line_%i 1>&2"}
+	} else {
+		bin = "sh"
+		args = []string{"-c", "for i in $(seq 1 200); do echo \"whisper_print_timings: line_$i\" >&2; done"}
+	}
+
+	for run := 0; run < 10; run++ {
+		res, err := RunCommand(ctx, bin, args, 10*time.Second, nil)
+		if err != nil {
+			t.Fatalf("run %d: RunCommand lỗi: %v", run, err)
+		}
+		if !strings.Contains(res.FullStderr, "whisper_print_timings: line_200") {
+			t.Fatalf("run %d: FullStderr bị mất dòng cuối line_200! Độ dài thu được: %d bytes", run, len(res.FullStderr))
+		}
+	}
+}
