@@ -127,16 +127,27 @@ const API_KEY_KEY = "geminiApiKey";
 /**
  * Tải cài đặt từ chrome.storage.local, tự động deep-merge với DEFAULT_SETTINGS
  */
-export async function loadSettings(): Promise<Settings> {
+export interface LoadSettingsOptions {
+  /**
+   * Có đọc Gemini API key hay không (mặc định true).
+   * Content script PHẢI truyền false: key không bao giờ được đưa vào context của trang (PLAN 3.4).
+   */
+  includeApiKey?: boolean;
+}
+
+export async function loadSettings(opts: LoadSettingsOptions = {}): Promise<Settings> {
+  const includeApiKey = opts.includeApiKey !== false;
   if (typeof chrome === "undefined" || !chrome.storage?.local) {
     return cloneDefaults();
   }
 
-  const data = await chrome.storage.local.get([SETTINGS_KEY, API_KEY_KEY]);
+  const keys = includeApiKey ? [SETTINGS_KEY, API_KEY_KEY] : [SETTINGS_KEY];
+  const data = await chrome.storage.local.get(keys);
   const saved = data[SETTINGS_KEY];
   const settings = deepMerge(DEFAULT_SETTINGS, saved);
+  settings.gemini.apiKey = "";
 
-  if (typeof data[API_KEY_KEY] === "string") {
+  if (includeApiKey && typeof data[API_KEY_KEY] === "string") {
     settings.gemini.apiKey = data[API_KEY_KEY];
   }
 
@@ -184,7 +195,10 @@ export async function setApiKey(key: string): Promise<void> {
 /**
  * Lắng nghe thay đổi cài đặt từ chrome.storage.onChanged
  */
-export function onSettingsChanged(callback: (newSettings: Settings) => void): () => void {
+export function onSettingsChanged(
+  callback: (newSettings: Settings) => void,
+  opts: LoadSettingsOptions = {}
+): () => void {
   if (typeof chrome === "undefined" || !chrome.storage?.onChanged) {
     return () => {};
   }
@@ -194,7 +208,7 @@ export function onSettingsChanged(callback: (newSettings: Settings) => void): ()
     areaName: string
   ) => {
     if (areaName === "local" && (changes[SETTINGS_KEY] || changes[API_KEY_KEY])) {
-      void loadSettings().then(callback);
+      void loadSettings(opts).then(callback);
     }
   };
 

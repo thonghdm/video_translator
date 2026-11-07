@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<title>SubTrans — Trang thử Phase 4</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 24px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+  #wrap { position: relative; width: 800px; max-width: 100%; background: #000; }
+  video { width: 100%; display: block; background: #000; }
+  button, label { font-size: 13px; }
+  code { background: #222; padding: 1px 4px; border-radius: 3px; }
+  .note { color: #aaa; font-size: 13px; max-width: 800px; line-height: 1.5; }
+</style>
+<!-- CSS "cực đoan" để kiểm tra overlay không bị vỡ (bật bằng checkbox) -->
+<style id="hostile" media="not all">
+  * { all: unset !important; }
+  div, span { font-size: 40px !important; color: red !important; }
+  video { display: block !important; width: 800px !important; height: 450px !important; }
+</style>
+</head>
+<body>
+<h2>SubTrans — Trang thử Phase 4 (&lt;video&gt; + &lt;track&gt;)</h2>
+<p class="note">
+  1) Chọn một file video bất kỳ (mp4/webm) trên máy. 2) Bấm play: phụ đề EN (track VTT nhúng sẵn, 20 cue, mỗi cue 3 giây)
+  phải hiện trong khung overlay của SubTrans, <b>không</b> hiện phụ đề gốc của trình duyệt.
+  Nếu mở bằng <code>file://</code>, bật "Allow access to file URLs" cho extension trong <code>chrome://extensions</code>.
+</p>
+<div class="row">
+  <input type="file" id="file" accept="video/*" />
+  <input type="text" id="url" placeholder="...hoặc dán URL video (mp4)" size="40" />
+  <button id="load">Nạp URL</button>
+</div>
+<div class="row">
+  <button id="fsWrap">Fullscreen khung bọc (div)</button>
+  <span class="note">Nút fullscreen của thanh điều khiển video = fullscreen chính thẻ &lt;video&gt; → dùng native fallback.</span>
+</div>
+<div class="row">
+  <label><input type="checkbox" id="hostileToggle" /> Bật CSS cực đoan (<code>* { all: unset }</code>)</label>
+  <label><input type="checkbox" id="scrollToggle" /> Thêm khoảng trống để thử cuộn trang</label>
+</div>
+<div id="wrap">
+  <video id="v" controls crossorigin="anonymous" playsinline>
+    <track kind="subtitles" srclang="en" label="English" default src="data:text/vtt;charset=utf-8,WEBVTT%0A%0A1%0A00%3A00%3A00.000%20--%3E%2000%3A00%3A02.600%0AWelcome%20to%20this%20short%20programming%20lesson.%0A%0A2%0A00%3A00%3A03.000%20--%3E%2000%3A00%3A05.600%0AToday%20we%20will%20build%20a%20simple%20REST%20API.%0A%0A3%0A00%3A00%3A06.000%20--%3E%2000%3A00%3A08.600%0AFirst%2C%20open%20your%20terminal%20and%20create%20a%20new%20folder.%0A%0A4%0A00%3A00%3A09.000%20--%3E%2000%3A00%3A11.600%0ARun%20npm%20init%20to%20generate%20the%20package.json%20file.%0A%0A5%0A00%3A00%3A12.000%20--%3E%2000%3A00%3A14.600%0ANext%2C%20install%20Express%20with%20npm%20install%20express.%0A%0A6%0A00%3A00%3A15.000%20--%3E%2000%3A00%3A17.600%0ACreate%20a%20file%20called%20index.js%20in%20the%20project%20root.%0A%0A7%0A00%3A00%3A18.000%20--%3E%2000%3A00%3A20.600%0AImport%20Express%20and%20create%20an%20application%20instance.%0A%0A8%0A00%3A00%3A21.000%20--%3E%2000%3A00%3A23.600%0ADefine%20a%20GET%20route%20that%20returns%20a%20JSON%20response.%0A%0A9%0A00%3A00%3A24.000%20--%3E%2000%3A00%3A26.600%0ACall%20app.listen%20and%20pass%20the%20port%20number.%0A%0A10%0A00%3A00%3A27.000%20--%3E%2000%3A00%3A29.600%0AOpen%20the%20browser%20and%20visit%20localhost%20on%20port%20three%20thousand.%0A%0A11%0A00%3A00%3A30.000%20--%3E%2000%3A00%3A32.600%0AYou%20should%20see%20the%20JSON%20message%20on%20the%20screen.%0A%0A12%0A00%3A00%3A33.000%20--%3E%2000%3A00%3A35.600%0A%5BMusic%5D%0A%0A13%0A00%3A00%3A36.000%20--%3E%2000%3A00%3A38.600%0ANow%20let%27s%20add%20a%20POST%20route%20to%20create%20new%20items.%0A%0A14%0A00%3A00%3A39.000%20--%3E%2000%3A00%3A41.600%0AWe%20need%20middleware%20to%20parse%20the%20request%20body.%0A%0A15%0A00%3A00%3A42.000%20--%3E%2000%3A00%3A44.600%0AUse%20express.json%20before%20defining%20your%20routes.%0A%0A16%0A00%3A00%3A45.000%20--%3E%2000%3A00%3A47.600%0ASend%20a%20request%20with%20Postman%20to%20test%20the%20endpoint.%0A%0A17%0A00%3A00%3A48.000%20--%3E%2000%3A00%3A50.600%0ACheck%20the%20status%20code%20and%20the%20response%20body.%0A%0A18%0A00%3A00%3A51.000%20--%3E%2000%3A00%3A53.600%0AIf%20something%20fails%2C%20read%20the%20error%20in%20the%20console.%0A%0A19%0A00%3A00%3A54.000%20--%3E%2000%3A00%3A56.600%0AThat%27s%20it%20for%20today%2C%20thanks%20for%20watching%21%0A%0A20%0A00%3A00%3A57.000%20--%3E%2000%3A00%3A59.600%0A%E2%99%AA%20%E2%99%AA%0A" />
+  </video>
+</div>
+<div id="spacer" style="height:0"></div>
+<script>
+  const v = document.getElementById("v");
+  document.getElementById("file").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    if (f) { v.src = URL.createObjectURL(f); v.load(); }
+  });
+  document.getElementById("load").addEventListener("click", () => {
+    const u = document.getElementById("url").value.trim();
+    if (u) { v.src = u; v.load(); }
+  });
+  document.getElementById("fsWrap").addEventListener("click", () => document.getElementById("wrap").requestFullscreen());
+  document.getElementById("hostileToggle").addEventListener("change", (e) => {
+    document.getElementById("hostile").media = e.target.checked ? "all" : "not all";
+  });
+  document.getElementById("scrollToggle").addEventListener("change", (e) => {
+    document.getElementById("spacer").style.height = e.target.checked ? "2000px" : "0";
+  });
+</script>
+</body>
+</html>
