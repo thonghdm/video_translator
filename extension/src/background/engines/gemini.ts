@@ -12,6 +12,7 @@ import {
   InvalidResponseIdsError,
   CanceledError,
   NetworkError,
+  LocalRateLimitError,
   errToBreakerOutcome,
 } from "./errors";
 
@@ -122,6 +123,16 @@ export class GeminiEngine {
     return this.rateLimiter;
   }
 
+  /** Đã cấu hình key (Go: cfg.Enabled && cfg.APIKey != "") — dùng để quyết định có tầng cloud hay không */
+  public hasKey(): boolean {
+    return Boolean(this.cfg.apiKey);
+  }
+
+  public getEndpoint(): string {
+    return this.cfg.endpoint;
+  }
+
+  /** Sẵn sàng dịch NGAY (có key, breaker mở, còn token) — chỉ dùng để hiển thị trạng thái */
   public isAvailable(): boolean {
     return (
       Boolean(this.cfg.apiKey) &&
@@ -225,20 +236,27 @@ export class GeminiEngine {
     timeoutMs: number,
     callerSignal?: AbortSignal
   ): Promise<Map<number, string>> {
-    // 1. Kiểm tra Breaker
-    const { allowed, isProbe } = this.breaker.allow();
-    if (!allowed) {
-      throw new RateLimitedError("Gemini circuit breaker is blocked");
+    // 1. Token bucket TRƯỚC (giống gemini.go translateChunk): hết token thì không gọi HTTP,
+    //    không phạt breaker và — quan trọng — không chiếm cờ probe half-open của breaker.
+    const acq = await this.rateLimiter.acquire(isTier1, timeoutMs, callerSignal);
+    if (acq === "aborted") {
+      throw new CanceledError("Aborted while waiting for Gemini token");
+    }
+    if (acq === "timeout") {
+      throw new LocalRateLimitError(
+        "Gemini local rate limit (out of tokens)",
+        this.rateLimiter.msUntilToken(isTier1)
+      );
     }
 
-    // 2. Chờ lấy token từ TokenBucket
-    const acquired = await this.rateLimiter.acquire(
-      isTier1,
-      timeoutMs,
-      callerSignal
-    );
-    if (!acquired) {
-      throw new RateLimitedError("Gemini local rate limit (out of tokens)");
+    // 2. Breaker SAU khi đã có token. Từ đây mọi đường thoát đều phải report(…, isProbe).
+    const { allowed, isProbe } = this.breaker.allow();
+    if (!allowed) {
+      const until = this.breaker.getBlockedUntil();
+      throw new RateLimitedError(
+        "Gemini circuit breaker is open",
+        until > 0 ? Math.max(0, until - Date.now()) : undefined
+      );
     }
 
     let resultMap: Map<number, string>;
@@ -254,29 +272,21 @@ export class GeminiEngine {
       throw reqErr;
     }
 
-    // 3. Kiểm tra xem có ID nào bị thiếu không
+    // 3. Thiếu ID: retry ĐÚNG 1 LẦN riêng các ID thiếu, chỉ khi lấy ngay được token.
+    //    Lỗi của lượt retry được bỏ qua (giữ phần đã dịch) — không ném ra ngoài.
     const missingItems = items.filter((item) => !resultMap.has(item.id));
-
-    // 4. Nếu thiếu ID: retry ĐÚNG 1 LẦN CHỈ RIÊNG các ID thiếu (nếu lấy được token)
-    if (missingItems.length > 0) {
-      if (this.rateLimiter.tryAcquire(isTier1)) {
-        try {
-          const retryMap = await this.doRequest(
-            missingItems,
-            contextLines,
-            timeoutMs,
-            callerSignal
-          );
-          for (const [id, vi] of retryMap.entries()) {
-            resultMap.set(id, vi);
-          }
-        } catch {
-          // Bỏ qua lỗi retry, giữ nguyên phần đã dịch được
+    if (missingItems.length > 0 && this.rateLimiter.tryAcquire(isTier1)) {
+      try {
+        const retryMap = await this.doRequest(missingItems, contextLines, timeoutMs, callerSignal);
+        for (const [id, vi] of retryMap.entries()) {
+          resultMap.set(id, vi);
         }
+      } catch {
+        /* giữ nguyên phần đã dịch được */
       }
     }
 
-    // Báo cáo thành công cho Breaker
+    // 4. Request chính thành công → báo OK cho breaker (nhả cờ probe nếu có)
     this.breaker.report(OUTCOME_OK, isProbe);
     return resultMap;
   }

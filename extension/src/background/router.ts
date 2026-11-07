@@ -1,20 +1,33 @@
 /**
  * SubTrans Extension — Bộ định tuyến dịch thuật phân tầng (Translation Router)
- * Port từ translateWithTiers trong translator.go:512
+ * Port từ translateWithTiers / TranslateBatch trong translator.go (bỏ tầng local_ai).
+ *
+ * Quy tắc giữ nguyên như Go:
+ * - Tầng lỗi → ghi lastError, chuyển tầng tiếp theo.
+ * - GTX lỗi MẠNG → bỏ qua cloud (cả 2 cùng cần mạng) → trả lỗi network ngay.
+ * - Tầng fillGaps=false chạy KHÔNG lỗi → dừng (không đánh thức tầng sau vì dòng rỗng).
+ * - Bị hủy → dừng ngay, không chuyển tầng.
+ * Bổ sung cho extension:
+ * - Có tầng cloud hay không chỉ phụ thuộc việc ĐÃ CÓ KEY (Go: Enabled && APIKey != ""), không phụ thuộc
+ *   bucket còn token lúc gọi — để chế độ "gemini" không lặng lẽ rơi về GTX khi bucket tạm cạn.
+ * - Breaker GTX đang khóa → lastError = RateLimitedError(retryAfterMs) để content biết tạm nghỉ.
+ * - Cache cụm từ tra theo engine của TẦNG ĐẦU; "upgrade" chỉ tra "cloud" (nếu không sẽ trúng bản GTX).
  */
 
-import type {
-  EngineId,
-  LineResult,
-  Priority,
-  TranslateMode,
-} from "../shared/types";
+import type { EngineError, EngineId, LineResult, Priority, TranslateMode } from "../shared/types";
 import type { LRUCache } from "../shared/lru";
 import { isIgnoredSubtitle, normalizeLine } from "../shared/text";
-import { classifyErr, CanceledError, errToBreakerOutcome } from "./engines/errors";
-import { googleBatchOrPerLine, GtxQueue } from "./engines/gtx";
+import {
+  classifyErr,
+  retryAfterOf,
+  CanceledError,
+  DisabledError,
+  RateLimitedError,
+  errToBreakerOutcome,
+} from "./engines/errors";
+import { googleBatchOrPerLine, type GtxQueue } from "./engines/gtx";
 import type { GeminiEngine } from "./engines/gemini";
-import { CircuitBreaker, OUTCOME_OK } from "../shared/breaker";
+import { type CircuitBreaker, OUTCOME_OK } from "../shared/breaker";
 
 export interface TranslateOptions {
   lines: string[];
@@ -27,11 +40,47 @@ export interface TranslateOptions {
 export interface RouterConfig {
   mode: TranslateMode;
   geminiModel: string;
+  gtxTimeoutMs?: number;
 }
 
-interface TierDef {
+export interface TierDef {
   id: EngineId;
   fillGaps: boolean;
+}
+
+export interface TranslateOutput {
+  results: LineResult[];
+  error?: EngineError;
+}
+
+/** Thứ tự tầng theo mode/priority (PLAN Phase 2, bảng router). Hàm thuần để test. */
+export function planTiers(
+  mode: TranslateMode,
+  priority: Priority,
+  hasGeminiKey: boolean,
+  prefer?: EngineId
+): TierDef[] {
+  const api: TierDef = { id: "api", fillGaps: false };
+  const cloud: TierDef = { id: "cloud", fillGaps: true };
+  let tiers: TierDef[];
+
+  if (priority === "upgrade") {
+    tiers = hasGeminiKey ? [{ id: "cloud", fillGaps: false }] : [];
+  } else if (mode === "gemini" || (mode === "hybrid" && priority === "tier2")) {
+    tiers = hasGeminiKey ? [cloud, api] : [api];
+  } else {
+    // "google", hoặc hybrid tier1
+    tiers = hasGeminiKey ? [api, cloud] : [api];
+  }
+
+  if (prefer && priority !== "upgrade") {
+    const idx = tiers.findIndex((t) => t.id === prefer);
+    if (idx > 0) {
+      const [t] = tiers.splice(idx, 1);
+      tiers.unshift(t);
+    }
+  }
+  return tiers;
 }
 
 export class TranslationRouter {
@@ -47,224 +96,151 @@ export class TranslationRouter {
     this.config = { ...this.config, ...newConfig };
   }
 
-  /**
-   * Dịch danh sách các câu tiếng Anh sang tiếng Việt theo cơ chế phân tầng (tiers)
-   * Port 1:1 từ translateWithTiers trong translator.go:512
-   */
-  public async translate(options: TranslateOptions): Promise<{
-    results: LineResult[];
-    error?: { kind: ReturnType<typeof classifyErr>; message: string; retryAfterMs?: number };
-  }> {
+  public async translate(options: TranslateOptions): Promise<TranslateOutput> {
     const { lines, srcLang = "auto", priority, prefer, signal } = options;
     const isTier1 = priority === "tier1";
+    const results: LineResult[] = lines.map(() => ({ text: "", engine: null }));
+    if (lines.length === 0) return { results };
 
-    const results: LineResult[] = lines.map(() => ({
-      text: "",
-      engine: null,
-    }));
-
-    if (lines.length === 0) {
-      return { results };
-    }
-
-    // 1. Tiền xử lý: chuẩn hoá khoảng trắng, lọc câu tiếng động/nốt nhạc, tra cứu cache
-    const todoIndices: number[] = [];
-    const todoLines: string[] = [];
-
-    for (let i = 0; i < lines.length; i++) {
-      const raw = lines[i];
-      const normalized = normalizeLine(raw);
-
-      if (!normalized || isIgnoredSubtitle(normalized)) {
-        results[i] = { text: "", engine: null };
-        continue;
-      }
-
-      // Tra cứu LRU cache
-      const preferredEngine = prefer || (this.config.mode === "gemini" ? "cloud" : "api");
-      const cacheKey = `${preferredEngine}|${normalized}`;
-      const cached = this.phraseCache.get(cacheKey);
-
-      if (cached) {
-        results[i] = { text: cached, engine: preferredEngine };
-        continue;
-      }
-
-      todoIndices.push(i);
-      todoLines.push(normalized);
-    }
-
-    if (todoLines.length === 0) {
-      return { results };
-    }
-
-    // 2. Xác định danh sách các tầng dịch theo mode và priority (Mục 473 trong PLAN.md)
-    const tiers: TierDef[] = [];
-    const hasGeminiKey = this.geminiEngine.isAvailable();
-
-    if (priority === "upgrade") {
-      if (hasGeminiKey) {
-        tiers.push({ id: "cloud", fillGaps: false });
-      }
-    } else if (this.config.mode === "google") {
-      tiers.push({ id: "api", fillGaps: false });
-      if (hasGeminiKey) {
-        tiers.push({ id: "cloud", fillGaps: true });
-      }
-    } else if (this.config.mode === "gemini") {
-      if (hasGeminiKey) {
-        tiers.push({ id: "cloud", fillGaps: true });
-      }
-      tiers.push({ id: "api", fillGaps: false });
-    } else {
-      // mode === "hybrid"
-      if (priority === "tier1") {
-        tiers.push({ id: "api", fillGaps: false });
-        if (hasGeminiKey) {
-          tiers.push({ id: "cloud", fillGaps: true });
-        }
-      } else {
-        // tier2
-        if (hasGeminiKey) {
-          tiers.push({ id: "cloud", fillGaps: true });
-        }
-        tiers.push({ id: "api", fillGaps: false });
-      }
-    }
-
-    // Nếu prefer được chỉ định, đảo ưu tiên tầng đó lên đầu
-    if (prefer) {
-      const idx = tiers.findIndex((t) => t.id === prefer);
-      if (idx > 0) {
-        const [target] = tiers.splice(idx, 1);
-        tiers.unshift(target);
-      }
-    }
-
-    let pendingIndices = [...Array(todoLines.length).keys()];
-    let skipCloud = false;
-    let lastError: unknown = null;
-
-    // 3. Thực thi qua từng tầng (Tier Loop)
-    for (const tier of tiers) {
-      if (pendingIndices.length === 0) {
-        break;
-      }
-      if (signal?.aborted) {
-        throw new CanceledError();
-      }
-      if (tier.id === "cloud" && skipCloud) {
-        continue;
-      }
-
-      const pendingLines = pendingIndices.map((pIdx) => todoLines[pIdx]);
-      let translated: string[] = [];
-
-      try {
-        if (tier.id === "api") {
-          // Kiểm tra Breaker GTX
-          const { allowed, isProbe } = this.gtxBreaker.allow();
-          if (!allowed) {
-            continue;
-          }
-
-          try {
-            translated = await this.gtxQueue.run(
-              () =>
-                googleBatchOrPerLine(
-                  pendingLines,
-                  srcLang,
-                  signal,
-                  this.phraseCache
-                ),
-              isTier1,
-              signal
-            );
-            this.gtxBreaker.report(OUTCOME_OK, isProbe);
-          } catch (apiErr) {
-            this.gtxBreaker.report(errToBreakerOutcome(apiErr), isProbe);
-            throw apiErr;
-          }
-        } else {
-          // tier.id === "cloud"
-          // Ngữ cảnh: lấy 2 dòng trước đó từ todoLines (nếu có)
-          const context =
-            pendingIndices[0] > 0
-              ? todoLines.slice(
-                  Math.max(0, pendingIndices[0] - 2),
-                  pendingIndices[0]
-                )
-              : [];
-
-          translated = await this.geminiEngine.translateLines(
-            pendingLines,
-            context,
-            isTier1,
-            signal
-          );
-        }
-      } catch (tierErr: unknown) {
-        lastError = tierErr;
-
-        // Quan trọng: nếu bị canceled thì dừng ngay, tuyệt đối không chuyển tầng
-        if (
-          tierErr instanceof CanceledError ||
-          signal?.aborted ||
-          classifyErr(tierErr) === "canceled"
-        ) {
-          throw tierErr;
-        }
-
-        // Nếu GTX lỗi kiểu network (mất mạng Internet) -> cả 2 đều cần mạng -> skip Cloud
-        if (tier.id === "api" && classifyErr(tierErr) === "network") {
-          skipCloud = true;
-          // Không còn tầng local_ai trong Extension -> ném lỗi network ra ngay
-          break;
-        }
-
-        continue;
-      }
-
-      // Xử lý kết quả trả về từ tầng
-      const remaining: number[] = [];
-      let successCount = 0;
-
-      for (let j = 0; j < pendingIndices.length; j++) {
-        const pIdx = pendingIndices[j];
-        const origIdx = todoIndices[pIdx];
-        const text = translated[j]?.trim();
-
-        if (text) {
-          results[origIdx] = { text, engine: tier.id };
-          this.phraseCache.set(`${tier.id}|${todoLines[pIdx]}`, text);
-          successCount++;
-        } else if (tier.fillGaps) {
-          remaining.push(pIdx);
-        }
-      }
-
-      // Nếu tầng không cho phép fillGaps (fillGaps: false) và chạy thành công mà không có lỗi -> dừng
-      if (!tier.fillGaps && successCount > 0) {
-        break;
-      }
-
-      pendingIndices = remaining;
-    }
-
-    // Nếu không dịch được dòng nào và có lỗi -> trả về kèm error
-    const anyTranslated = results.some((r) => r.text !== "");
-    if (!anyTranslated && lastError) {
-      const kind = classifyErr(lastError);
+    const tiers = planTiers(this.config.mode, priority, this.geminiEngine.hasKey(), prefer);
+    if (tiers.length === 0) {
       return {
         results,
-        error: {
-          kind,
-          message: (lastError as Error)?.message || String(lastError),
-          retryAfterMs: (lastError as { retryAfterMs?: number })?.retryAfterMs,
-        },
+        error: { kind: "disabled", message: "Chưa cấu hình Gemini API key (upgrade cần Gemini)" },
       };
     }
 
+    // 1. Tiền xử lý: chuẩn hoá khoảng trắng, lọc tiếng động/nốt nhạc, tra cache của TẦNG ĐẦU
+    const cacheEngine = tiers[0].id;
+    const todoIndices: number[] = [];
+    const todoLines: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const normalized = normalizeLine(lines[i]);
+      if (!normalized || isIgnoredSubtitle(normalized)) continue;
+      const cached = this.phraseCache.get(`${cacheEngine}|${normalized}`);
+      if (cached) {
+        results[i] = { text: cached, engine: cacheEngine };
+        continue;
+      }
+      todoIndices.push(i);
+      todoLines.push(normalized);
+    }
+    if (todoLines.length === 0) return { results };
+
+    let pending = todoLines.map((_, k) => k);
+    let skipCloud = false;
+    let lastError: unknown = null;
+
+    // 2. Chạy qua từng tầng
+    for (const tier of tiers) {
+      if (pending.length === 0) break;
+      if (signal?.aborted) throw new CanceledError();
+      if (tier.id === "cloud" && skipCloud) continue;
+
+      const input = pending.map((k) => todoLines[k]);
+      let out: string[];
+      try {
+        out =
+          tier.id === "api"
+            ? await this.viaGoogle(input, srcLang, isTier1, signal)
+            : await this.viaGemini(input, pending, todoLines, isTier1, signal);
+      } catch (err) {
+        if (err instanceof CanceledError || signal?.aborted) {
+          throw err instanceof CanceledError ? err : new CanceledError();
+        }
+        lastError = err;
+        if (tier.id === "api" && classifyErr(err) === "network") {
+          skipCloud = true;
+          break; // extension không còn tầng local_ai
+        }
+        continue;
+      }
+
+      const remaining: number[] = [];
+      for (let j = 0; j < pending.length; j++) {
+        const k = pending[j];
+        const text = out[j]?.trim();
+        if (text) {
+          results[todoIndices[k]] = { text, engine: tier.id };
+          this.phraseCache.set(`${tier.id}|${todoLines[k]}`, text);
+        } else if (tier.fillGaps) {
+          remaining.push(k);
+        }
+      }
+      if (!tier.fillGaps) {
+        pending = [];
+        break;
+      }
+      pending = remaining;
+    }
+
+    const anyTranslated = todoIndices.some((i) => results[i].text !== "");
+    if (!anyTranslated && lastError) {
+      return {
+        results,
+        error: {
+          kind: classifyErr(lastError),
+          message: (lastError as Error)?.message || String(lastError),
+          retryAfterMs: retryAfterOf(lastError),
+        },
+      };
+    }
     return { results };
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private async viaGoogle(
+    lines: string[],
+    srcLang: string,
+    isTier1: boolean,
+    signal?: AbortSignal
+  ): Promise<string[]> {
+    // Chờ chỗ trong hàng đợi TRƯỚC, rồi mới xin quyền breaker ngay trước khi gọi HTTP
+    // (không giữ cờ probe half-open trong lúc xếp hàng).
+    return this.gtxQueue.run(
+      async () => {
+        const { allowed, isProbe } = this.gtxBreaker.allow();
+        if (!allowed) {
+          const until = this.gtxBreaker.getBlockedUntil();
+          throw new RateLimitedError(
+            "GTX circuit breaker is open",
+            until > 0 ? Math.max(0, until - Date.now()) : undefined
+          );
+        }
+        try {
+          const out = await googleBatchOrPerLine(
+            lines,
+            srcLang,
+            signal,
+            this.phraseCache,
+            this.config.gtxTimeoutMs ?? 5000
+          );
+          this.gtxBreaker.report(OUTCOME_OK, isProbe);
+          return out; // luôn đủ lines.length phần tử (batch khớp, hoặc dịch từng dòng)
+        } catch (err) {
+          this.gtxBreaker.report(errToBreakerOutcome(err), isProbe);
+          throw err;
+        }
+      },
+      isTier1,
+      signal
+    );
+  }
+
+  private viaGemini(
+    input: string[],
+    pending: number[],
+    todoLines: string[],
+    isTier1: boolean,
+    signal?: AbortSignal
+  ): Promise<string[]> {
+    if (!this.geminiEngine.hasKey()) {
+      return Promise.reject(new DisabledError());
+    }
+    // Ngữ cảnh: 2 dòng ngay trước dòng đầu tiên cần dịch (nếu có trong batch)
+    const first = pending[0];
+    const context = first > 0 ? todoLines.slice(Math.max(0, first - 2), first) : [];
+    return this.geminiEngine.translateLines(input, context, isTier1, signal);
   }
 }

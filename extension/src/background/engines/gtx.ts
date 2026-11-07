@@ -121,48 +121,21 @@ export async function googleBatchOrPerLine(
     return [];
   }
 
-  // 1. Thử dịch batch ghép bằng \n
-  try {
-    const batchOut = await translateFastGtx(
-      lines.join("\n"),
-      srcLang,
-      signal,
-      timeoutMs
-    );
-    const parts = batchOut.split("\n");
-
-    if (parts.length === lines.length) {
-      let allValid = true;
-      for (let i = 0; i < parts.length; i++) {
-        parts[i] = parts[i].trim();
-        if (parts[i] === "") {
-          allValid = false;
-          break;
-        }
-      }
-
-      if (allValid) {
-        if (phraseCache) {
-          for (let i = 0; i < lines.length; i++) {
-            phraseCache.set(`api|${lines[i]}`, parts[i]);
-          }
-        }
-        return parts;
+  // 1. Dịch batch ghép bằng \n. Lỗi bất kỳ → trả về ngay (Go: `if err != nil { return nil, err }`).
+  //    Chỉ khi batch THÀNH CÔNG nhưng lệch số dòng/có dòng rỗng mới chuyển sang dịch từng dòng.
+  const batchOut = await translateFastGtx(lines.join("\n"), srcLang, signal, timeoutMs);
+  const parts = batchOut.split("\n").map((p) => p.trim());
+  if (parts.length === lines.length && parts.every((p) => p !== "")) {
+    if (phraseCache) {
+      for (let i = 0; i < lines.length; i++) {
+        phraseCache.set(`api|${lines[i]}`, parts[i]);
       }
     }
-  } catch (batchErr) {
-    // Nếu bị rate limited, canceled hoặc network error thì throw ngay, không thử dịch từng dòng
-    if (
-      batchErr instanceof RateLimitedError ||
-      batchErr instanceof CanceledError ||
-      batchErr instanceof NetworkError ||
-      signal?.aborted
-    ) {
-      throw batchErr;
-    }
+    return parts;
   }
 
-  // 2. Lệch dòng hoặc batch rỗng: dịch từng dòng có nhịp nghỉ (chống burst)
+  // 2. Lệch dòng: dịch từng dòng có nhịp nghỉ (chống burst).
+  //    Dòng đã có cache thì dùng luôn (không tốn HTTP, không nghỉ); lưu cache ngay từng dòng.
   const out: string[] = new Array(lines.length).fill("");
   let needPause = false;
 
@@ -200,18 +173,27 @@ export async function googleBatchOrPerLine(
 }
 
 /**
- * Hàng đợi giới hạn số request đồng thời và giãn cách giữa các lượt gọi GTX
+ * Hàng đợi GTX dùng chung toàn service worker:
+ * - Tối đa `concurrency` request chạy cùng lúc (giữ chỗ TRƯỚC khi chờ giãn cách → không vượt giới hạn).
+ * - Giữa 2 lần bắt đầu request cách nhau ít nhất `gapMs`.
+ * - Tier-1 chen lên trước mọi task Tier-2 còn trong hàng đợi.
+ * - Task bị abort khi còn trong hàng đợi → bị loại ngay (CanceledError), không chiếm chỗ.
+ * Chỉ MỘT vòng bơm (pump) được lấy task ra khỏi hàng đợi tại một thời điểm.
  */
+interface QueueItem {
+  fn: () => Promise<unknown>;
+  resolve: (val: unknown) => void;
+  reject: (err: unknown) => void;
+  isTier1: boolean;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+
 export class GtxQueue {
-  private activeCount = 0;
+  private active = 0;
   private lastStartTime = 0;
-  private queue: Array<{
-    fn: () => Promise<unknown>;
-    resolve: (val: unknown) => void;
-    reject: (err: unknown) => void;
-    isTier1: boolean;
-    signal?: AbortSignal;
-  }> = [];
+  private pumping = false;
+  private readonly queue: QueueItem[] = [];
 
   constructor(
     private concurrency = 2,
@@ -221,75 +203,86 @@ export class GtxQueue {
   public updateConfig(concurrency: number, gapMs: number): void {
     if (concurrency > 0) this.concurrency = concurrency;
     if (gapMs >= 0) this.gapMs = gapMs;
+    void this.pump();
   }
 
-  public run<T>(
-    fn: () => Promise<T>,
-    isTier1: boolean,
-    signal?: AbortSignal
-  ): Promise<T> {
+  public get activeCount(): number {
+    return this.active;
+  }
+
+  public get queuedCount(): number {
+    return this.queue.length;
+  }
+
+  public run<T>(fn: () => Promise<T>, isTier1: boolean, signal?: AbortSignal): Promise<T> {
     if (signal?.aborted) {
       return Promise.reject(new CanceledError());
     }
-
     return new Promise<T>((resolve, reject) => {
-      const item = {
+      const item: QueueItem = {
         fn: fn as () => Promise<unknown>,
         resolve: resolve as (val: unknown) => void,
         reject,
         isTier1,
         signal,
       };
-
+      if (signal) {
+        item.onAbort = () => {
+          const idx = this.queue.indexOf(item);
+          if (idx >= 0) {
+            this.queue.splice(idx, 1);
+            reject(new CanceledError());
+          }
+        };
+        signal.addEventListener("abort", item.onAbort, { once: true });
+      }
       if (isTier1) {
-        // Tier-1 được ưu tiên chen lên đầu các task Tier-2
-        const firstTier2Idx = this.queue.findIndex((q) => !q.isTier1);
-        if (firstTier2Idx >= 0) {
-          this.queue.splice(firstTier2Idx, 0, item);
-        } else {
-          this.queue.push(item);
-        }
+        const firstTier2 = this.queue.findIndex((q) => !q.isTier1);
+        if (firstTier2 >= 0) this.queue.splice(firstTier2, 0, item);
+        else this.queue.push(item);
       } else {
         this.queue.push(item);
       }
-
-      this.processQueue();
+      void this.pump();
     });
   }
 
-  private async processQueue(): Promise<void> {
-    if (this.activeCount >= this.concurrency || this.queue.length === 0) {
-      return;
+  private async pump(): Promise<void> {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      while (this.queue.length > 0 && this.active < this.concurrency) {
+        // Giữ chỗ trước khi chờ giãn cách để không task nào khác vượt giới hạn
+        this.active++;
+        const wait = this.lastStartTime + this.gapMs - Date.now();
+        if (wait > 0) {
+          await delay(wait);
+        }
+        // Lấy task SAU khi chờ: Tier-1 đến trong lúc chờ vẫn được ưu tiên
+        const item = this.queue.shift();
+        if (!item) {
+          this.active--;
+          break;
+        }
+        if (item.signal && item.onAbort) {
+          item.signal.removeEventListener("abort", item.onAbort);
+        }
+        if (item.signal?.aborted) {
+          this.active--;
+          item.reject(new CanceledError());
+          continue;
+        }
+        this.lastStartTime = Date.now();
+        item
+          .fn()
+          .then(item.resolve, item.reject)
+          .finally(() => {
+            this.active--;
+            void this.pump();
+          });
+      }
+    } finally {
+      this.pumping = false;
     }
-
-    const item = this.queue.shift();
-    if (!item) return;
-
-    if (item.signal?.aborted) {
-      item.reject(new CanceledError());
-      this.processQueue();
-      return;
-    }
-
-    const now = Date.now();
-    const elapsed = now - this.lastStartTime;
-    if (elapsed < this.gapMs) {
-      await delay(this.gapMs - elapsed);
-    }
-
-    this.activeCount++;
-    this.lastStartTime = Date.now();
-
-    item
-      .fn()
-      .then((res) => item.resolve(res))
-      .catch((err) => item.reject(err))
-      .finally(() => {
-        this.activeCount--;
-        this.processQueue();
-      });
-
-    // Tiếp tục khởi động các slot đồng thời khác nếu còn
-    this.processQueue();
   }
 }

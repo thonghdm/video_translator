@@ -81,21 +81,30 @@ export class SubtransDB {
     sourceHash: string
   ): Promise<void> {
     const db = await this.getDB();
-    const existing = await db.get("tracks", track.trackKey);
+    const tx = db.transaction(["tracks", "lines"], "readwrite");
+    const tracksStore = tx.objectStore("tracks");
+    const existing = (await tracksStore.get(track.trackKey)) as TrackRecord | undefined;
+
+    // Nội dung phụ đề gốc đổi (sourceHash khác) → mọi bản dịch cũ lệch chỉ số dòng → xóa hết
+    if (existing && existing.sourceHash !== sourceHash) {
+      let cursor = await tx.objectStore("lines").index("trackKey").openCursor(track.trackKey);
+      while (cursor) {
+        await cursor.delete();
+        cursor = await cursor.continue();
+      }
+    }
 
     const now = Date.now();
-    const bytesApprox = this.estimateTrackBytes(cues, track);
-
     const record: TrackRecord = {
       ...track,
       sourceHash,
       cues,
       createdAt: existing ? existing.createdAt : now,
       lastOpenedAt: now,
-      bytesApprox,
+      bytesApprox: this.estimateTrackBytes(cues, track),
     };
-
-    await db.put("tracks", record);
+    await tracksStore.put(record);
+    await tx.done;
   }
 
   /**
@@ -117,7 +126,8 @@ export class SubtransDB {
    * Lấy toàn bộ bản dịch các engine của track
    */
   public async getLines(
-    trackKey: string
+    trackKey: string,
+    sourceHash?: string
   ): Promise<Record<string, (string | null)[]>> {
     const db = await this.getDB();
     const tx = db.transaction("lines", "readonly");
@@ -127,6 +137,8 @@ export class SubtransDB {
 
     const result: Record<string, (string | null)[]> = {};
     for (const rec of records) {
+      // Bản dịch của phiên bản phụ đề khác → bỏ qua (chỉ số dòng không còn khớp)
+      if (sourceHash !== undefined && rec.sourceHash !== sourceHash) continue;
       result[rec.engineKey] = rec.lines;
     }
     return result;
@@ -151,6 +163,13 @@ export class SubtransDB {
     const tx = db.transaction(["tracks", "lines"], "readwrite");
     const linesStore = tx.objectStore("lines");
     const tracksStore = tx.objectStore("tracks");
+
+    // Track chưa được lưu / đã bị evict / đã đổi nội dung → không ghi (tránh bản ghi mồ côi, lệch dòng)
+    const owner = (await tracksStore.get(trackKey)) as TrackRecord | undefined;
+    if (!owner || owner.sourceHash !== sourceHash) {
+      await tx.done;
+      return;
+    }
 
     // Lấy bản ghi hiện tại
     const existing = (await linesStore.get([
@@ -196,11 +215,8 @@ export class SubtransDB {
 
     // Cập nhật bytesApprox ước tính của track nếu có
     if (addedChars > 0) {
-      const track = (await tracksStore.get(trackKey)) as TrackRecord | undefined;
-      if (track) {
-        track.bytesApprox += addedChars;
-        await tracksStore.put(track);
-      }
+      owner.bytesApprox += addedChars;
+      await tracksStore.put(owner);
     }
 
     await tx.done;

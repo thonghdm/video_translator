@@ -59,71 +59,50 @@ export class InvalidResponseIdsError extends Error {
 }
 
 /**
- * Phân loại lỗi trả về ErrKind chuẩn theo hợp đồng dữ liệu Mục 6.1
- * Port từ classifyErr trong translator.go:434
+ * Hết token trong bucket cục bộ (Go: ErrRateLimitedLocal).
+ * KHÔNG phải lỗi của nhà cung cấp → không phạt breaker; router chuyển tầng.
+ */
+export class LocalRateLimitError extends Error {
+  public readonly retryAfterMs?: number;
+
+  constructor(message = "Local rate limit (out of tokens)", retryAfterMs?: number) {
+    super(message);
+    this.name = "LocalRateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/**
+ * Phân loại lỗi trả về ErrKind (Mục 6.1). Port từ classifyErr trong translator.go:434.
+ *
+ * CHỈ dựa vào lớp lỗi (instanceof) do chính engine ném ra — KHÔNG dò chuỗi message và KHÔNG coi
+ * mọi TypeError là lỗi mạng (TypeError cũng có thể là bug trong code). Việc đổi lỗi của fetch
+ * thành NetworkError/CanceledError/timeout được làm ngay tại chỗ gọi apiFetch.
  */
 export function classifyErr(err: unknown): ErrKind {
-  if (!err) {
-    return "other";
-  }
-
-  // 1. Hủy bởi người dùng (signal bị abort hoặc CanceledError)
-  if (
-    (err as CanceledError).isCanceled === true ||
-    (err as Error).name === "AbortError" ||
-    (err as Error).name === "CanceledError" ||
-    (typeof (err as Error).message === "string" &&
-      ((err as Error).message.toLowerCase().includes("abort") ||
-        (err as Error).message.toLowerCase().includes("canceled")))
-  ) {
-    return "canceled";
-  }
-
-  // 2. Rate limit (429 / 403 / 503)
-  if (
-    (err as RateLimitedError).isRateLimit === true ||
-    (err as Error).name === "RateLimitedError" ||
-    (typeof (err as Error).message === "string" &&
-      ((err as Error).message.includes("429") ||
-        (err as Error).message.toLowerCase().includes("rate limit")))
-  ) {
-    return "blocked";
-  }
-
-  // 3. Bị vô hiệu hoá (chưa cấu hình API key)
-  if (
-    (err as DisabledError).isDisabled === true ||
-    (err as Error).name === "DisabledError"
-  ) {
-    return "disabled";
-  }
-
-  // 4. Lỗi mạng thuần túy (fetch throw TypeError do mất mạng/DNS, hoặc NetworkError)
-  if (
-    (err as NetworkError).isNetwork === true ||
-    (err as Error).name === "NetworkError" ||
-    err instanceof TypeError // Standard fetch network failure
-  ) {
-    return "network";
-  }
-
-  // 5. Timeout (AbortController do timeout) coi là "other", giống Go DeadlineExceeded là other
+  if (err instanceof CanceledError) return "canceled";
+  if (err instanceof RateLimitedError || err instanceof LocalRateLimitError) return "blocked";
+  if (err instanceof DisabledError) return "disabled";
+  if (err instanceof NetworkError) return "network";
+  // Timeout, HTTP lỗi khác, JSON hỏng, ID sai, bug... → "other" (Go: nhánh default)
   return "other";
 }
 
 /**
- * Chuyển đổi lỗi sang BreakerOutcome cho CircuitBreaker.report
+ * Chuyển lỗi sang BreakerOutcome cho CircuitBreaker.report (chỉ dùng cho lỗi của NHÀ CUNG CẤP).
+ * LocalRateLimitError không bao giờ được report (xem router/gemini).
  */
 export function errToBreakerOutcome(err: unknown): BreakerOutcome {
   if (!err) return { kind: "ok" };
   if (err instanceof EmptyTranslationError) return { kind: "empty" };
-  const kind = classifyErr(err);
-  if (kind === "blocked") {
-    const retryAfterMs = (err as { retryAfterMs?: number })?.retryAfterMs;
-    return { kind: "blocked", retryAfterMs };
-  }
-  if (kind === "canceled") return { kind: "canceled" };
-  if (kind === "network") return { kind: "network" };
+  if (err instanceof CanceledError) return { kind: "canceled" };
+  if (err instanceof RateLimitedError) return { kind: "blocked", retryAfterMs: err.retryAfterMs };
+  if (err instanceof NetworkError) return { kind: "network" };
   return { kind: "other" };
 }
 
+/** retryAfterMs của lỗi (nếu có) */
+export function retryAfterOf(err: unknown): number | undefined {
+  if (err instanceof RateLimitedError || err instanceof LocalRateLimitError) return err.retryAfterMs;
+  return undefined;
+}

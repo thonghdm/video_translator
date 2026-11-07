@@ -1,11 +1,15 @@
 /**
  * SubTrans Extension — Background Service Worker Entry Point
+ *
+ * MV3: MỌI listener (onConnect, onMessage, storage.onChanged) phải được đăng ký ĐỒNG BỘ ở top-level,
+ * trong lượt chạy đầu tiên của script. Phần khởi tạo bất đồng bộ (restore state, nạp settings,
+ * evict cache) chạy song song và được truyền vào MessagingHub dưới dạng promise `ready`.
  */
 
 import { CircuitBreaker, defaultBreakerConfig } from "../shared/breaker";
 import { TokenBucket } from "../shared/tokenBucket";
 import { LRUCache } from "../shared/lru";
-import { loadSettings, onSettingsChanged } from "../shared/settings";
+import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, type Settings } from "../shared/settings";
 import { GtxQueue } from "./engines/gtx";
 import { GeminiEngine } from "./engines/gemini";
 import { TranslationRouter } from "./router";
@@ -13,36 +17,35 @@ import { StateManager } from "./state";
 import { MessagingHub } from "./messaging";
 import { SubtransDB } from "./cache/db";
 
-console.log("[SubTrans] Service Worker initializing...");
+const log = (...args: unknown[]) => {
+  if (import.meta.env.DEV) console.log("[SubTrans][SW]", ...args);
+};
 
-// 1. Khởi tạo các thành phần cốt lõi
+// 1. Khởi tạo các thành phần cốt lõi (đồng bộ)
+const D = DEFAULT_SETTINGS;
 const phraseCache = new LRUCache<string, string>(8000);
 const gtxBreaker = new CircuitBreaker(defaultBreakerConfig());
-const geminiBreaker = new CircuitBreaker(defaultBreakerConfig());
-const geminiBucket = new TokenBucket(12);
-
-const gtxQueue = new GtxQueue(2, 150);
+const geminiBreaker = new CircuitBreaker(defaultBreakerConfig()); // = cấu hình NewGeminiClient của Go
+const geminiBucket = new TokenBucket(D.gemini.rpm);
+const gtxQueue = new GtxQueue(D.gtx.concurrency, D.gtx.gapMs);
 const subtransDB = new SubtransDB();
 
 const geminiEngine = new GeminiEngine(
   {
     apiKey: "",
-    model: "gemini-3.5-flash-lite",
-    endpoint: "https://generativelanguage.googleapis.com/v1beta/models",
-    timeoutTier1Ms: 3500,
-    timeoutTier2Ms: 8000,
-    maxItemsTier1: 10,
-    maxItemsTier2: 20,
+    model: D.gemini.model,
+    endpoint: D.gemini.endpoint,
+    timeoutTier1Ms: D.gemini.timeoutTier1Ms,
+    timeoutTier2Ms: D.gemini.timeoutTier2Ms,
+    maxItemsTier1: D.gemini.maxItemsTier1,
+    maxItemsTier2: D.gemini.maxItemsTier2,
   },
   geminiBreaker,
   geminiBucket
 );
 
 const router = new TranslationRouter(
-  {
-    mode: "google",
-    geminiModel: "gemini-3.5-flash-lite",
-  },
+  { mode: D.mode, geminiModel: D.gemini.model, gtxTimeoutMs: D.gtx.timeoutMs },
   phraseCache,
   gtxBreaker,
   gtxQueue,
@@ -50,6 +53,8 @@ const router = new TranslationRouter(
 );
 
 const stateManager = new StateManager(gtxBreaker, geminiBreaker, geminiBucket);
+let cachePolicy: Settings["cache"] = { ...D.cache };
+
 const messagingHub = new MessagingHub(
   router,
   gtxBreaker,
@@ -57,76 +62,49 @@ const messagingHub = new MessagingHub(
   geminiEngine,
   stateManager,
   subtransDB,
-  async () => {
-    const s = await loadSettings();
-    return s.cache;
-  }
+  async () => cachePolicy
 );
 
-// 2. Nạp settings, restore state và tự động dọn dẹp cache (eviction)
-async function init() {
+function applySettings(s: Settings): void {
+  geminiEngine.updateConfig({
+    apiKey: s.gemini.apiKey,
+    model: s.gemini.model,
+    endpoint: s.gemini.endpoint,
+    timeoutTier1Ms: s.gemini.timeoutTier1Ms,
+    timeoutTier2Ms: s.gemini.timeoutTier2Ms,
+    maxItemsTier1: s.gemini.maxItemsTier1,
+    maxItemsTier2: s.gemini.maxItemsTier2,
+  });
+  geminiBucket.setRpm(s.gemini.rpm);
+  gtxQueue.updateConfig(s.gtx.concurrency, s.gtx.gapMs);
+  router.updateConfig({ mode: s.mode, geminiModel: s.gemini.model, gtxTimeoutMs: s.gtx.timeoutMs });
+  cachePolicy = { ...s.cache };
+}
+
+// 2. Khởi tạo bất đồng bộ
+async function init(): Promise<void> {
   await stateManager.restore();
   const settings = await loadSettings();
-
-  geminiEngine.updateConfig({
-    apiKey: settings.gemini.apiKey,
-    model: settings.gemini.model,
-    endpoint: settings.gemini.endpoint,
-    timeoutTier1Ms: settings.gemini.timeoutTier1Ms,
-    timeoutTier2Ms: settings.gemini.timeoutTier2Ms,
-    maxItemsTier1: settings.gemini.maxItemsTier1,
-    maxItemsTier2: settings.gemini.maxItemsTier2,
-  });
-
-  gtxQueue.updateConfig(settings.gtx.concurrency, settings.gtx.gapMs);
-
-  router.updateConfig({
-    mode: settings.mode,
-    geminiModel: settings.gemini.model,
-  });
-
-  // Tự động evict cache theo policy khi khởi động SW
+  applySettings(settings);
   try {
     await subtransDB.evict(settings.cache);
   } catch (err) {
     console.warn("[SubTrans] Eviction error during startup:", err);
   }
-
-  messagingHub.init();
-  console.log("[SubTrans] Service Worker ready!");
+  log("ready");
 }
 
-void init();
+// 3. Đăng ký listener ĐỒNG BỘ (handler tự chờ `ready`)
+messagingHub.init(init());
 
-// 3. Lắng nghe thay đổi cài đặt từ Popup / Options
-onSettingsChanged((newSettings) => {
-  geminiEngine.updateConfig({
-    apiKey: newSettings.gemini.apiKey,
-    model: newSettings.gemini.model,
-    endpoint: newSettings.gemini.endpoint,
-    timeoutTier1Ms: newSettings.gemini.timeoutTier1Ms,
-    timeoutTier2Ms: newSettings.gemini.timeoutTier2Ms,
-    maxItemsTier1: newSettings.gemini.maxItemsTier1,
-    maxItemsTier2: newSettings.gemini.maxItemsTier2,
-  });
-
-  gtxQueue.updateConfig(newSettings.gtx.concurrency, newSettings.gtx.gapMs);
-
-  router.updateConfig({
-    mode: newSettings.mode,
-    geminiModel: newSettings.gemini.model,
-  });
-
+onSettingsChanged((s) => {
+  applySettings(s);
   messagingHub.broadcastStatus();
 });
 
-// 4. Debug helper trong môi trường development (Mục 501 PLAN.md)
+// 4. Debug helper trong môi trường development (Phase 2)
 if (import.meta.env.DEV) {
-  (globalThis as unknown as { __subtransDebugTranslate: unknown }).__subtransDebugTranslate =
-    async (lines: string[]) => {
-      return await router.translate({
-        lines,
-        priority: "tier1",
-      });
-    };
+  (globalThis as unknown as { __subtransDebugTranslate: unknown }).__subtransDebugTranslate = (
+    lines: string[]
+  ) => router.translate({ lines, priority: "tier1" });
 }

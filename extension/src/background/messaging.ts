@@ -11,7 +11,19 @@ import type { StateManager } from "./state";
 import { apiFetch, createTimeoutSignal } from "./engines/http";
 import type { SubtransDB } from "./cache/db";
 
+/** postMessage an toàn: port có thể đã ngắt (tab đóng, content reload) → bỏ qua, không ném lỗi */
+export function safePost(port: chrome.runtime.Port, msg: B2C): boolean {
+  try {
+    port.postMessage(msg);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export class MessagingHub {
+  /** Resolve khi SW đã restore state + nạp settings; handler luôn chờ promise này trước khi xử lý */
+  private ready: Promise<void> = Promise.resolve();
   private activePorts = new Set<chrome.runtime.Port>();
   private inFlightByPort = new Map<chrome.runtime.Port, Map<string, AbortController>>();
 
@@ -25,7 +37,15 @@ export class MessagingHub {
     private getCachePolicy?: () => Promise<{ maxTracks: number; maxAgeDays: number }>
   ) {}
 
-  public init(): void {
+  /**
+   * PHẢI được gọi ĐỒNG BỘ ở top-level của service worker (MV3): nếu SW được đánh thức bởi
+   * onConnect/onMessage mà listener chưa được đăng ký trong lượt chạy đầu tiên, event đó bị MẤT.
+   * Việc khởi tạo bất đồng bộ (restore state, settings) truyền vào qua `ready`.
+   */
+  public init(ready: Promise<void> = Promise.resolve()): void {
+    this.ready = ready.catch((err) => {
+      if (import.meta.env.DEV) console.warn("[SubTrans] SW init lỗi:", err);
+    });
     if (typeof chrome === "undefined" || !chrome.runtime) {
       return;
     }
@@ -40,11 +60,13 @@ export class MessagingHub {
       const portInFlight = new Map<string, AbortController>();
       this.inFlightByPort.set(port, portInFlight);
 
-      // Gửi trạng thái ban đầu cho port mới kết nối
-      this.sendPortStatus(port);
+      // Gửi trạng thái ban đầu cho port mới kết nối (sau khi state đã được restore)
+      void this.ready.then(() => this.sendPortStatus(port));
 
       port.onMessage.addListener((msg: C2B) => {
-        this.handlePortMessage(port, msg, portInFlight);
+        void this.ready.then(() => {
+          if (this.activePorts.has(port)) this.handlePortMessage(port, msg, portInFlight);
+        });
       });
 
       port.onDisconnect.addListener(() => {
@@ -61,7 +83,8 @@ export class MessagingHub {
     // 2. Lắng nghe thông điệp từ Popup/Options (UiReq)
     chrome.runtime.onMessage.addListener(
       (msg: UiReq, _sender, sendResponse: (response: unknown) => void) => {
-        this.handleUiMessage(msg)
+        this.ready
+          .then(() => this.handleUiMessage(msg))
           .then((res) => sendResponse(res))
           .catch((err) => sendResponse({ ok: false, error: String(err) }));
         // return true để Chrome giữ kênh trả lời bất đồng bộ
@@ -95,7 +118,7 @@ export class MessagingHub {
               results,
               error,
             };
-            port.postMessage(resMsg);
+            safePost(port, resMsg);
             this.stateManager.scheduleSave();
             this.broadcastStatus();
           })
@@ -109,7 +132,7 @@ export class MessagingHub {
                 message: (err as Error)?.message || String(err),
               },
             };
-            port.postMessage(resMsg);
+            safePost(port, resMsg);
           })
           .finally(() => {
             portInFlight.delete(msg.reqId);
@@ -137,7 +160,7 @@ export class MessagingHub {
           .then(async (track) => {
             if (track && track.sourceHash === msg.sourceHash) {
               await this.db.touchTrack(msg.trackKey);
-              const lines = await this.db.getLines(msg.trackKey);
+              const lines = await this.db.getLines(msg.trackKey, msg.sourceHash);
               const reply: B2C = {
                 type: "cache.loaded",
                 reqId: msg.reqId,
@@ -145,19 +168,19 @@ export class MessagingHub {
                 cues: track.cues,
                 lines,
               };
-              port.postMessage(reply);
+              safePost(port, reply);
             } else {
               const reply: B2C = {
                 type: "cache.loaded",
                 reqId: msg.reqId,
                 hit: false,
               };
-              port.postMessage(reply);
+              safePost(port, reply);
             }
           })
           .catch((err) => {
             console.warn("[SubTrans] cache.load error:", err);
-            port.postMessage({
+            safePost(port, {
               type: "cache.loaded",
               reqId: msg.reqId,
               hit: false,
@@ -234,7 +257,7 @@ export class MessagingHub {
           ok: true,
           text,
         };
-        port.postMessage(reply);
+        safePost(port, reply);
       } finally {
         cleanup();
       }
@@ -245,17 +268,21 @@ export class MessagingHub {
         ok: false,
         error: (err as Error)?.message || String(err),
       };
-      port.postMessage(reply);
+      safePost(port, reply);
     }
   }
 
   private async handleUiMessage(msg: UiReq): Promise<unknown> {
     switch (msg.type) {
       case "gemini.test": {
-        return await GeminiEngine.testConnection(msg.apiKey, msg.model);
+        return await GeminiEngine.testConnection(
+          msg.apiKey,
+          msg.model,
+          this.geminiEngine.getEndpoint()
+        );
       }
       case "gemini.listModels": {
-        return await GeminiEngine.listModels(msg.apiKey);
+        return await GeminiEngine.listModels(msg.apiKey, this.geminiEngine.getEndpoint());
       }
       case "cache.stats": {
         return await this.db.stats();
@@ -294,10 +321,6 @@ export class MessagingHub {
       geminiReady: this.geminiEngine.isAvailable(),
     };
 
-    try {
-      port.postMessage(statusMsg);
-    } catch {
-      // Port có thể đã đóng
-    }
+    safePost(port, statusMsg);
   }
 }

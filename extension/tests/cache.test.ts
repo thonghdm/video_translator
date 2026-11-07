@@ -54,6 +54,7 @@ describe("IndexedDB Translation Cache (Phase 3)", () => {
   });
 
   it("mergeLines: gộp các dòng dịch mới mà không ghi đè dòng đã có bằng null", async () => {
+    await db.putTrack(mockTrackRef, mockCues, sourceHash);
     // Lưu lượt dịch 1: dịch câu 0 và câu 2
     await db.mergeLines(
       mockTrackRef.trackKey,
@@ -86,26 +87,32 @@ describe("IndexedDB Translation Cache (Phase 3)", () => {
     ]);
   });
 
-  it("mergeLines: khi sourceHash thay đổi -> làm mới toàn bộ mảng", async () => {
-    await db.mergeLines(
-      mockTrackRef.trackKey,
-      "api",
-      "oldHash",
-      2,
-      [[0, "Cũ"]]
-    );
+  it("sourceHash thay đổi: putTrack xóa bản dịch cũ, lines mới bắt đầu từ mảng rỗng", async () => {
+    await db.putTrack(mockTrackRef, mockCues, "oldHash");
+    await db.mergeLines(mockTrackRef.trackKey, "api", "oldHash", 2, [[0, "Cũ"]]);
+    expect((await db.getLines(mockTrackRef.trackKey, "oldHash"))["api"]).toEqual(["Cũ", null]);
 
-    // Dịch lại với newHash
-    await db.mergeLines(
-      mockTrackRef.trackKey,
-      "api",
-      "newHash",
-      2,
-      [[1, "Mới"]]
-    );
+    // Phụ đề gốc đổi nội dung → content lưu lại track với hash mới rồi mới lưu bản dịch
+    await db.putTrack(mockTrackRef, mockCues, "newHash");
+    expect(await db.getLines(mockTrackRef.trackKey)).toEqual({});
+    await db.mergeLines(mockTrackRef.trackKey, "api", "newHash", 2, [[1, "Mới"]]);
+    expect((await db.getLines(mockTrackRef.trackKey, "newHash"))["api"]).toEqual([null, "Mới"]);
+  });
 
-    const lines = await db.getLines(mockTrackRef.trackKey);
-    expect(lines["api"]).toEqual([null, "Mới"]);
+  it("mergeLines bị bỏ qua khi track chưa lưu hoặc hash không khớp (không tạo bản ghi mồ côi)", async () => {
+    await db.mergeLines(mockTrackRef.trackKey, "api", sourceHash, 2, [[0, "x"]]);
+    expect(await db.getLines(mockTrackRef.trackKey)).toEqual({});
+
+    await db.putTrack(mockTrackRef, mockCues, sourceHash);
+    await db.mergeLines(mockTrackRef.trackKey, "api", "hashKhac", 2, [[0, "lệch dòng"]]);
+    expect(await db.getLines(mockTrackRef.trackKey)).toEqual({});
+  });
+
+  it("getLines(trackKey, sourceHash) không trả về bản dịch của phiên bản phụ đề khác", async () => {
+    await db.putTrack(mockTrackRef, mockCues, sourceHash);
+    await db.mergeLines(mockTrackRef.trackKey, "api", sourceHash, 2, [[0, "đúng"]]);
+    expect((await db.getLines(mockTrackRef.trackKey, sourceHash))["api"]).toEqual(["đúng", null]);
+    expect(await db.getLines(mockTrackRef.trackKey, "hashKhac")).toEqual({});
   });
 
   it("stats: trả về số lượng track và dung lượng ước tính", async () => {

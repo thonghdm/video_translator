@@ -115,6 +115,23 @@ export class TokenBucket {
     return "timeout";
   }
 
+  /** Số ms ước tính cho tới khi đủ token (Tier-1 cần 1, Tier-2 cần 3) */
+  public msUntilToken(isTier1: boolean): number {
+    this.refill();
+    const need = (isTier1 ? 1.0 : 3.0) - this.tokens;
+    if (need <= 0) return 0;
+    return Math.ceil(need / this.fillRate);
+  }
+
+  /** Đổi RPM khi người dùng sửa settings (giữ số token hiện có, cắt theo dung lượng mới) */
+  public setRpm(rpm: number): void {
+    if (!(rpm > 0)) return;
+    this.refill();
+    this.capacity = rpm;
+    this.fillRate = rpm / 60000;
+    this.tokens = Math.min(this.tokens, rpm);
+  }
+
   public getTokens(): number {
     this.refill();
     return this.tokens;
