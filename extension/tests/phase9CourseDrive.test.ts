@@ -8,6 +8,7 @@ import { extractVideoId } from "../src/content/adapters/ytParser";
 import {
   isCourseHost,
   findCoursePlayerContainer,
+  containerFitsVideo,
   createCourseAdapter,
 } from "../src/content/adapters/course";
 
@@ -81,18 +82,39 @@ describe("Phase 9: Course Platforms Adapter (Udemy, Coursera, edX)", () => {
     expect(isCourseHost("google.com")).toBe(false);
   });
 
-  it("findCoursePlayerContainer: tìm đúng container của Udemy / Coursera", () => {
-    const container = document.createElement("div");
-    container.setAttribute("data-purpose", "video-player");
+  it("findCoursePlayerContainer: nhận khung player vừa video; khung quá lớn hoặc static → null (dùng chế độ fixed)", () => {
+    const rect = (w: number, h: number) => () => ({ width: w, height: h, left: 0, top: 0, right: w, bottom: h, x: 0, y: 0, toJSON() {} }) as DOMRect;
+    const mk = (cw: number, ch: number, pos = "relative") => {
+      const container = document.createElement("div");
+      container.setAttribute("data-purpose", "video-player");
+      container.style.position = pos;
+      container.getBoundingClientRect = rect(cw, ch);
+      const video = document.createElement("video");
+      video.getBoundingClientRect = rect(800, 450);
+      container.appendChild(video);
+      document.body.appendChild(container);
+      return { container, video };
+    };
 
-    const video = document.createElement("video");
-    container.appendChild(video);
-    document.body.appendChild(container);
+    const ok = mk(800, 500); // khung player + thanh điều khiển
+    expect(findCoursePlayerContainer(ok.video)).toBe(ok.container);
 
-    const found = findCoursePlayerContainer(video);
-    expect(found).toBe(container);
+    const huge = mk(1400, 900); // khung bọc cả sidebar → lệch khung hình
+    expect(findCoursePlayerContainer(huge.video)).toBeNull();
 
-    container.remove();
+    const stat = mk(800, 450, "static"); // absolute inset:0 sẽ bám sai phần tử
+    expect(findCoursePlayerContainer(stat.video)).toBeNull();
+
+    document.body.innerHTML = "";
+  });
+
+  it("containerFitsVideo", () => {
+    const r = (w: number, h: number) => ({ getBoundingClientRect: () => ({ width: w, height: h }) });
+    expect(containerFitsVideo(r(800, 450), r(800, 450))).toBe(true);
+    expect(containerFitsVideo(r(1000, 660), r(800, 450))).toBe(true);
+    expect(containerFitsVideo(r(1100, 450), r(800, 450))).toBe(false);
+    expect(containerFitsVideo(r(800, 300), r(800, 450))).toBe(false);
+    expect(containerFitsVideo(r(800, 450), r(0, 0))).toBe(false);
   });
 
   it("CourseAdapter: tự cô lập lỗi, trả về mảng rỗng khi xảy ra exception", async () => {

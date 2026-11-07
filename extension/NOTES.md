@@ -313,3 +313,31 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
     - **Tự cô lập lỗi**: Mọi thao tác truy xuất `textTracks` được bọc `try...catch` để lỗi cross-origin hay bảo mật không bao giờ ảnh hưởng đến luồng `html5` cơ sở.
     - Khi video khóa học không có phụ đề gốc: Kết hợp với Phase 8, MiniToolbar vẫn sẵn sàng để người dùng nạp file phụ đề `.srt`/`.vtt` ngoài vào học ngay.
 
+
+---
+
+## Review Phase 9: kiểm chứng và sửa lỗi
+
+### Kết quả kiểm chứng [T] (07/11/2026, built-in browser)
+| Mục | Kết quả |
+|---|---|
+| Mở trực tiếp `youtube.com/embed/{id}` (không có Referer) | YouTube trả **"Error 153: Video player configuration error"**. Embed giờ bắt buộc có trang nhúng/Referer, nên **không kiểm tra được bên trong iframe từ môi trường này** |
+| Trang embed: `#movie_player` | Có, `position: relative`, chứa `video.html5-main-video` (giống `/watch`) |
+| Trang embed: `getPlayerResponse()` trước khi bấm play | **Chưa có** `videoDetails`/`captionTracks`, không có request timedtext → embed là click-to-play, dữ liệu nạp muộn |
+| Google Drive preview | **Chưa kiểm chứng** (cần một video Drive có phụ đề). Hook đã được tiêm vào `drive.google.com` và `youtube.googleapis.com`; hook trong suốt nên không ảnh hưởng nếu không có timedtext |
+| Udemy / Coursera / edX | **Chưa kiểm chứng** (cần tài khoản/khóa học) |
+
+### Lỗi trong commit Phase 9 ban đầu và cách sửa
+| # | Lỗi | Cách sửa | Test |
+|---|---|---|---|
+| 1 | Player nạp dữ liệu muộn (YouTube embed click-to-play; player khóa học nạp track sau khi phát): `listSources` chỉ thử lúc dò thấy video rồi **bỏ cuộc vĩnh viễn** | Thử lại khi video phát `loadeddata` / `playing` (ngoài `addtrack`). Có khóa chống chạy chồng, lần gọi trùng được gộp lại | `phase9-fixes` › nạp muộn |
+| 2 | Hai lần `trySetup` chạy chồng thì source thừa bị bỏ mà **không dispose** (rò listener/timer) | Luôn dispose source khi không dùng | (cùng test) |
+| 3 | `/embed/videoseries?list=…`, `/embed/live_stream?channel=…` bị coi là videoId | Loại 2 giá trị này | `phase9-fixes` › embed |
+| 4 | `findCoursePlayerContainer` lấy **bất kỳ thẻ cha nào** có `position` (kể cả khung bọc cả sidebar/danh sách bài), nên overlay `inset: 0` lệch khỏi khung hình; selector khớp nhưng phần tử `static` thì overlay bám sai | Chỉ nhận container có `position` khác static **và** kích thước ôm vừa video (rộng 0.95–1.3×, cao 0.95–1.5×). Không thì dùng chế độ fixed (bám theo rect của video, luôn đúng vị trí) | `phase9CourseDrive` |
+
+### Cách tự kiểm chứng trong Chrome (Load unpacked)
+1. **YouTube nhúng:** mở một trang có video YouTube nhúng (ví dụ bài blog có iframe YouTube có phụ đề tiếng Anh) → bấm play.
+   - Phụ đề EN/VI hiện trong khung iframe.
+   - Nếu không hiện: DevTools → Console → ô chọn context (góc trên trái) → chọn frame `www.youtube.com/embed/...` → chạy `document.getElementById('movie_player').getPlayerResponse()?.captions` và `performance.getEntriesByType('resource').filter(e=>e.name.includes('timedtext')).map(e=>e.name)`. Gửi kết quả để sửa tiếp.
+2. **Google Drive:** mở một video `.mp4` trên Drive có phụ đề (hoặc upload phụ đề `.srt` cùng video) → Preview → bấm play. Làm như bước 1 nhưng với frame `youtube.googleapis.com/embed/...` hoặc `drive.google.com/...`.
+3. **Udemy/Coursera:** mở một bài giảng có phụ đề tiếng Anh → bấm play. Phụ đề phải hiện đúng trong khung video, kể cả khi fullscreen. Nếu không có phụ đề: rê chuột lên video, dùng "Nhập" để nạp `.srt`.

@@ -39,25 +39,40 @@ const PLAYER_CONTAINER_SELECTORS = [
   ".tc-wrapper",
 ];
 
+/**
+ * Container có "ôm" vừa video không: overlay ở chế độ container phủ inset:0, nên nếu container lớn hơn
+ * nhiều (khung bọc cả sidebar/danh sách bài) thì phụ đề sẽ lệch khỏi khung hình. Cho phép rộng hơn tới 30%
+ * và cao hơn tới 50% (thanh điều khiển nằm dưới video).
+ */
+export function containerFitsVideo(
+  container: { getBoundingClientRect(): { width: number; height: number } },
+  video: { getBoundingClientRect(): { width: number; height: number } }
+): boolean {
+  const c = container.getBoundingClientRect();
+  const v = video.getBoundingClientRect();
+  if (v.width < 2 || v.height < 2) return false;
+  const rw = c.width / v.width;
+  const rh = c.height / v.height;
+  return rw >= 0.95 && rw <= 1.3 && rh >= 0.95 && rh <= 1.5;
+}
+
+function isPositioned(el: HTMLElement): boolean {
+  try {
+    const pos = window.getComputedStyle(el).position;
+    return pos === "relative" || pos === "absolute" || pos === "fixed" || pos === "sticky";
+  } catch {
+    return false;
+  }
+}
+
+/** Khung player để gắn overlay; null → dùng chế độ fixed (bám theo rect của video) — luôn đúng vị trí */
 export function findCoursePlayerContainer(video: HTMLVideoElement): HTMLElement | null {
   for (const sel of PLAYER_CONTAINER_SELECTORS) {
     const el = video.closest<HTMLElement>(sel);
-    if (el) return el;
+    if (el && isPositioned(el) && containerFitsVideo(el, video)) return el;
   }
-
-  // Nếu không khớp selector cụ thể, kiểm tra xem thẻ cha có position !== static không
   const parent = video.parentElement;
-  if (parent && typeof window !== "undefined") {
-    try {
-      const pos = window.getComputedStyle(parent).position;
-      if (pos === "relative" || pos === "absolute") {
-        return parent;
-      }
-    } catch {
-      // Bỏ qua lỗi trong môi trường không có style
-    }
-  }
-
+  if (parent && isPositioned(parent) && containerFitsVideo(parent, video)) return parent;
   return null;
 }
 

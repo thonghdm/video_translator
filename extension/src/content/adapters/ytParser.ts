@@ -29,6 +29,9 @@ export interface Json3Payload {
   events?: Json3Event[];
 }
 
+/** /embed/videoseries?list=…, /embed/live_stream?channel=… không phải id của một video */
+const EMBED_NON_VIDEO = new Set(["videoseries", "live_stream"]);
+
 /** Trích xuất videoId từ chuỗi URL (ví dụ /watch?v=..., /embed/..., /api/timedtext?v=..., youtu.be/...) */
 export function extractVideoId(urlStr: string): string | null {
   try {
@@ -38,7 +41,7 @@ export function extractVideoId(urlStr: string): string | null {
 
     // Hỗ trợ /embed/{id} (YouTube Embed player trên Google Drive hoặc các trang nhúng)
     const embedMatch = u.pathname.match(/\/embed\/([^/?&#]+)/);
-    if (embedMatch) return embedMatch[1];
+    if (embedMatch && !EMBED_NON_VIDEO.has(embedMatch[1])) return embedMatch[1];
 
     // Hỗ trợ youtu.be/{id}
     if (u.hostname === "youtu.be" && u.pathname.length > 1) {
@@ -52,7 +55,7 @@ export function extractVideoId(urlStr: string): string | null {
   if (matchV) return decodeURIComponent(matchV[1]);
 
   const matchEmbed = /\/embed\/([^/?&#]+)/.exec(urlStr);
-  if (matchEmbed) return decodeURIComponent(matchEmbed[1]);
+  if (matchEmbed && !EMBED_NON_VIDEO.has(matchEmbed[1])) return decodeURIComponent(matchEmbed[1]);
 
   return null;
 }

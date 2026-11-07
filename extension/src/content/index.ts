@@ -442,23 +442,47 @@ class ContentController {
     const scope = (this.videoScope = this.active.child());
     const adapter = this.pickAdapter();
 
-    const trySetup = async () => {
+    let running = false;
+    let again = false;
+    const trySetup = async (): Promise<void> => {
       if (gen !== this.generation || this.session) return;
-      const sources = await adapter.listSources(video);
-      if (gen !== this.generation || this.session) return;
-      if (sources.length === 0) {
-        log("video chưa có nguồn phụ đề phù hợp");
-        this.mountOverlayWithoutSession(video, adapter, scope);
+      // Không chạy chồng: lần gọi đến khi đang chạy sẽ được chạy lại 1 lần sau đó
+      if (running) {
+        again = true;
         return;
       }
-      this.startSession(video, adapter, sources[0], scope, gen);
-      for (const s of sources.slice(1)) s.dispose();
+      running = true;
+      try {
+        const sources = await adapter.listSources(video);
+        if (gen !== this.generation || this.session) {
+          for (const src of sources) src.dispose(); // không rò listener/timer của source thừa
+          return;
+        }
+        if (sources.length === 0) {
+          log("video chưa có nguồn phụ đề phù hợp");
+          this.mountOverlayWithoutSession(video, adapter, scope);
+          return;
+        }
+        this.startSession(video, adapter, sources[0], scope, gen);
+        for (const src of sources.slice(1)) src.dispose();
+      } catch (err) {
+        if (import.meta.env.DEV) console.warn("[SubTrans] listSources lỗi:", err);
+      } finally {
+        running = false;
+        if (again) {
+          again = false;
+          void trySetup();
+        }
+      }
     };
 
+    const { signal } = scope;
     // Player thêm <track> sau khi tải (đối với HTML5 track thông thường)
-    video.textTracks?.addEventListener?.("addtrack", () => void trySetup(), {
-      signal: scope.signal,
-    });
+    video.textTracks?.addEventListener?.("addtrack", () => void trySetup(), { signal });
+    // Player nạp dữ liệu muộn (YouTube embed là click-to-play: trước khi bấm play, playerResponse chưa có
+    // videoDetails/captionTracks — đã kiểm chứng; player khóa học nạp track sau khi phát) → thử lại khi phát.
+    video.addEventListener("loadeddata", () => void trySetup(), { signal });
+    video.addEventListener("playing", () => void trySetup(), { signal });
     void trySetup();
   }
 
