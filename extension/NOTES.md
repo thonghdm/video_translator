@@ -221,3 +221,26 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
 - [ ] Chấm chỉ báo engine hiển thị đúng màu: emerald với API Google, cyan với Gemini Cloud.
 - [ ] F5 lại trang vừa xem: phụ đề tiếng Việt xuất hiện ngay lập tức từ IndexedDB cache mà không phát sinh request dịch mới.
 - [ ] Thử ngắt mạng tạm thời: extension không bị lỗi crash; khi có mạng lại tự động tiếp tục dịch.
+
+---
+
+## Sửa lỗi review Phase 6 (scheduler + session)
+| # | Lỗi | Cách sửa | Test |
+|---|---|---|---|
+| P1 | Upgrade gửi `priority: "tier2"` + `prefer: cloud`, nên router rơi về GTX → dòng vẫn là `api` → upgrade lặp vô hạn | Gửi `priority: "upgrade"` (router chỉ dùng cloud). Mỗi dòng tối đa 2 lần thử. Lỗi `disabled` (thiếu key) thì ngừng upgrade | `phase6-fixes` › P1 |
+| P2 | Breaker **cloud** khóa làm dừng luôn GTX ở mode `google` | Bỏ việc tự tạm dừng theo `status`. Router đã tự chuyển tầng và chỉ trả lỗi khi không tầng nào dịch được; scheduler chỉ tạm dừng theo `translate.result.error` | P2 |
+| P3 | Lỗi mạng / `blocked` cũng tính vào 3 lượt retry → dòng bị bỏ vĩnh viễn dù mạng có lại | Chỉ tính lượt khi dòng rỗng mà không lỗi, hoặc lỗi `other`. Hết tạm nghỉ thì **tự lập lại lịch** theo playhead gần nhất (không cần seek hay tick) | P3 |
+| P4 | Upgrade chỉ chạy khi `geminiReady`, mà giá trị này có thể `false` vì bucket tạm cạn đúng lúc gửi status → không bao giờ upgrade | Upgrade chỉ phụ thuộc mode + breaker cloud không khóa. Hết token thì background trả `blocked` (`LocalRateLimit`) và scheduler tạm nghỉ theo `retryAfterMs` | P4 |
+| P6 | Mode `gemini`: dòng đã phải rơi về GTX không bao giờ được dịch lại bằng Gemini | Upgrade áp cho cả `gemini` và `hybrid`, chỉ khi đã hết việc dịch thường; ưu tiên dòng gần playhead | P6 |
+| P7 | `srcLang: "und"` gửi thẳng cho GTX | `normalizeSrcLang`: `und`/rỗng → `auto` | P7 |
+| S1 | Đổi mode (google ↔ gemini): `applyLinesToItems` sửa thẳng object cũ, store so sánh `===` nên overlay không đổi | Hàm trả về mảng mới; dòng đổi bản dịch là object mới | `phase6-fixes` › Session |
+| S2 | Track nạp lại cue: giữ bản dịch theo id kể cả khi câu đã đổi (sai câu); không cập nhật `sourceHash` | Chỉ giữ bản dịch khi câu gốc giống hệt. Tính lại hash; nếu hash đổi thì gửi `saveTrack` và ghi lại các bản dịch còn hợp lệ với `total` mới | Session |
+
+**Test tích hợp đầu-cuối** (`phase6-e2e.test.ts`): Session → Scheduler → BackgroundPort ⇄ MessagingHub → Router → GTX (fetch giả) + SubtransDB (`fake-indexeddb`). Lần 1 dịch hết 12 câu và lưu IndexedDB. Lần 2 lấy từ cache, hiện ngay, **0 request dịch**.
+
+### Cần xác nhận thủ công (Load unpacked)
+- [ ] YouTube, mode `google`: VI hiện ≤ 2s sau khi bấm play; tua giữa video thì VI hiện ≤ 2s.
+- [ ] F5 lại video vừa xem: VI hiện ngay. Tab Network của **service worker** không có request tới `translate.googleapis.com`.
+- [ ] Mode `hybrid` (có Gemini key): chấm chỉ báo ban đầu xanh lá (API), sau đó chuyển dần sang cyan (Cloud) khi đã dịch hết.
+- [ ] Rút mạng khoảng 20s rồi cắm lại: hiện "Đang tạm nghỉ…", sau đó tự dịch tiếp, không còn dòng nào bị bỏ.
+- [ ] Video 20 phút với mode `google`: dịch xong toàn bộ, không bị 429 khi dùng cấu hình mặc định.

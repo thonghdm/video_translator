@@ -105,9 +105,10 @@ describe("computeSourceHash & applyLinesToItems", () => {
       "cloud:gemini-3.5-flash-lite": ["Xin chào"],
     };
 
-    applyLinesToItems(items, lines, "google");
-    expect(items[0].target_text).toBe("Chào");
-    expect(items[0].engine).toBe("api");
+    const out = applyLinesToItems(items, lines, "google");
+    expect(out[0].target_text).toBe("Chào");
+    expect(out[0].engine).toBe("api");
+    expect(items[0].target_text).toBe(""); // không sửa mảng gốc
   });
 
   it("applyLinesToItems: mode gemini/hybrid ưu tiên cloud:${model} rồi tới api", () => {
@@ -130,9 +131,9 @@ describe("computeSourceHash & applyLinesToItems", () => {
       "cloud:gemini-3.5-flash-lite": ["Xin chào"],
     };
 
-    applyLinesToItems(items, lines, "gemini", "gemini-3.5-flash-lite");
-    expect(items[0].target_text).toBe("Xin chào");
-    expect(items[0].engine).toBe("cloud");
+    const out = applyLinesToItems(items, lines, "gemini", "gemini-3.5-flash-lite");
+    expect(out[0].target_text).toBe("Xin chào");
+    expect(out[0].engine).toBe("cloud");
   });
 });
 

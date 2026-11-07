@@ -1,15 +1,24 @@
 /**
- * SubTrans Extension — Bộ lập lịch dịch phụ đề (PLAN 6.2 / Section 655–672)
- * Port từ thuật toán Two-Tier Lookahead trong pipeline.go:
- * - Tier 1: Vùng phát hiện tại [t - 1s, t + 15s], batch nhỏ (3 dòng/240 ký tự) hiển thị tức thì.
- * - Tier 2: Ahead (tăng dần) -> Behind, batch 5 dòng/400 ký tự (GTX) hoặc maxItemsTier2 dòng/2000 ký tự (Gemini).
- * - Tối đa 2 batch chạy song song mỗi session. Tier-1 luôn được ưu tiên.
- * - Tự động retry dòng rỗng tối đa 3 lần.
- * - Tạm dừng khi gặp RateLimited (blocked) hoặc mất mạng, kèm đếm ngược trên UI.
- * - Hybrid upgrade: nâng cấp dòng API lên Cloud khi đã dịch xong toàn bộ và Gemini sẵn sàng.
+ * SubTrans Extension — Bộ lập lịch dịch phụ đề (PLAN Phase 6)
+ * Port thuật toán Two-Tier Lookahead từ pipeline.go:
+ * - Tier-1: cửa sổ [t − 1s, t + 15s], batch nhỏ 3 dòng/240 ký tự → hiện gần như ngay.
+ * - Tier-2: phía trước (tăng dần) rồi phía sau. GTX: 5 dòng/400 ký tự; Gemini: maxItemsTier2 dòng/2000 ký tự.
+ * - Tối đa 2 batch đang chạy mỗi session; Tier-1 luôn được lấy trước.
+ *
+ * Giao ước lỗi với background (NOTES.md › Phase 2):
+ *   blocked  → tạm nghỉ theo retryAfterMs (mặc định 10s), KHÔNG tính lượt retry
+ *   network  → tạm nghỉ 5s, KHÔNG tính lượt retry (mạng có lại thì dịch tiếp)
+ *   disabled → thiếu Gemini key: ngừng upgrade, không retry
+ *   other / dòng rỗng không lỗi → tính 1 lượt retry (tối đa 3)
+ *
+ * Upgrade lên Gemini (hybrid, và gemini với các dòng đã phải rơi về GTX):
+ *   chỉ chạy khi KHÔNG còn việc dịch thường; gửi priority "upgrade" (router: chỉ cloud, không rơi về GTX);
+ *   mỗi dòng tối đa 2 lần thử; không phụ thuộc geminiReady (bucket có thể tạm cạn đúng lúc status gửi).
+ * Trạng thái breaker từ background chỉ dùng để biết cloud có đang khóa không — KHÔNG tự tạm dừng dựa vào nó
+ * (router đã tự chuyển tầng; chỉ trả lỗi khi KHÔNG tầng nào dịch được).
  */
 
-import type { EngineId, SubtitleItem, TranslateMode } from "../shared/types";
+import type { EngineId, Priority, SubtitleItem, TranslateMode } from "../shared/types";
 import { splitLinesIntoControlledBatches } from "../shared/batching";
 import { upsertSubtitles } from "../shared/subtitles";
 import type { BackgroundPort } from "./port";
@@ -36,19 +45,39 @@ export interface ScheduledBatch {
   isUpgrade?: boolean;
 }
 
+type TranslateResult = Extract<B2C, { type: "translate.result" }>;
+
+export const MAX_INFLIGHT = 2;
+export const MAX_RETRIES = 3;
+export const MAX_UPGRADE_ATTEMPTS = 2;
+const LOOKAHEAD_WHEN_NOT_PRETRANSLATING_SEC = 60;
+
 export function inPlayWindow(item: SubtitleItem, playheadSec: number): boolean {
   return item.end_sec >= playheadSec - 1.0 && item.start_sec <= playheadSec + 15.0;
 }
 
+/** Mã ngôn ngữ nguồn hợp lệ cho GTX ("und"/rỗng → "auto") */
+export function normalizeSrcLang(lang: string | undefined): string {
+  const l = (lang || "").trim();
+  if (!l || l.toLowerCase() === "und") return "auto";
+  return l;
+}
+
+export function engineKeyFor(engine: EngineId | null, geminiModel?: string): string {
+  return engine === "cloud" ? (geminiModel ? `cloud:${geminiModel}` : "cloud") : "api";
+}
+
 export class Scheduler {
   private readonly inflight = new Map<string, number[]>(); // reqId -> item ids
-  private readonly retries = new Map<number, number>(); // id -> retry count
+  private readonly retries = new Map<number, number>(); // id -> số lượt "other"/rỗng
+  private readonly upgradeAttempts = new Map<number, number>(); // id -> số lần thử upgrade
   private queuedBatches: ScheduledBatch[] = [];
   private pausedUntil = 0;
   private pauseTimer: ReturnType<typeof setTimeout> | null = null;
   private countdownTimer: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
-  private geminiReady = false;
+  private geminiDisabled = false;
+  private lastPlayhead = 0;
   private breakers: { api: BreakerView; cloud: BreakerView } = {
     api: { blocked: false, until: 0 },
     cloud: { blocked: false, until: 0 },
@@ -57,7 +86,7 @@ export class Scheduler {
 
   constructor(private readonly opts: SchedulerOptions) {
     this.unregisterStatus = this.opts.port.onStatus((s) => {
-      this.handleBreakerStatus(s);
+      this.breakers = s.breakers;
     });
   }
 
@@ -69,91 +98,96 @@ export class Scheduler {
     return this.queuedBatches.length;
   }
 
+  public get paused(): boolean {
+    return this.isPaused();
+  }
+
   public updateSettings(patch: {
     mode?: TranslateMode;
     geminiModel?: string;
     maxItemsTier2?: number;
     pretranslateWholeTrack?: boolean;
   }): void {
-    if (patch.mode) this.opts.mode = patch.mode;
-    if (patch.geminiModel !== undefined) this.opts.geminiModel = patch.geminiModel;
+    if (patch.mode && patch.mode !== this.opts.mode) {
+      this.opts.mode = patch.mode;
+      this.upgradeAttempts.clear(); // đổi mode: cho phép thử upgrade lại
+    }
+    if (patch.geminiModel !== undefined && patch.geminiModel !== this.opts.geminiModel) {
+      this.opts.geminiModel = patch.geminiModel;
+      this.geminiDisabled = false;
+      this.upgradeAttempts.clear();
+    }
     if (patch.maxItemsTier2 !== undefined) this.opts.maxItemsTier2 = patch.maxItemsTier2;
     if (patch.pretranslateWholeTrack !== undefined) {
       this.opts.pretranslateWholeTrack = patch.pretranslateWholeTrack;
     }
   }
 
-  /** Lên lịch dịch dựa theo mốc thời gian phát hiện tại */
+  /** Lập lại toàn bộ hàng đợi theo playhead hiện tại (batch đang chạy không bị hủy) */
   public plan(playheadSec: number): void {
     if (this.disposed) return;
-
+    this.lastPlayhead = playheadSec;
     const items = this.opts.getItems();
     if (!items || items.length === 0) return;
 
     const inflightIds = new Set<number>();
-    for (const ids of this.inflight.values()) {
-      for (const id of ids) inflightIds.add(id);
-    }
+    for (const ids of this.inflight.values()) for (const id of ids) inflightIds.add(id);
 
-    const tier1Ids: number[] = [];
-    const aheadIds: number[] = [];
-    const behindIds: number[] = [];
-
+    const tier1: number[] = [];
+    const ahead: number[] = [];
+    const behind: number[] = [];
+    let pendingNormalWork = false;
     const pretranslateAll = this.opts.pretranslateWholeTrack ?? true;
-    const maxLookaheadSec = playheadSec + 75.0; // 15s window + 60s ahead
+    const maxAhead = playheadSec + 15 + LOOKAHEAD_WHEN_NOT_PRETRANSLATING_SEC;
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       if (it.ignored || it.translated) continue;
-      if (inflightIds.has(it.id)) continue;
-      if ((this.retries.get(it.id) ?? 0) >= 3) continue;
-
+      if (inflightIds.has(it.id)) {
+        pendingNormalWork = true;
+        continue;
+      }
+      if ((this.retries.get(it.id) ?? 0) >= MAX_RETRIES) continue;
       if (inPlayWindow(it, playheadSec)) {
-        tier1Ids.push(i);
-      } else if (it.start_sec > playheadSec + 15.0) {
-        if (pretranslateAll || it.start_sec <= maxLookaheadSec) {
-          aheadIds.push(i);
-        }
-      } else if (it.end_sec < playheadSec - 1.0) {
-        behindIds.push(i);
+        tier1.push(i);
+      } else if (it.start_sec > playheadSec + 15) {
+        if (pretranslateAll || it.start_sec <= maxAhead) ahead.push(i);
+        else pendingNormalWork = true; // còn việc, chỉ là chưa tới lượt
+      } else {
+        behind.push(i);
       }
     }
+    if (tier1.length || ahead.length || behind.length) pendingNormalWork = true;
 
-    const newBatches: ScheduledBatch[] = [];
+    const batches: ScheduledBatch[] = [];
+    this.pack(items, tier1, 3, 240, "tier1", batches);
+    const geminiTier2 = this.opts.mode === "gemini" || this.opts.mode === "hybrid";
+    const maxLines = geminiTier2 ? this.opts.maxItemsTier2 ?? 20 : 5;
+    const maxChars = geminiTier2 ? 2000 : 400;
+    this.pack(items, ahead, maxLines, maxChars, "tier2", batches);
+    this.pack(items, behind, maxLines, maxChars, "tier2", batches);
 
-    // 1. Pack Tier-1: 3 câu / 240 ký tự
-    this.packBatches(items, tier1Ids, 3, 240, "tier1", newBatches);
-
-    // 2. Pack Tier-2 (Ahead rồi tới Behind)
-    const isGeminiExpected =
-      this.opts.mode === "gemini" || this.opts.mode === "hybrid";
-    const maxLinesTier2 = isGeminiExpected
-      ? this.opts.maxItemsTier2 ?? 20
-      : 5;
-    const maxCharsTier2 = isGeminiExpected ? 2000 : 400;
-
-    this.packBatches(items, aheadIds, maxLinesTier2, maxCharsTier2, "tier2", newBatches);
-    this.packBatches(items, behindIds, maxLinesTier2, maxCharsTier2, "tier2", newBatches);
-
-    // 3. Hybrid upgrade nếu tất cả câu đã dịch và còn câu dịch bằng API
-    if (
-      this.opts.mode === "hybrid" &&
-      tier1Ids.length === 0 &&
-      aheadIds.length === 0 &&
-      behindIds.length === 0 &&
-      this.canUpgradeToCloud()
-    ) {
-      const upgradeIds: number[] = [];
+    // Upgrade: chỉ khi đã hết việc dịch thường
+    if (!pendingNormalWork && this.canUpgrade()) {
+      const upgrade: number[] = [];
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
-        if (it.translated && it.engine === "api" && !inflightIds.has(it.id)) {
-          upgradeIds.push(i);
+        if (
+          it.translated &&
+          it.engine === "api" &&
+          !it.ignored &&
+          !inflightIds.has(it.id) &&
+          (this.upgradeAttempts.get(it.id) ?? 0) < MAX_UPGRADE_ATTEMPTS
+        ) {
+          upgrade.push(i);
         }
       }
-      this.packBatches(items, upgradeIds, maxLinesTier2, maxCharsTier2, "tier2", newBatches, true);
+      // Ưu tiên dòng gần playhead trước
+      upgrade.sort((a, b) => distance(items[a], playheadSec) - distance(items[b], playheadSec));
+      this.pack(items, upgrade, this.opts.maxItemsTier2 ?? 20, 2000, "tier2", batches, true);
     }
 
-    this.queuedBatches = newBatches;
+    this.queuedBatches = batches;
     this.pump();
   }
 
@@ -168,38 +202,25 @@ export class Scheduler {
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-
-    if (this.unregisterStatus) {
-      this.unregisterStatus();
-      this.unregisterStatus = null;
-    }
-
-    if (this.pauseTimer) {
-      clearTimeout(this.pauseTimer);
-      this.pauseTimer = null;
-    }
-    if (this.countdownTimer) {
-      clearInterval(this.countdownTimer);
-      this.countdownTimer = null;
-    }
-
-    // Hủy toàn bộ request đang bay
-    for (const reqId of this.inflight.keys()) {
-      this.opts.port.cancel(reqId);
-    }
+    this.unregisterStatus?.();
+    this.unregisterStatus = null;
+    this.clearPauseTimers();
+    for (const reqId of this.inflight.keys()) this.opts.port.cancel(reqId);
     this.inflight.clear();
     this.queuedBatches = [];
     this.retries.clear();
+    this.upgradeAttempts.clear();
     this.opts.onStatusMessage?.(null);
   }
 
   // ---------------------------------------------------------------------------
 
-  private canUpgradeToCloud(): boolean {
-    return this.geminiReady && !this.breakers.cloud.blocked;
+  private canUpgrade(): boolean {
+    const m = this.opts.mode;
+    return (m === "hybrid" || m === "gemini") && !this.geminiDisabled && !this.breakers.cloud.blocked;
   }
 
-  private packBatches(
+  private pack(
     items: SubtitleItem[],
     indices: number[],
     maxLines: number,
@@ -210,122 +231,89 @@ export class Scheduler {
   ): void {
     if (indices.length === 0) return;
     const lines = indices.map((idx) => items[idx].source_text);
-    const subBatches = splitLinesIntoControlledBatches(lines, maxLines, maxChars);
-    for (const sb of subBatches) {
-      const ids = sb.map((local) => items[indices[local]].id);
-      target.push({ ids, priority, isUpgrade });
+    for (const sb of splitLinesIntoControlledBatches(lines, maxLines, maxChars)) {
+      target.push({ ids: sb.map((local) => items[indices[local]].id), priority, isUpgrade });
     }
   }
 
   private pump(): void {
     if (this.disposed || this.isPaused()) return;
-
-    while (this.inflight.size < 2 && this.queuedBatches.length > 0) {
-      const batch = this.queuedBatches.shift()!;
-      this.dispatchBatch(batch);
+    while (this.inflight.size < MAX_INFLIGHT && this.queuedBatches.length > 0) {
+      this.dispatch(this.queuedBatches.shift()!);
     }
   }
 
-  private dispatchBatch(batch: ScheduledBatch): void {
-    const items = this.opts.getItems();
-    const itemMap = new Map<number, SubtitleItem>();
-    for (const it of items) itemMap.set(it.id, it);
-
-    const lines = batch.ids.map((id) => itemMap.get(id)?.source_text ?? "");
+  private dispatch(batch: ScheduledBatch): void {
+    const byId = new Map(this.opts.getItems().map((it) => [it.id, it] as const));
     const reqId = newReqId();
     this.inflight.set(reqId, batch.ids);
-
+    const priority: Priority = batch.isUpgrade ? "upgrade" : batch.priority;
     const msg: C2B = {
       type: "translate",
       reqId,
       trackKey: this.opts.trackKey,
-      srcLang: this.opts.srcLang || "en",
-      lines,
-      priority: batch.priority,
-      prefer: batch.isUpgrade ? "cloud" : undefined,
+      srcLang: normalizeSrcLang(this.opts.srcLang),
+      lines: batch.ids.map((id) => byId.get(id)?.source_text ?? ""),
+      priority,
     };
-
     this.opts.port
-      .request<Extract<B2C, { type: "translate.result" }>>(msg)
+      .request<TranslateResult>(msg)
       .then((res) => {
         if (this.disposed) return;
         this.inflight.delete(reqId);
-        this.handleTranslateResult(batch, res);
+        this.handleResult(batch, res);
         this.pump();
       })
       .catch((err) => {
         if (this.disposed) return;
         this.inflight.delete(reqId);
         if (import.meta.env?.DEV) console.warn("[SubTrans][scheduler] request lỗi:", err);
-        this.pump();
+        // Timeout/port lỗi: coi như lỗi tạm thời, không tính lượt retry; lập lại lịch sau
+        this.pauseFor(3_000, false);
       });
   }
 
-  private handleTranslateResult(
-    batch: ScheduledBatch,
-    res: Extract<B2C, { type: "translate.result" }>
-  ): void {
-    if (res.error) {
-      if (res.error.kind === "blocked") {
-        const pauseMs = res.error.retryAfterMs ?? 10_000;
-        this.pauseFor(pauseMs);
-      } else if (res.error.kind === "network") {
-        this.pauseFor(5_000);
-      }
-    }
+  private handleResult(batch: ScheduledBatch, res: TranslateResult): void {
+    const kind = res.error?.kind;
+    if (kind === "blocked") this.pauseFor(res.error?.retryAfterMs ?? 10_000, true);
+    else if (kind === "network") this.pauseFor(5_000, true);
+    else if (kind === "disabled" && batch.isUpgrade) this.geminiDisabled = true;
+    // "Lỗi tạm thời" (blocked/network/canceled) không đốt lượt retry của dòng
+    const transient = kind === "blocked" || kind === "network" || kind === "canceled" || kind === "disabled";
 
     const items = this.opts.getItems();
-    const itemMap = new Map<number, SubtitleItem>();
-    for (const it of items) itemMap.set(it.id, it);
-
+    const byId = new Map(items.map((it) => [it.id, it] as const));
     const updates: SubtitleItem[] = [];
-    const lineUpdatesByEngine: Record<string, Array<[number, string]>> = {};
+    const lineUpdates: Record<string, Array<[number, string]>> = {};
 
-    for (let i = 0; i < batch.ids.length; i++) {
-      const id = batch.ids[i];
-      const orig = itemMap.get(id);
-      if (!orig) continue;
-
+    batch.ids.forEach((id, i) => {
+      const orig = byId.get(id);
+      if (!orig) return;
       const r = res.results?.[i];
-      const targetText = r?.text ? r.text.trim() : "";
+      const text = r?.text?.trim() ?? "";
       const engine: EngineId | null = r?.engine ?? null;
 
-      if (targetText) {
-        const updated: SubtitleItem = {
-          ...orig,
-          target_text: targetText,
-          translated: true,
-          engine,
-        };
-        updates.push(updated);
-
-        const engKey =
-          engine === "cloud"
-            ? this.opts.geminiModel
-              ? `cloud:${this.opts.geminiModel}`
-              : "cloud"
-            : "api";
-
-        if (!lineUpdatesByEngine[engKey]) {
-          lineUpdatesByEngine[engKey] = [];
+      if (batch.isUpgrade) {
+        if (text && engine === "cloud") {
+          updates.push({ ...orig, target_text: text, translated: true, engine });
+          (lineUpdates[engineKeyFor(engine, this.opts.geminiModel)] ??= []).push([id, text]);
+        } else if (!transient || kind === "disabled") {
+          this.upgradeAttempts.set(id, (this.upgradeAttempts.get(id) ?? 0) + 1);
         }
-        lineUpdatesByEngine[engKey].push([id, targetText]);
-      } else {
-        // Dòng rỗng: đếm số lần thử lại
-        const retries = this.retries.get(id) ?? 0;
-        if (retries < 3) {
-          this.retries.set(id, retries + 1);
-        }
+        return;
       }
-    }
+
+      if (text) {
+        updates.push({ ...orig, target_text: text, translated: true, engine });
+        (lineUpdates[engineKeyFor(engine, this.opts.geminiModel)] ??= []).push([id, text]);
+      } else if (!transient) {
+        this.retries.set(id, Math.min(MAX_RETRIES, (this.retries.get(id) ?? 0) + 1));
+      }
+    });
 
     if (updates.length > 0) {
-      const merged = upsertSubtitles(items, updates);
-      this.opts.onItemsUpdated(merged);
-
-      for (const [engKey, lineUpdates] of Object.entries(lineUpdatesByEngine)) {
-        this.opts.onLinesTranslated?.(engKey, lineUpdates);
-      }
+      this.opts.onItemsUpdated(upsertSubtitles(items, updates));
+      for (const [k, u] of Object.entries(lineUpdates)) this.opts.onLinesTranslated?.(k, u);
     }
   }
 
@@ -333,66 +321,42 @@ export class Scheduler {
     return Date.now() < this.pausedUntil;
   }
 
-  private pauseFor(ms: number): void {
-    this.pauseUntil(Date.now() + ms);
-  }
-
-  private pauseUntil(until: number): void {
-    if (until <= Date.now()) return;
-    this.pausedUntil = Math.max(this.pausedUntil, until);
-
+  private clearPauseTimers(): void {
     if (this.pauseTimer) clearTimeout(this.pauseTimer);
     if (this.countdownTimer) clearInterval(this.countdownTimer);
+    this.pauseTimer = null;
+    this.countdownTimer = null;
+  }
 
-    const updateCountdown = () => {
-      const remainingSec = Math.max(0, Math.ceil((this.pausedUntil - Date.now()) / 1000));
-      if (remainingSec <= 0) {
-        if (this.countdownTimer) clearInterval(this.countdownTimer);
-        this.countdownTimer = null;
-        this.opts.onStatusMessage?.(null);
-        this.pump();
-        return;
-      }
-      const mm = String(Math.floor(remainingSec / 60)).padStart(2, "0");
-      const ss = String(remainingSec % 60).padStart(2, "0");
+  /** Tạm dừng gửi batch mới; hết hạn thì lập lại lịch theo playhead gần nhất */
+  private pauseFor(ms: number, showCountdown: boolean): void {
+    const until = Date.now() + Math.max(0, ms);
+    if (until <= this.pausedUntil) return;
+    this.pausedUntil = until;
+    this.clearPauseTimers();
+
+    const update = () => {
+      const remain = Math.max(0, Math.ceil((this.pausedUntil - Date.now()) / 1000));
+      if (remain <= 0) return;
+      const mm = String(Math.floor(remain / 60)).padStart(2, "0");
+      const ss = String(remain % 60).padStart(2, "0");
       this.opts.onStatusMessage?.(`Đang tạm nghỉ do giới hạn API… (${mm}:${ss})`);
     };
-
-    updateCountdown();
-    this.countdownTimer = setInterval(updateCountdown, 1000);
-
-    const waitMs = this.pausedUntil - Date.now();
+    if (showCountdown) {
+      update();
+      this.countdownTimer = setInterval(update, 1000);
+    }
     this.pauseTimer = setTimeout(() => {
-      this.pauseTimer = null;
-      if (this.countdownTimer) {
-        clearInterval(this.countdownTimer);
-        this.countdownTimer = null;
-      }
-      this.opts.onStatusMessage?.(null);
-      this.pump();
-    }, waitMs);
-  }
-
-  private handleBreakerStatus(status: Extract<B2C, { type: "status" }>): void {
-    this.geminiReady = status.geminiReady;
-    this.breakers = status.breakers;
-
-    let until = 0;
-    if (status.breakers.api.blocked && status.breakers.api.until > Date.now()) {
-      until = Math.max(until, status.breakers.api.until);
-    }
-    if (status.breakers.cloud.blocked && status.breakers.cloud.until > Date.now()) {
-      until = Math.max(until, status.breakers.cloud.until);
-    }
-
-    if (until > Date.now()) {
-      this.pauseUntil(until);
-    } else if (this.isPaused() && !status.breakers.api.blocked && !status.breakers.cloud.blocked) {
+      this.clearPauseTimers();
       this.pausedUntil = 0;
-      if (this.pauseTimer) clearTimeout(this.pauseTimer);
-      if (this.countdownTimer) clearInterval(this.countdownTimer);
-      this.opts.onStatusMessage?.(null);
-      this.pump();
-    }
+      if (showCountdown) this.opts.onStatusMessage?.(null);
+      this.plan(this.lastPlayhead);
+    }, Math.max(0, this.pausedUntil - Date.now()));
   }
+}
+
+function distance(it: SubtitleItem, t: number): number {
+  if (t < it.start_sec) return it.start_sec - t;
+  if (t > it.end_sec) return t - it.end_sec;
+  return 0;
 }

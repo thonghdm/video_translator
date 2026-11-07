@@ -274,7 +274,7 @@ describe("Scheduler Two-Tier Batching & Planning", () => {
     scheduler.dispose();
   });
 
-  it("hybrid upgrade chỉ kích hoạt khi toàn bộ câu đã dịch và Gemini sẵn sàng", () => {
+  it("hybrid upgrade: chạy khi đã dịch hết, gửi priority 'upgrade'; bị chặn khi breaker cloud đang khóa", () => {
     const items: SubtitleItem[] = [
       {
         id: 0,
@@ -299,20 +299,25 @@ describe("Scheduler Two-Tier Batching & Planning", () => {
       onItemsUpdated: () => {},
     });
 
-    // Khi Gemini chưa sẵn sàng (chưa có status geminiReady = true)
+    // Breaker cloud đang khóa → chưa upgrade
+    fakePort.emitStatus({
+      type: "status",
+      geminiReady: false,
+      breakers: { api: { blocked: false, until: 0 }, cloud: { blocked: true, until: Date.now() + 60_000 } },
+    });
     scheduler.plan(0);
     expect(fakePort.sent.length).toBe(0);
 
-    // Phát status Gemini ready
+    // Breaker mở lại (geminiReady có thể vẫn false vì bucket tạm cạn) → upgrade vẫn chạy
     fakePort.emitStatus({
       type: "status",
-      geminiReady: true,
+      geminiReady: false,
       breakers: { api: { blocked: false, until: 0 }, cloud: { blocked: false, until: 0 } },
     });
-
     scheduler.plan(0);
     expect(fakePort.sent.length).toBe(1);
-    expect(fakePort.sent[0].prefer).toBe("cloud");
+    expect(fakePort.sent[0].priority).toBe("upgrade");
+    expect(fakePort.sent[0].prefer).toBeUndefined();
     scheduler.dispose();
   });
 });

@@ -8,7 +8,7 @@
  * - Khi dispose: flush toàn bộ buffer lưu trữ, hủy request dịch đang chạy, dọn dẹp listeners.
  */
 
-import type { EngineId, SubtitleItem, SubtitleMode, TranslateMode } from "../../shared/types";
+import type { Cue, EngineId, SubtitleItem, SubtitleMode, TranslateMode } from "../../shared/types";
 import { cuesToItems, findSubtitleAtTime } from "../../shared/subtitles";
 import { Disposer } from "../../shared/disposer";
 import { raf, cancelRaf } from "../../shared/raf";
@@ -34,62 +34,48 @@ export function computeSourceHash(cues: Array<{ text: string }>): string {
   return fnv1a32(cues.map((c) => c.text).join("\n"));
 }
 
-/** Áp dụng bản dịch từ cache IndexedDB vào danh sách SubtitleItem */
+/** Chọn bản dịch cho dòng i theo mode: google ưu tiên api; gemini/hybrid ưu tiên cloud:${model} → cloud:* → api */
+function pickCachedLine(
+  lines: Record<string, (string | null)[]>,
+  i: number,
+  mode: TranslateMode,
+  geminiModel?: string
+): { text: string; engine: EngineId } | null {
+  const cloudKeys = Object.keys(lines).filter((k) => k === "cloud" || k.startsWith("cloud:"));
+  const preferredCloud = geminiModel ? `cloud:${geminiModel}` : "cloud";
+  const ordered = [preferredCloud, ...cloudKeys.filter((k) => k !== preferredCloud)];
+  const fromCloud = () => {
+    for (const k of ordered) {
+      const t = lines[k]?.[i];
+      if (t) return { text: t, engine: "cloud" as const };
+    }
+    return null;
+  };
+  const fromApi = () => {
+    const t = lines["api"]?.[i];
+    return t ? { text: t, engine: "api" as const } : null;
+  };
+  return mode === "google" ? fromApi() ?? fromCloud() : fromCloud() ?? fromApi();
+}
+
+/**
+ * Áp bản dịch đã lưu (cache IndexedDB + bản dịch trong phiên) vào danh sách phụ đề.
+ * Trả về MẢNG MỚI; dòng nào đổi bản dịch là object mới (để store/overlay nhận ra thay đổi khi đổi mode).
+ */
 export function applyLinesToItems(
   items: SubtitleItem[],
   lines: Record<string /*engineKey*/, (string | null)[]> | undefined,
   mode: TranslateMode,
   geminiModel?: string
-): void {
-  if (!lines) return;
-  const preferredCloudKey = geminiModel ? `cloud:${geminiModel}` : "cloud";
-
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    if (it.ignored) continue;
-
-    let targetText: string | null = null;
-    let engine: EngineId | null = null;
-
-    if (mode === "google") {
-      // Ưu tiên api rồi tới cloud:*
-      if (lines["api"]?.[i]) {
-        targetText = lines["api"][i];
-        engine = "api";
-      } else {
-        const cloudKey = Object.keys(lines).find(
-          (k) => (k === "cloud" || k.startsWith("cloud:")) && lines[k]?.[i]
-        );
-        if (cloudKey && lines[cloudKey]?.[i]) {
-          targetText = lines[cloudKey][i];
-          engine = "cloud";
-        }
-      }
-    } else {
-      // gemini hoặc hybrid: ưu tiên cloud:${model} -> cloud:* -> api
-      if (lines[preferredCloudKey]?.[i]) {
-        targetText = lines[preferredCloudKey][i];
-        engine = "cloud";
-      } else {
-        const anyCloudKey = Object.keys(lines).find(
-          (k) => (k === "cloud" || k.startsWith("cloud:")) && lines[k]?.[i]
-        );
-        if (anyCloudKey && lines[anyCloudKey]?.[i]) {
-          targetText = lines[anyCloudKey][i];
-          engine = "cloud";
-        } else if (lines["api"]?.[i]) {
-          targetText = lines["api"][i];
-          engine = "api";
-        }
-      }
-    }
-
-    if (targetText) {
-      it.target_text = targetText;
-      it.translated = true;
-      it.engine = engine;
-    }
-  }
+): SubtitleItem[] {
+  if (!lines || Object.keys(lines).length === 0) return items;
+  return items.map((it, i) => {
+    if (it.ignored) return it;
+    const picked = pickCachedLine(lines, i, mode, geminiModel);
+    if (!picked) return it;
+    if (it.translated && it.target_text === picked.text && it.engine === picked.engine) return it;
+    return { ...it, target_text: picked.text, translated: true, engine: picked.engine };
+  });
 }
 
 export class Session {
@@ -154,7 +140,7 @@ export class Session {
           this.cachedLines = cacheRes.lines;
           const mode = this.opts.settings?.mode ?? "google";
           const model = this.opts.settings?.gemini?.model;
-          applyLinesToItems(this.items, this.cachedLines, mode, model);
+          this.items = applyLinesToItems(this.items, this.cachedLines, mode, model);
         } else {
           // Lưu track mới vào IndexedDB
           this.opts.port.send({
@@ -176,20 +162,7 @@ export class Session {
       this.initScheduler();
     }
 
-    const off = this.source.onCuesChanged?.((next) => {
-      // Track nạp thêm cue: dựng lại items và giữ bản dịch theo id
-      const updated = cuesToItems(next);
-      for (const it of updated) {
-        const old = this.items[it.id];
-        if (old && old.translated) {
-          it.target_text = old.target_text;
-          it.translated = true;
-          it.engine = old.engine;
-        }
-      }
-      this.setItems(updated);
-      this.scheduler?.plan(this.getCurrentPlayhead());
-    });
+    const off = this.source.onCuesChanged?.((next) => this.handleCuesChanged(next));
     if (off) this.disposer.add(off);
 
     this.bindVideoEvents();
@@ -210,10 +183,8 @@ export class Session {
 
   public onSettingsChanged(newSettings: Settings): void {
     this.opts.settings = newSettings;
-    if (this.cachedLines && Object.keys(this.cachedLines).length > 0) {
-      applyLinesToItems(this.items, this.cachedLines, newSettings.mode, newSettings.gemini?.model);
-      this.setItems(this.items);
-    }
+    const next = applyLinesToItems(this.items, this.cachedLines, newSettings.mode, newSettings.gemini?.model);
+    if (next !== this.items) this.setItems(next);
     this.scheduler?.updateSettings({
       mode: newSettings.mode,
       geminiModel: newSettings.gemini?.model,
@@ -233,6 +204,40 @@ export class Session {
   }
 
   // ---------------------------------------------------------------------------
+
+  /**
+   * Track nạp thêm/đổi cue (player HLS nạp dần, hoặc đổi nội dung):
+   * - chỉ giữ bản dịch của dòng có CÙNG id VÀ CÙNG câu gốc (tránh gắn bản dịch sai câu);
+   * - tính lại sourceHash; nếu đổi → lưu lại track và ghi lại các bản dịch còn hợp lệ theo hash mới.
+   */
+  private handleCuesChanged(next: Cue[]): void {
+    const old = this.items;
+    const updated = cuesToItems(next).map((it) => {
+      const prev = old[it.id];
+      return prev && prev.translated && prev.source_text === it.source_text
+        ? { ...it, target_text: prev.target_text, translated: true, engine: prev.engine }
+        : it;
+    });
+    const newHash = computeSourceHash(next);
+    if (newHash !== this.sourceHash && this.opts.port) {
+      this.sourceHash = newHash;
+      this.saveLinesBuffer.clear();
+      this.cachedLines = {};
+      this.opts.port.send({ type: "cache.saveTrack", track: this.source.track, cues: next, sourceHash: newHash });
+      const model = this.opts.settings?.gemini?.model;
+      const byEngine = new Map<string, Array<[number, string]>>();
+      for (const it of updated) {
+        if (!it.translated || !it.target_text) continue;
+        const k = it.engine === "cloud" ? (model ? `cloud:${model}` : "cloud") : "api";
+        if (!byEngine.has(k)) byEngine.set(k, []);
+        byEngine.get(k)!.push([it.id, it.target_text]);
+      }
+      this.items = updated; // để bufferSaveLines dùng đúng total mới
+      for (const [k, u] of byEngine) this.bufferSaveLines(k, u);
+    }
+    this.setItems(updated);
+    this.scheduler?.plan(this.getCurrentPlayhead());
+  }
 
   private getCurrentPlayhead(): number {
     return this.video.currentTime + (this.opts.getOffset?.() ?? 0);
