@@ -20,10 +20,13 @@ describe("parseTimedtextUrl & extractVideoId", () => {
   it("trích xuất các tham số từ URL timedtext", () => {
     const url = "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en&fmt=json3&name=";
     const res = parseTimedtextUrl(url);
-    expect(res).toEqual({
+    expect(res).toMatchObject({
       videoId: "dQw4w9WgXcQ",
       lang: "en",
       fmt: "json3",
+      kind: null,
+      tlang: null,
+      hasPot: false,
     });
   });
 });

@@ -128,3 +128,64 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
 - [ ] Gặp video có quảng cáo đầu clip: overlay tự ẩn đi và chỉ hiện lại khi video chính bắt đầu phát.
 - [ ] Bật/tắt tùy chọn `hideNativeCaptions`: phụ đề CC gốc của YouTube biến mất khi overlay hoạt động.
 
+
+---
+
+## Phase 5: kiểm chứng trên YouTube thật (07/11/2026) và các bản sửa
+
+Đã thử trên video TED `arj7oStGLkU` (14 phút; có track `en` thủ công và `en` ASR) bằng built-in browser. Mọi bài thử chỉ ghi lại **số liệu**, không lưu nội dung phụ đề.
+
+### Kết quả các mục [T]
+| Câu hỏi | Kết quả |
+|---|---|
+| Fetch `baseUrl` (từ playerResponse) + `&fmt=json3` | **Không chạy**: HTTP 200 nhưng body rỗng, vì thiếu `pot` |
+| Request timedtext do player gửi | Có `pot`, `potc=1`, `fmt=json3`, `c=WEB`, …; chạy **ngay khi tải trang**, trước `document_idle` |
+| Dùng lại URL có `pot` | Chạy được. Đổi `lang`/`kind`/`tlang` trên URL đó vẫn chạy; bỏ `pot` thì body rỗng |
+| `player.loadModule("captions")` | Player tự gửi request mới có `pot`, nên **không cần người dùng bấm CC** |
+| Định dạng json3 | Có `wWinId`, `aAppend` (event chỉ chứa `"\n"`), `tOffsetMs` theo từ; **142/145 event chồng thời gian** (cửa sổ cuộn), kể cả track thủ công |
+| ASR có dấu câu không | Không (0% câu kết thúc bằng dấu câu). Gộp câu dựa vào khoảng lặng, 7s và 120 ký tự |
+| `html{font-size}` của YouTube | `10px` (xác nhận cần plugin rem→px) |
+| `#movie_player` | `position: relative`; chứa `video.html5-main-video` |
+| `.ad-showing` | Có xuất hiện thật khi đang chạy quảng cáo |
+| `videoDetails.isLive` | Không có khi video không live. Dùng `isLive \|\| microformat…liveBroadcastDetails.isLiveNow` |
+| Ý tưởng sau MVP | URL có `pot` kèm `tlang=vi` trả về bản YouTube tự dịch sang tiếng Việt (có thể làm thêm một engine dịch "YouTube") |
+
+### Kết quả sau khi sửa (chạy đúng bản build: hook + parser)
+| | manual | ASR |
+|---|---|---|
+| Lấy bằng | bắt được sau `ensureCaptions` | URL dựng từ `pot` rồi `fetchTimedtext` |
+| Số cue | 315 | 220 |
+| Phủ tới | 843/844s | 843/844s |
+| Cue chồng nhau | 0 | 0 |
+| `findSubtitleAtTime` bỏ sót (dò mỗi 0.25s) | 0% | 0% |
+| Độ dài trung bình | 2.4s / 39 ký tự | 3.6s / 53 ký tự |
+
+### Lỗi trong commit Phase 5 ban đầu và cách sửa
+1. **Bước 2 của plan (fetch `baseUrl`) không bao giờ chạy** (thiếu `pot`). Thứ tự mới:
+   - (1) Đã bắt được đúng track → dùng luôn.
+   - (2) Đã bắt được track khác của cùng video → `deriveTrackUrl` (giữ `pot`) rồi `fetchTimedtext` trong MAIN world.
+   - (3) `ensureCaptions` (gọi `loadModule`), chờ tối đa 6s. Nếu chính SubTrans bật CC thì `restoreCaptions` khi dispose.
+   - (4) Báo "Bật CC (phím C)" và chờ.
+2. **Mất response đầu tiên:** player tải phụ đề trước khi content script nghe. Hook giữ bộ đệm 12 response; client gửi `replay` khi khởi tạo.
+3. **Cue chồng nhau làm overlay bỏ sót dòng:** thêm `normalizeTimeline()` (bỏ cue rác trước, sau đó cắt chồng lấn), áp cho json3, XML và VTT.
+4. **Lấy nhầm ngôn ngữ:** trước đây bản bắt được được khớp chỉ theo `videoId`. Nếu người dùng đang xem bản tự dịch (`tlang=vi`) hoặc track khác thì bản đó bị coi là phụ đề tiếng Anh gốc. Giờ khớp theo `lang` + `kind` và loại `tlang` (`timedtextMatchesTrack`).
+5. **Lấy nhầm video sau SPA navigation:** `getPlayerResponse()` có thể vẫn trả video cũ. Giờ thử lại tối đa 10×500ms cho tới khi `videoId` khớp URL.
+6. **Vào YouTube từ trang chủ rồi mới mở video** thì không theo dõi điều hướng, nên dính phụ đề video cũ. Giờ `watchYouTubeNavigation` chạy trên mọi trang YouTube và **chỉ** báo khi `videoId` đổi (bỏ qua `&t=`, `&list=`).
+7. **Quảng cáo làm dựng lại session:** quảng cáo phát trên cùng thẻ `<video>` và gây `loadstart`. Thêm `SiteAdapter.rebuildOnSourceChange = false` cho YouTube.
+8. **VOD của livestream bị bỏ qua:** `isLiveContent` vẫn `true` sau khi live kết thúc. Giờ chỉ bỏ qua khi đang live thật (`isLiveNow`).
+9. **Hook:**
+   - Không còn bọc `async` quanh `fetch`: trả **đúng promise gốc**, nên trong suốt hoàn toàn với trang.
+   - Bắt được cả khi gọi bằng đối tượng `URL`.
+   - XHR `responseType = "json"`.
+   - Chống cài 2 lần.
+   - `fetchTimedtext` chỉ cho phép `/api/timedtext` cùng origin.
+10. Parser hỗ trợ thêm XML srv3 (`<p t d>`). Selector DOM gom vào `YT_SELECTORS` (R10).
+
+### Cần xác nhận thủ công (Load unpacked)
+- [ ] Video có CC thủ công: overlay hiện EN từ đầu tới cuối, khớp với CC gốc (bật/tắt nhanh `C` để so sánh).
+- [ ] Video chỉ có auto-CC: câu được gộp hợp lý.
+- [ ] Mở YouTube từ **trang chủ**, bấm một video, rồi chuyển sang video gợi ý: phụ đề đổi theo, không dính video cũ.
+- [ ] Video có quảng cáo: overlay ẩn trong lúc quảng cáo, hiện lại sau đó, không tải lại phụ đề.
+- [ ] Tắt CC trước khi mở video: SubTrans tự lấy phụ đề (không cần bấm C). Phụ đề gốc bị ẩn. Tắt extension trên trang thì CC trở về trạng thái tắt.
+- [ ] Fullscreen (`F`): overlay vẫn hiện, kéo thả được. Ghi lại `document.fullscreenElement` là phần tử nào.
+- [ ] Theater mode (`T`): overlay bám đúng khung player.

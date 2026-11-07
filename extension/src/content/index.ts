@@ -9,7 +9,13 @@ import { loadSettings, onSettingsChanged, type Settings } from "../shared/settin
 import { Disposer } from "../shared/disposer";
 import { VideoDetector } from "./videoDetector";
 import { createHtml5Adapter } from "./adapters/html5";
-import { createYouTubeAdapter, setYouTubeNativeCaptionsHidden } from "./adapters/youtube";
+import {
+  createYouTubeAdapter,
+  getSharedHookClient,
+  isYouTubeHost,
+  setYouTubeNativeCaptionsHidden,
+  watchYouTubeNavigation,
+} from "./adapters/youtube";
 import type { SiteAdapter, SubtitleSource } from "./adapters/types";
 import { OverlayHost } from "./overlay/mount";
 import { OverlayStore } from "./overlay/store";
@@ -70,14 +76,14 @@ class ContentController {
       this.port = null;
     });
 
-    // Lắng nghe sự kiện chuyển trang SPA nếu adapter có hỗ trợ (ví dụ YouTube)
-    const adapter = this.pickAdapter();
-    if (typeof adapter.onNavigate === "function") {
-      const offNav = adapter.onNavigate(() => {
-        log("SPA navigate -> kiểm tra cập nhật video");
-        const v = this.currentVideo || detector.getCurrent() || document.querySelector("video");
+    // YouTube là SPA: cùng 1 thẻ <video> phát nhiều video. Theo dõi đổi videoId trên MỌI trang YouTube
+    // (kể cả khi vào từ trang chủ), không phụ thuộc trang lúc kích hoạt.
+    if (isYouTubeHost(location.hostname)) {
+      const offNav = watchYouTubeNavigation((videoId) => {
+        log("YouTube đổi video →", videoId);
+        const v = detector.getCurrent() || this.currentVideo || document.querySelector("video");
         this.onVideo(v);
-      });
+      }, getSharedHookClient());
       d.add(offNav);
     }
 
@@ -120,6 +126,7 @@ class ContentController {
   }
 
   private updateNativeCaptions(): void {
+    if (!isYouTubeHost(location.hostname)) return;
     const hide =
       (this.settings.youtube?.hideNativeCaptions ?? true) &&
       this.settings.subtitleMode !== "off" &&
@@ -131,7 +138,7 @@ class ContentController {
   private teardownVideo(): void {
     this.generation++;
     this.currentVideo = null;
-    setYouTubeNativeCaptionsHidden(false, document);
+    if (isYouTubeHost(location.hostname)) setYouTubeNativeCaptionsHidden(false, document);
     this.session?.dispose();
     this.session = null;
     this.videoScope?.disposeAll();
@@ -182,10 +189,13 @@ class ContentController {
     scope.add(() => native.dispose());
 
     const session = new Session(video, source, store, native, {
-      onSourceChanged: () => {
-        log("video đổi nguồn → dựng lại session");
-        if (gen === this.generation) this.onVideo(video);
-      },
+      onSourceChanged:
+        adapter.rebuildOnSourceChange === false
+          ? undefined
+          : () => {
+              log("video đổi nguồn → dựng lại session");
+              if (gen === this.generation) this.onVideo(video);
+            },
     });
     this.session = session;
 

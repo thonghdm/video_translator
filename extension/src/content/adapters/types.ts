@@ -14,6 +14,11 @@ export interface SubtitleSource {
 
 export interface SiteAdapter {
   readonly name: string;
+  /**
+   * Có dựng lại session khi thẻ <video> phát "loadstart" (đổi nguồn) không. Mặc định true.
+   * YouTube = false: quảng cáo và đổi video dùng CÙNG thẻ <video>; đổi video bắt bằng điều hướng SPA.
+   */
+  readonly rebuildOnSourceChange?: boolean;
   matches(location: Location): boolean;
   /** null = dùng chế độ fixed (đồng bộ theo rect của video) */
   getOverlayContainer(video: HTMLVideoElement): HTMLElement | null;

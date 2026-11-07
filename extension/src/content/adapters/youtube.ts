@@ -1,22 +1,34 @@
 /**
- * SubTrans Extension — Adapter cho YouTube (youtube.com/watch) — PLAN Phase 5
- * - Bắt timedtext từ hook MAIN world (yt-hook.ts)
- * - Tự động fetch fmt=json3 trong MAIN world
- * - Nếu bị chặn (pot token), thông báo người dùng bấm CC (phím C)
- * - Tự động phát hiện chuyển video (SPA navigation qua yt-navigate-finish)
- * - Ẩn phụ đề CC gốc của YouTube theo cài đặt hideNativeCaptions
- * - Phát hiện quảng cáo (ad-showing)
+ * SubTrans Extension — Adapter YouTube (youtube.com/watch) — PLAN Phase 5
+ *
+ * Thứ tự lấy phụ đề (đã kiểm chứng trên YouTube thật, xem NOTES.md › Phase 5):
+ *  1. Hook đã bắt được timedtext ĐÚNG track (cùng videoId + lang + kind, không có tlang) → dùng luôn.
+ *  2. Hook đã bắt được timedtext KHÁC track của cùng video (URL có `pot`) → đổi lang/kind/tlang trên
+ *     URL đó rồi nhờ hook tải trong MAIN world.
+ *  3. Chưa bắt được gì → nhờ hook gọi player.loadModule("captions") để player tự tải (có pot), chờ ≤ 6s.
+ *     Nếu SubTrans là bên bật phụ đề thì tắt lại khi dispose.
+ *  4. Vẫn không có → thông báo "Bật CC (phím C)" và chờ hook bắt được.
+ * (baseUrl trong playerResponse KHÔNG dùng được: thiếu pot → HTTP 200 body rỗng.)
  */
 
 import type { Cue, TrackRef } from "../../shared/types";
 import type { SiteAdapter, SubtitleSource } from "./types";
 import {
+  deriveTrackUrl,
   extractVideoId,
   parseTimedtextUrl,
   parseYouTubeTimedtext,
+  timedtextMatchesTrack,
 } from "./ytParser";
 
 export const HIDE_NATIVE_CC_STYLE_ID = "subtrans-hide-cc";
+
+/** Mọi selector DOM của YouTube gom một chỗ (R10): đổi giao diện chỉ cần sửa ở đây */
+export const YT_SELECTORS = {
+  player: "movie_player", // id
+  adShowingClass: "ad-showing",
+  captionWindow: ".ytp-caption-window-container",
+} as const;
 
 export interface YtCaptionTrack {
   baseUrl: string;
@@ -29,6 +41,7 @@ export interface YtPlayerResponseData {
   videoId?: string;
   title?: string;
   isLiveContent?: boolean;
+  isLiveNow?: boolean;
   captionTracks?: YtCaptionTrack[];
 }
 
@@ -36,181 +49,179 @@ export interface YouTubeAdapterOptions {
   preferManual?: boolean;
   onNotify?: (message: string | null) => void;
   hookClient?: YouTubeHookClient;
+  /** Thời gian chờ player tự tải phụ đề sau loadModule (mặc định 6s) */
+  ensureWaitMs?: number;
+  /** Số lần/khoảng thử lại khi playerResponse chưa khớp videoId (sau SPA navigation) */
+  playerResponseRetries?: number;
+  playerResponseRetryMs?: number;
+}
+
+interface Captured {
+  url: string;
+  body: string;
 }
 
 /** Chọn track phụ đề tiếng Anh tốt nhất (ưu tiên thủ công trước ASR) */
-export function pickYouTubeTrack(
-  tracks: YtCaptionTrack[],
-  preferManual = true
-): YtCaptionTrack | null {
+export function pickYouTubeTrack(tracks: YtCaptionTrack[], preferManual = true): YtCaptionTrack | null {
   if (!tracks || tracks.length === 0) return null;
-  const enTracks = tracks.filter((t) =>
-    (t.languageCode || "").toLowerCase().startsWith("en")
-  );
-  if (enTracks.length === 0) return null;
-  if (!preferManual) return enTracks[0];
-
-  const manual = enTracks.find((t) => t.kind !== "asr");
-  return manual || enTracks[0];
+  const en = tracks.filter((t) => (t.languageCode || "").toLowerCase().startsWith("en"));
+  if (en.length === 0) return null;
+  if (!preferManual) return en[0];
+  return en.find((t) => t.kind !== "asr") || en[0];
 }
 
-/** Quản lý giao tiếp hai chiều giữa Content Script và yt-hook (MAIN world) */
+let reqSeq = 0;
+const nextReqId = (p: string) => `${p}_${Date.now().toString(36)}_${(reqSeq++).toString(36)}`;
+
+/** Giao tiếp 2 chiều Content Script ↔ yt-hook (MAIN world) qua window.postMessage */
 export class YouTubeHookClient {
-  private readonly capturedTimedtext = new Map<string, { url: string; body: string }>();
-  private readonly pendingRequests = new Map<
-    string,
-    { resolve: (val: any) => void; reject: (err: any) => void; timer: ReturnType<typeof setTimeout> }
-  >();
-  private readonly timedtextListeners = new Set<(ev: { url: string; body: string }) => void>();
+  /** videoId → các response timedtext đã bắt (mới nhất ở cuối) */
+  private readonly captured = new Map<string, Captured[]>();
+  private readonly pending = new Map<string, { resolve: (v: any) => void; timer: ReturnType<typeof setTimeout> }>();
+  private readonly listeners = new Set<(c: Captured) => void>();
+  private readonly onMessage = (event: MessageEvent) => this.handleMessage(event);
   private disposed = false;
-  private messageListener: ((ev: MessageEvent) => void) | null = null;
 
-  constructor() {
-    this.init();
+  constructor(private readonly win: Window = window) {
+    this.win.addEventListener("message", this.onMessage);
+    // Request timedtext đầu tiên của player thường chạy TRƯỚC khi content script nghe → xin phát lại
+    this.send({ kind: "replay" });
   }
 
-  private init(): void {
-    if (typeof window === "undefined") return;
-    this.messageListener = (event: MessageEvent) => {
-      try {
-        if (event.source && event.source !== window) return;
-        if (
-          event.origin &&
-          location.origin &&
-          location.origin !== "null" &&
-          event.origin !== location.origin
-        ) {
-          return;
-        }
-        const msg = event.data;
-        if (!msg || msg.source !== "subtrans-yt") return;
+  private send(msg: Record<string, unknown>): void {
+    try {
+      this.win.postMessage({ source: "subtrans-cs", ...msg }, this.win.location.origin);
+    } catch {
+      /* bỏ qua */
+    }
+  }
 
-        if (msg.kind === "timedtext") {
-          const { url, body } = msg;
-          if (typeof url === "string" && typeof body === "string") {
-            const params = parseTimedtextUrl(url);
-            if (params.videoId) {
-              this.capturedTimedtext.set(params.videoId, { url, body });
-            }
-            this.capturedTimedtext.set(url, { url, body });
-            for (const listener of this.timedtextListeners) {
-              listener({ url, body });
-            }
-          }
-        } else if (msg.kind === "playerResponse" || msg.kind === "fetchTimedtext.result") {
-          const p = this.pendingRequests.get(msg.reqId);
-          if (p) {
-            clearTimeout(p.timer);
-            this.pendingRequests.delete(msg.reqId);
-            p.resolve(msg);
-          }
+  private handleMessage(event: MessageEvent): void {
+    try {
+      // Chrome: source === window; jsdom: null. Trang chạy cùng cửa sổ nên kiểm tra này chỉ để lọc nhiễu.
+      if (event.source !== this.win && event.source !== null) return;
+      const msg = event.data;
+      if (!msg || msg.source !== "subtrans-yt") return;
+      if (msg.kind === "timedtext") {
+        if (typeof msg.url !== "string" || typeof msg.body !== "string" || !msg.body) return;
+        const vid = parseTimedtextUrl(msg.url).videoId;
+        if (!vid) return;
+        const list = this.captured.get(vid) ?? [];
+        if (!list.some((c) => c.url === msg.url)) {
+          list.push({ url: msg.url, body: msg.body });
+          if (list.length > 8) list.shift();
+          this.captured.set(vid, list);
         }
-      } catch {
-        // an toàn
+        for (const fn of this.listeners) fn({ url: msg.url, body: msg.body });
+        return;
       }
-    };
-    window.addEventListener("message", this.messageListener);
+      if (typeof msg.reqId === "string") {
+        const p = this.pending.get(msg.reqId);
+        if (p) {
+          clearTimeout(p.timer);
+          this.pending.delete(msg.reqId);
+          p.resolve(msg);
+        }
+      }
+    } catch {
+      /* an toàn */
+    }
   }
 
-  public getCaptured(videoId: string): { url: string; body: string } | null {
-    return this.capturedTimedtext.get(videoId) || null;
+  private request<T>(kind: string, extra: Record<string, unknown>, timeoutMs: number, map: (msg: any) => T, fallback: T): Promise<T> {
+    if (this.disposed) return Promise.resolve(fallback);
+    const reqId = nextReqId(kind);
+    return new Promise<T>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(reqId);
+        resolve(fallback);
+      }, timeoutMs);
+      this.pending.set(reqId, { resolve: (m) => resolve(map(m)), timer });
+      this.send({ kind, reqId, ...extra });
+    });
+  }
+
+  /** Mọi response đã bắt của video (mới nhất cuối) */
+  public getCapturedList(videoId: string): Captured[] {
+    return this.captured.get(videoId) ?? [];
+  }
+
+  /** Response đã bắt đúng track (bỏ qua bản tự dịch tlang) */
+  public findCaptured(videoId: string, track: { languageCode: string; kind?: string }): Captured | null {
+    const list = this.getCapturedList(videoId);
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (timedtextMatchesTrack(parseTimedtextUrl(list[i].url), track)) return list[i];
+    }
+    return null;
+  }
+
+  /** URL có pot bất kỳ của video (để dựng URL track khác) */
+  public findPotUrl(videoId: string): string | null {
+    const list = this.getCapturedList(videoId);
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (parseTimedtextUrl(list[i].url).hasPot) return list[i].url;
+    }
+    return list.length ? list[list.length - 1].url : null;
   }
 
   public clearCapturedFor(videoId: string): void {
-    this.capturedTimedtext.delete(videoId);
+    this.captured.delete(videoId);
   }
 
-  public onTimedtextCaptured(cb: (ev: { url: string; body: string }) => void): () => void {
-    this.timedtextListeners.add(cb);
-    return () => this.timedtextListeners.delete(cb);
+  public onTimedtextCaptured(cb: (c: Captured) => void): () => void {
+    this.listeners.add(cb);
+    return () => this.listeners.delete(cb);
   }
 
-  public requestPlayerResponse(timeoutMs = 3000): Promise<YtPlayerResponseData | null> {
-    if (this.disposed || typeof window === "undefined") return Promise.resolve(null);
-    const reqId = `pr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    return new Promise<YtPlayerResponseData | null>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(reqId);
-        resolve(null);
-      }, timeoutMs);
-
-      this.pendingRequests.set(reqId, {
-        resolve: (msg: any) => resolve(msg?.data || null),
-        reject: () => resolve(null),
-        timer,
-      });
-
-      window.postMessage(
-        { source: "subtrans-cs", kind: "getPlayerResponse", reqId },
-        location.origin
-      );
-    });
+  public requestPlayerResponse(timeoutMs = 2000): Promise<YtPlayerResponseData | null> {
+    return this.request("getPlayerResponse", {}, timeoutMs, (m) => (m?.data as YtPlayerResponseData) ?? null, null);
   }
 
+  /** Tải timedtext trong MAIN world (cùng cookie/origin của trang). null nếu lỗi hoặc body rỗng. */
   public fetchTimedtext(url: string, timeoutMs = 8000): Promise<string | null> {
-    if (this.disposed || typeof window === "undefined") return Promise.resolve(null);
-    const reqId = `ft_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    return new Promise<string | null>((resolve) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(reqId);
-        resolve(null);
-      }, timeoutMs);
+    return this.request("fetchTimedtext", { url }, timeoutMs, (m) => (m?.ok && typeof m.text === "string" && m.text ? m.text : null), null);
+  }
 
-      this.pendingRequests.set(reqId, {
-        resolve: (msg: any) => {
-          if (msg && msg.ok && typeof msg.text === "string") resolve(msg.text);
-          else resolve(null);
-        },
-        reject: () => resolve(null),
-        timer,
-      });
+  /** Nhờ player tự tải phụ đề. Trả về wasOn = phụ đề đã bật sẵn từ trước (do người dùng). */
+  public ensureCaptions(timeoutMs = 1500): Promise<{ ok: boolean; wasOn: boolean }> {
+    return this.request("ensureCaptions", {}, timeoutMs, (m) => ({ ok: Boolean(m?.ok), wasOn: Boolean(m?.wasOn) }), { ok: false, wasOn: true });
+  }
 
-      window.postMessage(
-        { source: "subtrans-cs", kind: "fetchTimedtext", reqId, url },
-        location.origin
-      );
-    });
+  public restoreCaptions(): void {
+    this.send({ kind: "restoreCaptions" });
   }
 
   public dispose(): void {
     this.disposed = true;
-    if (this.messageListener && typeof window !== "undefined") {
-      window.removeEventListener("message", this.messageListener);
-      this.messageListener = null;
-    }
-    for (const [, p] of this.pendingRequests) {
-      clearTimeout(p.timer);
-      p.resolve(null);
-    }
-    this.pendingRequests.clear();
-    this.timedtextListeners.clear();
-    this.capturedTimedtext.clear();
+    this.win.removeEventListener("message", this.onMessage);
+    for (const p of this.pending.values()) clearTimeout(p.timer);
+    this.pending.clear();
+    this.listeners.clear();
+    this.captured.clear();
   }
 }
 
 let sharedHookClient: YouTubeHookClient | null = null;
 export function getSharedHookClient(): YouTubeHookClient {
-  if (!sharedHookClient) {
-    sharedHookClient = new YouTubeHookClient();
-  }
+  if (!sharedHookClient) sharedHookClient = new YouTubeHookClient();
   return sharedHookClient;
 }
 
 export class YouTubeSubtitleSource implements SubtitleSource {
   public readonly track: TrackRef;
-  private readonly videoId: string;
   private readonly isAsr: boolean;
   private disposed = false;
-  private cleanups: Array<() => void> = [];
+  private enabledCaptionsBySubtrans = false;
+  private readonly cleanups: Array<() => void> = [];
 
   constructor(
     private readonly captionTrack: YtCaptionTrack,
-    videoId: string,
+    private readonly videoId: string,
     videoTitle: string,
-    private readonly hookClient: YouTubeHookClient,
-    private readonly onNotify?: (message: string | null) => void
+    private readonly hook: YouTubeHookClient,
+    private readonly onNotify?: (message: string | null) => void,
+    private readonly ensureWaitMs = 6000
   ) {
-    this.videoId = videoId;
     this.isAsr = captionTrack.kind === "asr";
     const kind = this.isAsr ? "asr" : "manual";
     this.track = {
@@ -223,71 +234,79 @@ export class YouTubeSubtitleSource implements SubtitleSource {
     };
   }
 
+  private parse(body: string | null | undefined): Cue[] {
+    return body ? parseYouTubeTimedtext(body, this.isAsr) : [];
+  }
+
+  /** Bước 1 + 2: từ những gì hook đã bắt được */
+  private async fromCaptured(): Promise<Cue[]> {
+    const exact = this.hook.findCaptured(this.videoId, this.captionTrack);
+    const cues = this.parse(exact?.body);
+    if (cues.length > 0) return cues;
+    const potUrl = this.hook.findPotUrl(this.videoId);
+    if (!potUrl) return [];
+    const url = deriveTrackUrl(potUrl, this.captionTrack);
+    if (!url) return [];
+    return this.parse(await this.hook.fetchTimedtext(url));
+  }
+
+  /** Chờ hook bắt được timedtext của video này (tối đa waitMs; Infinity = tới khi dispose) */
+  private waitForCapture(waitMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (v: boolean) => {
+        off();
+        if (timer) clearTimeout(timer);
+        const i = this.cleanups.indexOf(cancel);
+        if (i >= 0) this.cleanups.splice(i, 1);
+        resolve(v);
+      };
+      const off = this.hook.onTimedtextCaptured((c) => {
+        if (parseTimedtextUrl(c.url).videoId === this.videoId) finish(true);
+      });
+      const cancel = () => finish(false);
+      this.cleanups.push(cancel);
+      if (Number.isFinite(waitMs)) timer = setTimeout(() => finish(false), waitMs);
+    });
+  }
+
   public async load(): Promise<Cue[]> {
     if (this.disposed) return [];
 
-    // Bước 1: Nếu hook đã bắt được timedtext của đúng videoId này
-    const captured = this.hookClient.getCaptured(this.videoId);
-    if (captured && captured.body) {
-      const cues = parseYouTubeTimedtext(captured.body, this.isAsr);
-      if (cues.length > 0) return cues;
+    // 1 + 2
+    let cues = await this.fromCaptured();
+    if (cues.length > 0 || this.disposed) return cues;
+
+    // 3. Nhờ player tự tải phụ đề (có pot)
+    const waiting = this.waitForCapture(this.ensureWaitMs);
+    const ens = await this.hook.ensureCaptions();
+    if (ens.ok && !ens.wasOn) this.enabledCaptionsBySubtrans = true;
+    if (await waiting) {
+      if (this.disposed) return [];
+      cues = await this.fromCaptured();
+      if (cues.length > 0 || this.disposed) return cues;
     }
 
-    // Bước 2: Thử fetch baseUrl + &fmt=json3 trong MAIN world qua hook
-    let fetchUrl = this.captionTrack.baseUrl;
-    if (fetchUrl) {
-      fetchUrl = fetchUrl.includes("fmt=")
-        ? fetchUrl.replace(/fmt=[^&]+/, "fmt=json3")
-        : `${fetchUrl}&fmt=json3`;
-
-      try {
-        const text = await this.hookClient.fetchTimedtext(fetchUrl);
-        if (this.disposed) return [];
-        if (text) {
-          const cues = parseYouTubeTimedtext(text, this.isAsr);
-          if (cues.length > 0) return cues;
-        }
-      } catch {
-        // Chuyển sang bước 3
+    // 4. Báo người dùng bật CC và chờ (không giới hạn, tới khi dispose)
+    while (!this.disposed) {
+      this.onNotify?.("Bật phụ đề CC của YouTube (phím C) để SubTrans lấy phụ đề");
+      const got = await this.waitForCapture(Infinity);
+      if (!got || this.disposed) return [];
+      cues = await this.fromCaptured();
+      if (cues.length > 0) {
+        this.onNotify?.(null);
+        return cues;
       }
     }
-
-    // Bước 3: Đòi pot token / fetch thất bại -> Báo người dùng bật CC (phím C)
-    if (this.disposed) return [];
-    this.onNotify?.("Bật phụ đề CC của YouTube (phím C) để SubTrans lấy phụ đề");
-
-    return new Promise<Cue[]>((resolve) => {
-      let resolved = false;
-      const done = (cues: Cue[]) => {
-        if (resolved) return;
-        resolved = true;
-        this.onNotify?.(null);
-        resolve(cues);
-      };
-
-      const off = this.hookClient.onTimedtextCaptured((item) => {
-        const params = parseTimedtextUrl(item.url);
-        if (params.videoId === this.videoId && item.body) {
-          const cues = parseYouTubeTimedtext(item.body, this.isAsr);
-          if (cues.length > 0) {
-            off();
-            done(cues);
-          }
-        }
-      });
-
-      this.cleanups.push(() => {
-        off();
-        done([]);
-      });
-    });
+    return [];
   }
 
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    for (const c of this.cleanups) c();
-    this.cleanups = [];
+    for (const c of this.cleanups.splice(0)) c();
+    // Chỉ tắt phụ đề nếu chính SubTrans đã bật (không đụng lựa chọn của người dùng)
+    if (this.enabledCaptionsBySubtrans) this.hook.restoreCaptions();
   }
 }
 
@@ -298,81 +317,91 @@ export function setYouTubeNativeCaptionsHidden(hide: boolean, doc: Document = do
     if (!style) {
       style = doc.createElement("style");
       style.id = HIDE_NATIVE_CC_STYLE_ID;
-      style.textContent = ".ytp-caption-window-container{display:none!important}";
-      doc.head?.appendChild(style);
+      style.textContent = `${YT_SELECTORS.captionWindow}{display:none!important}`;
+      (doc.head ?? doc.documentElement).appendChild(style);
     }
   } else {
     style?.remove();
   }
 }
 
+export function isYouTubeHost(hostname: string): boolean {
+  return hostname === "www.youtube.com" || hostname === "youtube.com" || hostname === "m.youtube.com";
+}
+
+export function isYouTubeWatch(loc: Pick<Location, "hostname" | "pathname" | "href">): boolean {
+  return isYouTubeHost(loc.hostname) && loc.pathname === "/watch" && Boolean(extractVideoId(loc.href));
+}
+
+/**
+ * Theo dõi đổi video trên YouTube (SPA): chỉ báo khi videoId (hoặc trạng thái "đang ở /watch") đổi —
+ * KHÔNG báo khi chỉ đổi tham số khác (vd. &t=, &list=).
+ */
+export function watchYouTubeNavigation(
+  onChange: (videoId: string | null) => void,
+  hook?: YouTubeHookClient
+): () => void {
+  let last = isYouTubeWatch(location) ? extractVideoId(location.href) : null;
+  const check = () => {
+    const cur = isYouTubeWatch(location) ? extractVideoId(location.href) : null;
+    if (cur === last) return;
+    if (last) hook?.clearCapturedFor(last);
+    last = cur;
+    onChange(cur);
+  };
+  document.addEventListener("yt-navigate-finish", check);
+  const timer = setInterval(check, 1000);
+  return () => {
+    document.removeEventListener("yt-navigate-finish", check);
+    clearInterval(timer);
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 /** Tạo adapter cho YouTube */
 export function createYouTubeAdapter(opts: YouTubeAdapterOptions = {}): SiteAdapter {
-  const hookClient = opts.hookClient || getSharedHookClient();
+  const hook = opts.hookClient || getSharedHookClient();
+  const retries = opts.playerResponseRetries ?? 10;
+  const retryMs = opts.playerResponseRetryMs ?? 500;
 
   return {
     name: "youtube",
-    matches(loc: Location): boolean {
-      return (
-        loc.hostname.includes("youtube.com") &&
-        (loc.pathname === "/watch" || loc.pathname.startsWith("/watch/"))
-      );
-    },
-    getOverlayContainer(video: HTMLVideoElement): HTMLElement | null {
-      const doc = video.ownerDocument;
-      return doc.getElementById("movie_player");
-    },
-    isAdPlaying(): boolean {
-      const player = document.getElementById("movie_player");
-      return Boolean(player?.classList.contains("ad-showing"));
-    },
-    onNavigate(cb: () => void): () => void {
-      let lastHref = location.href;
-      let lastVideoId = extractVideoId(lastHref);
-
-      const check = () => {
-        const currentHref = location.href;
-        const currentVideoId = extractVideoId(currentHref);
-        if (currentVideoId !== lastVideoId || currentHref !== lastHref) {
-          lastHref = currentHref;
-          if (lastVideoId && lastVideoId !== currentVideoId) {
-            hookClient.clearCapturedFor(lastVideoId);
-          }
-          lastVideoId = currentVideoId;
-          cb();
-        }
-      };
-
-      document.addEventListener("yt-navigate-finish", check);
-      const timer = setInterval(check, 1000);
-
-      return () => {
-        document.removeEventListener("yt-navigate-finish", check);
-        clearInterval(timer);
-      };
-    },
-    async listSources(_video: HTMLVideoElement): Promise<SubtitleSource[]> {
+    // YouTube phát quảng cáo/đổi video trên CÙNG thẻ <video> → không dựng lại session theo loadstart;
+    // đổi video được xử lý bằng watchYouTubeNavigation.
+    rebuildOnSourceChange: false,
+    matches: (loc) => isYouTubeWatch(loc),
+    getOverlayContainer: (video) => video.ownerDocument.getElementById(YT_SELECTORS.player),
+    isAdPlaying: () =>
+      Boolean(document.getElementById(YT_SELECTORS.player)?.classList.contains(YT_SELECTORS.adShowingClass)),
+    async listSources(_video) {
       const videoId = extractVideoId(location.href);
       if (!videoId) return [];
 
-      const playerResponse = await hookClient.requestPlayerResponse();
-      if (!playerResponse) return [];
+      // Sau SPA navigation, getPlayerResponse() có thể vẫn trả video CŨ một lúc → chờ tới khi khớp
+      let pr: YtPlayerResponseData | null = null;
+      for (let i = 0; i <= retries; i++) {
+        pr = await hook.requestPlayerResponse();
+        if (pr?.videoId === videoId) break;
+        pr = null;
+        if (extractVideoId(location.href) !== videoId) return []; // người dùng đã chuyển tiếp
+        await sleep(retryMs);
+      }
+      if (!pr) return [];
+      if (pr.isLiveNow) return []; // đang livestream: không có track đầy đủ
 
-      // Bỏ qua livestream (PLAN 5.2)
-      if (playerResponse.isLiveContent) return [];
-
-      const tracks = playerResponse.captionTracks || [];
-      const bestTrack = pickYouTubeTrack(tracks, opts.preferManual ?? true);
-      if (!bestTrack) return [];
-
-      const title = playerResponse.title || document.title || "YouTube Video";
+      const best = pickYouTubeTrack(pr.captionTracks || [], opts.preferManual ?? true);
+      if (!best) return [];
       return [
         new YouTubeSubtitleSource(
-          bestTrack,
+          best,
           videoId,
-          title,
-          hookClient,
-          opts.onNotify
+          pr.title || document.title || "YouTube Video",
+          hook,
+          opts.onNotify,
+          opts.ensureWaitMs
         ),
       ];
     },
