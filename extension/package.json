@@ -3,10 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/verify-dist.mjs",
-    "zip": "npm run build && node scripts/zip.mjs",
+    "zip": "pnpm run build && node scripts/zip.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "verify": "node scripts/verify-dist.mjs"

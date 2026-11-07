@@ -371,3 +371,22 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
   - Bảng so sánh tính năng giữa bản Extension và bản Desktop (Wails Go).
   - Lưu ý về quyền mạng và giới hạn đã biết.
 
+
+## Phase 11 – Review & fix (packaging / docs)
+
+**Lỗi đã sửa**
+- `scripts/zip.mjs`: `zlib.crc32` chỉ có từ Node 20.15/22.2 → Node 18/20 cũ crash. Thêm `crc32Fallback` (bảng IEEE), tự chọn khi thiếu (ép bằng `SUBTRANS_ZIP_FORCE_JS_CRC=1`).
+- Zip bỏ qua file ẩn (`.DS_Store`, `.vite`…).
+- Zip tự kiểm tra sau khi ghi: đọc lại central directory, inflate từng entry, so nội dung và CRC; bắt buộc có `manifest.json` ở gốc. Lỗi → exit 1.
+- `package.json`: `engines.node >=18`; `zip` = `pnpm run build && node scripts/zip.mjs`.
+- `README.md` viết lại cho khớp code: model mặc định `gemini-3.5-flash-lite` (+ nút ↻ tải danh sách), tự lưu (không có nút Lưu), xuất SRT/VTT × 3 chế độ, nhấp đúp = reset vị trí, phím tắt chỉ chạy khi có session, so sánh Desktop chính xác (Desktop có YouTube/Drive + Whisper), key **có** gửi tới Gemini (chỉ qua header), GTX là endpoint không chính thức → chỉ dùng cá nhân, liệt kê nền tảng chưa kiểm chứng và giới hạn (Shorts, live, DRM, embed cần bấm play). Bỏ số RAM chưa đo.
+
+**Audit**
+- Log production: chỉ còn `console.warn` lỗi thật ở SW; log hook đã gated.
+- `any`: chỉ 2 chỗ ở `yt-hook.ts` (dữ liệu YouTube không có type) – chấp nhận.
+- Kết quả: typecheck OK, 263/263 test, build + verify-dist OK, zip 21 file / 114.6 KB (cả 2 nhánh CRC đều OK).
+
+**Việc thủ công còn lại**
+- [ ] Giải nén `release/*.zip` → Load unpacked → chạy ma trận PLAN §8.
+- [ ] Đo RAM/CPU (Chrome Task Manager) trên video YouTube dài 1h+, ghi số vào đây.
+- [ ] Kiểm chứng Drive / Udemy / Coursera thật (checklist Phase 9).

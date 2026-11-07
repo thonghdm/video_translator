@@ -2,7 +2,27 @@
 // Sử dụng thuần Node.js (node:fs, node:path, node:zlib), không phụ thuộc công cụ ngoài.
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
-import { crc32, deflateRawSync } from "node:zlib";
+import * as zlib from "node:zlib";
+
+const { deflateRawSync, inflateRawSync } = zlib;
+
+// zlib.crc32 chỉ có từ Node 20.15 / 22.2 → tự cài CRC-32 (IEEE) để chạy được trên Node 18 như README ghi.
+let CRC_TABLE = null;
+function crc32Fallback(buf) {
+  if (!CRC_TABLE) {
+    CRC_TABLE = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      CRC_TABLE[n] = c >>> 0;
+    }
+  }
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) crc = CRC_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+const crc32 =
+  typeof zlib.crc32 === "function" && !process.env.SUBTRANS_ZIP_FORCE_JS_CRC ? zlib.crc32 : crc32Fallback;
 
 function toDosDateTime(d = new Date()) {
   const year = Math.max(1980, Math.min(2107, d.getFullYear()));
@@ -21,6 +41,7 @@ function collectFiles(dir, baseDir = dir) {
   const result = [];
   const entries = readdirSync(dir);
   for (const entry of entries) {
+    if (entry.startsWith(".")) continue; // bỏ file/thư mục ẩn (.vite, .DS_Store...)
     const fullPath = join(dir, entry);
     const st = statSync(fullPath);
     if (st.isDirectory()) {
@@ -134,6 +155,44 @@ const zipFileName = `subtrans-extension-v${version}.zip`;
 const zipFilePath = join(releaseDir, zipFileName);
 
 writeFileSync(zipFilePath, zipBuffer);
+
+// Tự kiểm tra: đọc lại central directory, giải nén từng file và so CRC + nội dung với dist/
+function verifyZip(buf, expected) {
+  const eocd = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (eocd < 0) throw new Error("thiếu End of Central Directory");
+  const count = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  if (count !== expected.length) throw new Error(`số file ${count} ≠ ${expected.length}`);
+  const byName = new Map(expected.map((f) => [f.name, f.data]));
+  for (let i = 0; i < count; i++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error("central directory hỏng");
+    const method = buf.readUInt16LE(p + 10);
+    const crc = buf.readUInt32LE(p + 16);
+    const csize = buf.readUInt32LE(p + 20);
+    const nlen = buf.readUInt16LE(p + 28);
+    const elen = buf.readUInt16LE(p + 30);
+    const clen = buf.readUInt16LE(p + 32);
+    const off = buf.readUInt32LE(p + 42);
+    const name = buf.toString("utf8", p + 46, p + 46 + nlen);
+    const lnlen = buf.readUInt16LE(off + 26);
+    const lelen = buf.readUInt16LE(off + 28);
+    const raw = buf.subarray(off + 30 + lnlen + lelen, off + 30 + lnlen + lelen + csize);
+    const data = method === 8 ? inflateRawSync(raw) : raw;
+    const orig = byName.get(name);
+    if (!orig || !orig.equals(data) || crc32(data) !== crc) throw new Error(`nội dung sai: ${name}`);
+    p += 46 + nlen + elen + clen;
+  }
+}
+try {
+  verifyZip(zipBuffer, files);
+} catch (err) {
+  console.error(`[zip] LỖI: file zip không hợp lệ (${err.message})`);
+  process.exit(1);
+}
+if (!files.some((f) => f.name === "manifest.json")) {
+  console.error("[zip] LỖI: zip không có manifest.json ở gốc");
+  process.exit(1);
+}
 
 const kb = (zipBuffer.length / 1024).toFixed(1);
 console.log(`[zip] Created ${zipFilePath} (${kb} KB, ${files.length} files)`);

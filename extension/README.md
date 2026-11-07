@@ -1,135 +1,113 @@
-# SubTrans – Tiện ích Phụ đề Song ngữ Thông minh (Chrome Extension Manifest V3)
+# SubTrans – Phụ đề song ngữ Anh–Việt cho trình duyệt (Chrome Extension, Manifest V3)
 
-**SubTrans Extension** là tiện ích mở rộng dành cho các trình duyệt Chromium (Google Chrome, Microsoft Edge, Brave, Cốc Cốc, Arc), giúp xem video kèm phụ đề song ngữ Anh – Việt theo thời gian thực trực tiếp trên trình duyệt web mà không cần cài đặt Python, FFmpeg hay các phần mềm nặng nề.
+Tiện ích cho các trình duyệt nhân Chromium (Chrome, Edge, Brave, Cốc Cốc; Chromium ≥ 116). Tiện ích hiện **phụ đề song ngữ Anh–Việt** đè lên video đang phát. Bản dịch lấy từ Google Translate hoặc Google Gemini.
 
-Tiện ích được tối ưu hóa đặc biệt cho **video bài giảng lập trình, công nghệ và khoa học máy tính**, giữ nguyên chính xác các thuật ngữ chuyên ngành (framework, API, biến, hàm, kiến trúc...).
-
----
-
-## 🚀 Tính năng nổi bật
-
-- **3 Chế độ dịch linh hoạt:**
-  - `google` (Google Translate): Hoàn toàn miễn phí, không cần cấu hình API key, phản hồi tức thì (< 2s).
-  - `gemini` (Google Gemini AI): Sử dụng Gemini 2.5 Flash / 1.5 Flash dịch chuẩn văn phong kỹ thuật, tự động nhận diện và giữ nguyên thuật ngữ code.
-  - `hybrid` (Khuyên dùng): Kết hợp sức mạnh của cả hai — Google Translate dịch nhanh câu đang phát, Gemini nâng cấp bản dịch chất lượng cao và dịch trước các câu tiếp theo ở chế độ nền.
-- **Hỗ trợ đa nền tảng:**
-  - **YouTube:** Hỗ trợ mọi video, cả phụ đề thủ công lẫn phụ đề tạo tự động (Auto-generated CC). Hỗ trợ cả YouTube Embed trên các trang web bên thứ ba.
-  - **Nền tảng khóa học:** Tương thích với Udemy, Coursera, Google Drive video và hầu hết trình phát HTML5 video có sẵn `<track>` phụ đề.
-- **Nhập phụ đề ngoài:**
-  - Hỗ trợ tải lên file phụ đề rời (`.srt`, `.vtt`, hoặc file song ngữ `_bilingual.srt`) cho bất kỳ video HTML5 nào trên web.
-  - Tự động lưu nhớ phụ đề theo URL video.
-- **Giao diện hiện đại & tiện ích:**
-  - Hiển thị song ngữ (EN + VI) hoặc đơn ngữ (chỉ VI, chỉ EN).
-  - Sử dụng **Shadow DOM** cô lập 100%, không bị ảnh hưởng bởi CSS/font chữ của trang web chủ.
-  - Kéo thả tự do vị trí overlay trên video (kể cả khi xem chế độ Fullscreen).
-  - **Mini Toolbar** nổi tích hợp ngay góc trên video: chỉnh độ trễ thời gian, đổi chế độ, nhập/xuất phụ đề nhanh.
-- **Xuất phụ đề đa định dạng:**
-  - Xuất ra 6 định dạng thông dụng: `.srt` song ngữ, `.srt` tiếng Việt, `.srt` tiếng Anh gốc, `.txt` đọc nhanh, `.json` dữ liệu thô, `.tsv` bảng tính.
-- **Cơ chế chống lỗi & Tối ưu hiệu năng:**
-  - **Circuit Breaker:** Tự động phát hiện khi Gemini gặp sự cố hoặc hết hạn ngạch (quota) để chuyển sang Google Translate mà không làm gián đoạn việc xem video.
-  - **2-Tier Cache:** Lưu phụ đề trên IndexedDB và bộ nhớ RAM, xem lại video hoặc tải lại trang hiện phụ đề ngay lập tức (0 request dịch).
-  - Content script siêu nhẹ (< 50MB RAM), không gây giật lag trình duyệt.
+Đây là phiên bản trình duyệt của SubTrans Desktop (Wails/Go), nằm trong thư mục `extension/` và **không thay đổi** gì của bản Desktop. Bản này chỉ dùng 2 API đám mây, không chạy AI cục bộ (Whisper, Qwen).
 
 ---
 
-## 📋 Yêu cầu hệ thống
+## Tính năng
 
-- **Node.js**: Phiên bản 18 trở lên (Khuyến nghị Node.js 20 hoặc 22 LTS).
-- **Trình quản lý gói**: `pnpm` (khuyến nghị, phiên bản >= 8) hoặc `npm`.
-- **Trình duyệt web**: Bất kỳ trình duyệt nào dùng nhân Chromium (Google Chrome, Microsoft Edge, Brave, Cốc Cốc, Vivaldi, Arc...).
+**Nguồn phụ đề gốc (tiếng Anh)**
+- **YouTube** (`/watch`): phụ đề thủ công hoặc tự động (auto-CC). Tiện ích tự lấy phụ đề kể cả khi bạn đang tắt CC, và ẩn phụ đề gốc của YouTube để không bị hiện 2 lớp.
+- **Video HTML5 có `<track>`** trên mọi trang web.
+- **Nhập file `.srt` / `.vtt`** cho video không có phụ đề (rê chuột lên video → nút **Nhập**). Đọc được file song ngữ `_bilingual.srt` do bản Desktop xuất (hiện song ngữ ngay, không gọi API) và file chỉ có tiếng Việt.
+
+**Dịch** (chọn trong popup)
+| Chế độ | Cách hoạt động | Cần API key |
+|---|---|---|
+| `google` (mặc định) | Google Translate, nhanh. Nếu Google tạm chặn và bạn có key thì tự chuyển sang Gemini | Không |
+| `gemini` | Gemini dịch theo ngữ cảnh, giữ nguyên thuật ngữ lập trình. Gemini lỗi hoặc hết quota thì tạm dùng Google, sau đó tự dịch lại bằng Gemini | Có |
+| `hybrid` | Câu đang xem dịch nhanh bằng Google; phần còn lại dịch bằng Gemini. Khi xong hết, các câu Google được nâng cấp dần lên Gemini (chấm chỉ báo đổi từ xanh lá sang cyan) | Có |
+
+- Dịch trước theo vị trí đang xem: ưu tiên đoạn quanh chỗ đang phát (−1s … +15s), sau đó tới phần phía trước, rồi phần phía sau. Tua tới đâu, đoạn đó được ưu tiên.
+- **Cache IndexedDB:** xem lại hoặc F5 thì phụ đề hiện ngay, không gọi API. Tự dọn khi quá 200 video hoặc quá 30 ngày (chỉnh được ở Options).
+- **Tự phục hồi khi lỗi:** bị giới hạn (429) hoặc mất mạng thì tạm nghỉ, hiện đồng hồ đếm ngược, rồi tự dịch tiếp. Có circuit breaker riêng cho Google và Gemini.
+
+**Hiển thị**
+- 4 chế độ: Song ngữ → Chỉ tiếng Việt → Chỉ tiếng Anh → Tắt.
+- Overlay nằm trong Shadow DOM, nên không bị CSS của trang làm vỡ. Kéo thả được, vị trí lưu theo từng trang web. Vẫn hiện khi fullscreen (khi fullscreen chính thẻ `<video>` thì dùng track phụ đề của trình duyệt).
+- Chấm chỉ báo nguồn dịch của từng dòng: xanh lá = Google, cyan = Gemini, xám = từ file.
+- Popup: bật/tắt toàn cục hoặc theo trang, chế độ dịch, Gemini key/model, cỡ chữ, màu chữ, độ mờ nền, tiến độ dịch của tab.
+- Trang Options: thông số nâng cao (RPM, timeout, batch, giới hạn cache…), danh sách video đã lưu, xóa cache.
+
+**Xuất phụ đề:** `.srt` hoặc `.vtt` × (Song ngữ / Tiếng Việt / Tiếng Anh), từ popup hoặc từ MiniToolbar trên video. Tên file: `<tiêu đề>.<bilingual|vi|en>.<srt|vtt>`. Định dạng giống hệt bản Desktop xuất, nên hai bên mở được file của nhau.
 
 ---
 
-## 🛠️ Hướng dẫn xây dựng (Build) & Đóng gói (Zip)
+## Yêu cầu
 
-Mở terminal tại thư mục gốc của repository hoặc trong thư mục `extension`:
+- Node.js **≥ 18** và `pnpm` (≥ 8).
+- Trình duyệt nhân Chromium ≥ 116.
+
+## Build và đóng gói
 
 ```bash
-# 1. Đi vào thư mục extension
 cd extension
-
-# 2. Cài đặt các gói phụ thuộc
 pnpm install
-
-# 3. Kiểm tra kiểu TypeScript & Unit tests
 pnpm run typecheck
-pnpm run test
-
-# 4. Build bản phân phối (tạo thư mục dist/)
-pnpm run build
-
-# 5. (Tùy chọn) Đóng gói thành file ZIP cài đặt (tạo release/subtrans-extension-v*.zip)
-pnpm run zip
+pnpm run test        # unit test + test tích hợp (jsdom)
+pnpm run build       # tạo dist/ và tự chạy scripts/verify-dist.mjs
+pnpm run zip         # build rồi tạo release/subtrans-extension-v<version>.zip (tự kiểm tra zip)
 ```
 
----
+## Cài vào trình duyệt (Load unpacked)
 
-## 📥 Cách cài đặt vào trình duyệt (Load Unpacked)
+1. Mở `chrome://extensions` (Edge: `edge://extensions`, Cốc Cốc: `coccoc://extensions`, Brave: `brave://extensions`).
+2. Bật **Developer mode**.
+3. Bấm **Load unpacked** rồi chọn thư mục `extension/dist`. Nếu dùng file zip thì giải nén trước, sau đó chọn thư mục đã giải nén. Chrome không cài trực tiếp từ file zip.
+4. Ghim biểu tượng SubTrans lên thanh công cụ.
+5. Sau mỗi lần build lại: bấm **Reload** (↻) ở thẻ SubTrans trong `chrome://extensions`, rồi F5 các tab đang mở.
 
-1. Mở trình duyệt web của bạn và truy cập vào trang quản lý tiện ích:
-   - **Google Chrome**: `chrome://extensions/`
-   - **Microsoft Edge**: `edge://extensions/`
-   - **Cốc Cốc**: `coccoc://extensions/`
-   - **Brave**: `brave://extensions/`
-2. Bật công tắc **Developer mode** (Chế độ dành cho nhà phát triển) ở góc trên bên phải.
-3. Nhấp vào nút **Load unpacked** (Tải tiện ích đã giải nén).
-4. Chọn thư mục `extension/dist` trong mã nguồn dự án của bạn (hoặc giải nén file trong thư mục `extension/release/` rồi chọn thư mục đó).
-5. Biểu tượng **SubTrans** sẽ xuất hiện trên thanh công cụ của trình duyệt. Bạn nên nhấp vào biểu tượng mảnh ghép (Extensions) và ghim (Pin) SubTrans lên thanh công cụ để tiện thao tác.
+Muốn dùng với file HTML trên máy (`file://`, ví dụ `dev/test-page.html`) thì bật thêm **Allow access to file URLs** trong chi tiết tiện ích.
 
----
+## Cấu hình Gemini (cho chế độ `gemini` / `hybrid`)
 
-## 🔑 Cấu hình Gemini API Key
+1. Tạo API key tại [Google AI Studio](https://aistudio.google.com/apikey).
+2. Bấm biểu tượng SubTrans → mục **Gemini** → dán key. **Cài đặt tự lưu**, không có nút Lưu.
+3. Bấm **Kiểm tra**: hiện ✓ kèm độ trễ, hoặc hiện lỗi.
+4. Model mặc định: `gemini-3.5-flash-lite`. Có thể gõ tên model khác, hoặc bấm ↻ để tải danh sách model mà key của bạn dùng được.
+5. Chọn chế độ `hybrid` hoặc `gemini`.
 
-Để kích hoạt chế độ dịch chất lượng cao với Gemini (`gemini` hoặc `hybrid`):
+Mặc định giới hạn 12 request/phút cho Gemini, để không vượt hạn mức gói miễn phí. Chỉnh trong Options nếu bạn dùng gói trả phí.
 
-1. Lấy API Key miễn phí tại [Google AI Studio](https://aistudio.google.com/).
-2. Nhấp chuột vào biểu tượng **SubTrans** trên thanh công cụ trình duyệt (hoặc click chuột phải chọn **Options / Tùy chọn**).
-3. Trong mục **Gemini API Key**, dán khóa API vừa tạo.
-4. Chọn mô hình Gemini mong muốn:
-   - `gemini-2.5-flash` (Mặc định - tốc độ cực nhanh, dịch thuật ngữ kỹ thuật rất chuẩn).
-   - `gemini-1.5-flash` (Dự phòng ổn định).
-5. Chọn **Chế độ dịch mặc định**: Khuyên dùng `hybrid` (kết hợp) hoặc `google` (nếu chưa có API key).
-6. Bấm nút **Lưu cài đặt**. Trạng thái kiểm tra key sẽ hiển thị ngay bên dưới ô nhập.
+## Phím tắt (chỉ hoạt động trên trang đang có phụ đề SubTrans, và không hoạt động khi đang gõ chữ)
 
----
+| Phím | Tác dụng |
+|:---:|---|
+| <kbd>V</kbd> | Đổi chế độ hiển thị: Song ngữ → Chỉ VI → Chỉ EN → Tắt |
+| <kbd>G</kbd> | Lệch −0.1s: phụ đề hiện **muộn** hơn (dùng khi phụ đề hiện sớm hơn lời nói) |
+| <kbd>H</kbd> | Lệch +0.1s: phụ đề hiện **sớm** hơn (dùng khi phụ đề hiện trễ) |
+| Kéo hộp phụ đề | Di chuyển vị trí (lưu theo trang web) |
+| Nhấp đúp hộp phụ đề | Đưa vị trí về mặc định (giữa, phía dưới) |
 
-## ⌨️ Bảng phím tắt tiện ích
-
-Khi đang ở trang video (YouTube, khóa học...):
-
-| Phím tắt | Thao tác | Mô tả |
-| :---: | :--- | :--- |
-| <kbd>V</kbd> | **Đổi chế độ hiển thị** | Chuyển vòng lặp: **Song ngữ (EN + VI)** ➔ **Chỉ tiếng Việt** ➔ **Chỉ tiếng Anh** ➔ **Tắt tạm thời**. |
-| <kbd>G</kbd> | **Lùi thời gian phụ đề (-0.1s)** | Bấm khi phụ đề tiếng Việt xuất hiện sớm hơn lời nói của nhân vật. |
-| <kbd>H</kbd> | **Tiến thời gian phụ đề (+0.1s)** | Bấm khi phụ đề tiếng Việt xuất hiện trễ hơn lời nói của nhân vật. |
-| **Kéo thả** | **Di chuyển khung phụ đề** | Giữ chuột trái vào thanh đầu đề (header bar) của khung phụ đề để kéo đến vị trí mong muốn trên màn hình. Vị trí sẽ tự động lưu lại. |
-| **Nhấp đúp** | **Đổi nhanh kích thước font** | Nhấp đúp chuột vào vùng chữ phụ đề để chuyển đổi giữa các kích cỡ chữ: Nhỏ ➔ Vừa ➔ Lớn. |
+Độ lệch được lưu riêng cho từng video. Bấm vào ô hiển thị độ lệch trên MiniToolbar để đặt lại về 0.
 
 ---
 
-## ⚖️ So sánh: SubTrans Extension vs Bản SubTrans Desktop
+## So sánh với bản Desktop
 
-| Tiêu chí | SubTrans Extension (Bản Web) | SubTrans Desktop (Bản Wails Go) |
-| :--- | :--- | :--- |
-| **Mục đích chính** | Dịch và xem phụ đề song ngữ trực tiếp ngay khi lướt web. | Xử lý file video offline trên máy, dịch hàng loạt bài giảng. |
-| **Yêu cầu cài đặt** | Siêu nhẹ; chỉ cần trình duyệt Chromium (Chrome, Edge...). Không cần Python, FFmpeg hay GPU. | Cần cài Go, Wails, WebView2; xử lý tốn tài nguyên máy tính. |
-| **Video không có phụ đề gốc** | Người dùng tải file `.srt` ngoài lên để dịch, hoặc dùng video có sẵn phụ đề/CC. | Tích hợp **Whisper AI** tự động nghe và chuyển tiếng nói thành văn bản từ file âm thanh/video. |
-| **Tốc độ hiển thị** | Tức thì theo thời gian thực của video đang phát. | Cần thời gian render và xử lý toàn bộ video trước khi xem. |
-| **Xuất file** | Hỗ trợ xuất 6 định dạng (`.srt`, `.txt`, `.json`, `.tsv`) trực tiếp trên web. | Hỗ trợ xuất và đóng gói video có phụ đề cứng (hardsub) qua FFmpeg. |
-
----
-
-## ⚠️ Lưu ý & Giới hạn đã biết
-
-1. **Sử dụng cá nhân:**
-   - Phiên bản này được thiết kế và tối ưu cho mục đích sử dụng cá nhân hoặc nội bộ thông qua hình thức nạp mã trực tiếp (**Load unpacked**).
-2. **Quyền truy cập mạng:**
-   - Tiện ích cần gửi yêu cầu dịch thuật đến `translate.googleapis.com` và `generativelanguage.googleapis.com`. Key Gemini được lưu trữ an toàn trong máy người dùng (`chrome.storage.local`) và không bao giờ bị chia sẻ ra ngoài.
-3. **Iframe bị hạn chế bản quyền:**
-   - Một số trang web đặt video trong thẻ `iframe` với thuộc tính `sandbox` chặn toàn bộ script nội tuyến có thể ngăn content script inject vào player. Trong trường hợp này, hãy mở liên kết video trực tiếp trong tab mới.
+| | Extension (trình duyệt) | Desktop (Wails/Go) |
+|---|---|---|
+| Chạy ở đâu | Ngay trên trang đang xem (YouTube, trang có `<track>`, file `.srt` nhập vào) | Ứng dụng Windows: file video trên máy, link YouTube, Google Drive |
+| Video không có phụ đề | Phải nhập file `.srt`/`.vtt` | Whisper tự nghe và tạo phụ đề (offline) |
+| Dịch | Google Translate + Gemini | Google Translate + Gemini + Qwen chạy cục bộ (offline) |
+| Cài đặt | Vài trăm KB, không cần GPU hay model | Bộ cài, kèm model AI ~1.5GB |
+| Trao đổi phụ đề | Xuất/nhập `.srt`/`.vtt` cùng định dạng, mở được file của nhau | ← |
 
 ---
 
-## 📄 Bản quyền & Đóng góp
+## Giới hạn đã biết
 
-Dự án được phát triển nhằm phục vụ học tập và nghiên cứu công nghệ. Mọi đóng góp, báo lỗi (issue) hoặc ý tưởng nâng cấp đều được hoan nghênh!
+- **Dùng cá nhân (Load unpacked).** Chưa đưa lên Chrome Web Store. Chế độ `google` dùng endpoint Google Translate không chính thức (`translate_a/single?client=gtx`), có thể bị chặn bất cứ lúc nào. Nếu muốn publish cần đổi engine và thu hẹp quyền (xem `PLAN.md` › R9).
+- **Quyền rộng:** tiện ích chạy trên mọi trang (`<all_urls>`) để tìm `<video>`. Trên trang không có phụ đề, tiện ích không hiện gì và không chiếm phím tắt.
+- **Quyền riêng tư:** câu phụ đề được gửi tới Google Translate hoặc Gemini để dịch. Gemini API key được lưu trong `chrome.storage.local` trên máy bạn, chỉ gửi tới `generativelanguage.googleapis.com` (qua header, không nằm trên URL), và không bao giờ được đưa vào trang web. Mọi request dịch đều **không gửi kèm cookie** đăng nhập Google của bạn.
+- **YouTube:** không hỗ trợ Shorts và livestream đang phát (VOD của livestream đã kết thúc thì vẫn được). Video YouTube nhúng trên trang khác: phụ đề chỉ được lấy sau khi bấm play.
+- **Chưa kiểm chứng trên trang thật:** Google Drive preview, Udemy, Coursera, edX (xem `NOTES.md` › Phase 9 để tự kiểm tra). Nếu tiện ích không lấy được phụ đề trên các trang này, bạn vẫn dùng được nút **Nhập** `.srt`.
+- **Video có DRM** (Netflix, Disney+…) không lấy được phụ đề gốc.
+- YouTube có thể đổi cách tải phụ đề (token `pot`). Ghi chú kỹ thuật và số liệu kiểm chứng nằm trong `NOTES.md` › Phase 5.
+
+## Tài liệu kỹ thuật
+
+- `PLAN.md`: kế hoạch theo phase, hợp đồng dữ liệu, quy tắc bất biến (không đụng bản Desktop).
+- `NOTES.md`: kết quả thử nghiệm [T], các lỗi đã sửa ở từng phase, checklist kiểm thử thủ công.
