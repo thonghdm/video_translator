@@ -1,13 +1,15 @@
 /**
- * SubTrans Extension — Điểm vào content script (ISOLATED world, mọi frame) — PLAN 4.11
- * Luồng: settings → dò video → adapter → overlay + session.
- * Phase 4: hiển thị phụ đề gốc (EN) đè lên video. Dịch sẽ được nối vào ở Phase 6.
+ * SubTrans Extension — Điểm vào content script (ISOLATED world, mọi frame) — PLAN 4.11 & Phase 5
+ * Luồng: settings → dò video → adapter (YouTube / HTML5) → overlay + session.
+ * Phase 5: Hỗ trợ adapter YouTube, bắt timedtext, tự fetch json3 trong MAIN world,
+ * ẩn CC gốc theo cài đặt hideNativeCaptions, phát hiện quảng cáo và chuyển trang SPA.
  */
 
 import { loadSettings, onSettingsChanged, type Settings } from "../shared/settings";
 import { Disposer } from "../shared/disposer";
 import { VideoDetector } from "./videoDetector";
 import { createHtml5Adapter } from "./adapters/html5";
+import { createYouTubeAdapter, setYouTubeNativeCaptionsHidden } from "./adapters/youtube";
 import type { SiteAdapter, SubtitleSource } from "./adapters/types";
 import { OverlayHost } from "./overlay/mount";
 import { OverlayStore } from "./overlay/store";
@@ -32,6 +34,7 @@ class ContentController {
   private port: BackgroundPort | null = null;
   private store: OverlayStore | null = null;
   private session: Session | null = null;
+  private currentVideo: HTMLVideoElement | null = null;
   private generation = 0;
 
   public async init(): Promise<void> {
@@ -53,6 +56,7 @@ class ContentController {
       this.store.setState({ mode: next.subtitleMode, style: next.style });
       this.session?.onModeChanged(next.subtitleMode);
     }
+    this.updateNativeCaptions();
   }
 
   private activate(): void {
@@ -65,6 +69,18 @@ class ContentController {
       this.port?.dispose();
       this.port = null;
     });
+
+    // Lắng nghe sự kiện chuyển trang SPA nếu adapter có hỗ trợ (ví dụ YouTube)
+    const adapter = this.pickAdapter();
+    if (typeof adapter.onNavigate === "function") {
+      const offNav = adapter.onNavigate(() => {
+        log("SPA navigate -> kiểm tra cập nhật video");
+        const v = this.currentVideo || detector.getCurrent() || document.querySelector("video");
+        this.onVideo(v);
+      });
+      d.add(offNav);
+    }
+
     detector.start();
     log("đã kích hoạt trên", location.hostname);
   }
@@ -91,12 +107,31 @@ class ContentController {
   };
 
   private pickAdapter(): SiteAdapter {
-    // Phase 5 sẽ thêm adapter YouTube trước adapter chung
+    if (typeof location !== "undefined") {
+      const yt = createYouTubeAdapter({
+        preferManual: this.settings.youtube?.preferManual ?? true,
+        onNotify: (msg) => this.store?.setState({ message: msg }),
+      });
+      if (yt.matches(location)) {
+        return yt;
+      }
+    }
     return createHtml5Adapter(this.fetchText);
+  }
+
+  private updateNativeCaptions(): void {
+    const hide =
+      (this.settings.youtube?.hideNativeCaptions ?? true) &&
+      this.settings.subtitleMode !== "off" &&
+      this.session !== null &&
+      this.session.getItems().length > 0;
+    setYouTubeNativeCaptionsHidden(hide, document);
   }
 
   private teardownVideo(): void {
     this.generation++;
+    this.currentVideo = null;
+    setYouTubeNativeCaptionsHidden(false, document);
     this.session?.dispose();
     this.session = null;
     this.videoScope?.disposeAll();
@@ -108,6 +143,7 @@ class ContentController {
   private onVideo(video: HTMLVideoElement | null): void {
     this.teardownVideo();
     if (!video || !this.active) return;
+    this.currentVideo = video;
     const gen = this.generation;
     const scope = (this.videoScope = this.active.child());
     const adapter = this.pickAdapter();
@@ -117,14 +153,14 @@ class ContentController {
       const sources = await adapter.listSources(video);
       if (gen !== this.generation || this.session || sources.length === 0) {
         for (const s of sources) if (gen !== this.generation || this.session) s.dispose();
-        if (sources.length === 0) log("video chưa có <track> phụ đề");
+        if (sources.length === 0) log("video chưa có nguồn phụ đề phù hợp");
         return;
       }
       this.startSession(video, adapter, sources[0], scope, gen);
       for (const s of sources.slice(1)) s.dispose();
     };
 
-    // Player thêm <track> sau khi tải → thử lại
+    // Player thêm <track> sau khi tải (đối với HTML5 track thông thường)
     video.textTracks?.addEventListener?.("addtrack", () => void trySetup(), {
       signal: scope.signal,
     });
@@ -162,12 +198,26 @@ class ContentController {
     });
     scope.add(() => overlay.dispose());
 
+    // Kiểm tra và tự động ẩn overlay khi YouTube đang phát quảng cáo (ad-showing)
+    if (typeof adapter.isAdPlaying === "function") {
+      const checkAd = () => {
+        const ad = adapter.isAdPlaying?.() ?? false;
+        store.setState({ visible: !ad });
+      };
+      checkAd();
+      scope.interval(checkAd, 500);
+    }
+
     session
       .start()
       .then((n) => {
         if (gen !== this.generation) return;
         log(`session ${source.track.trackKey}: ${n} cue`);
-        if (n === 0) store.setState({ message: "Không đọc được phụ đề của video này" });
+        if (n === 0) {
+          store.setState({ message: "Không đọc được phụ đề của video này" });
+        } else {
+          this.updateNativeCaptions();
+        }
       })
       .catch((err) => {
         if (import.meta.env.DEV) console.warn("[SubTrans] session lỗi:", err);

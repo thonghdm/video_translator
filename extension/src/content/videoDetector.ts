@@ -66,6 +66,10 @@ export class VideoDetector {
     this.disposer.disposeAll();
   }
 
+  public getCurrent(): HTMLVideoElement | null {
+    return this.current;
+  }
+
   /** Buộc quét lại (ví dụ khi SPA đổi trang) */
   public rescan(): void {
     this.scan();
