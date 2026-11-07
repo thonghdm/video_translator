@@ -189,3 +189,35 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
 - [ ] Tắt CC trước khi mở video: SubTrans tự lấy phụ đề (không cần bấm C). Phụ đề gốc bị ẩn. Tắt extension trên trang thì CC trở về trạng thái tắt.
 - [ ] Fullscreen (`F`): overlay vẫn hiện, kéo thả được. Ghi lại `document.fullscreenElement` là phần tử nào.
 - [ ] Theater mode (`T`): overlay bám đúng khung player.
+
+---
+
+## Phase 6: Scheduler và luồng dịch hoàn chỉnh
+
+### Đã làm
+- `content/scheduler.ts`:
+  - Thuật toán Two-Tier Lookahead port từ `pipeline.go`:
+    - **Tier-1**: Vùng cửa sổ phát hiện tại `[t - 1s, t + 15s]`, đóng batch nhỏ (3 câu / 240 ký tự) để hiển thị tức thì.
+    - **Tier-2**: Các câu phía trước (`ahead`) dịch trước, các câu đã qua (`behind`) dịch sau. Batch 5 câu / 400 ký tự (GTX) hoặc `maxItemsTier2` / 2000 ký tự (Gemini).
+    - Giới hạn: tối đa 2 batch bay song song (`maxInflightBatches = 2`).
+    - Khi tua video (`seeked`) hoặc định kỳ mỗi 2s khi video đang phát: lập lại kế hoạch theo playhead mới mà không hủy các batch đang chạy dở.
+    - Tự động thử lại (retry) dòng rỗng tối đa 3 lần.
+    - Xử lý lỗi: tạm dừng khi bị giới hạn tần suất (`blocked`) hoặc mất mạng, kèm thông báo đếm ngược trên UI (`Đang tạm nghỉ do giới hạn API… (mm:ss)`).
+    - **Hybrid upgrade**: khi toàn bộ câu đã có bản dịch và Gemini sẵn sàng (`geminiReady = true`), tự động đưa các câu dịch bằng API vào hàng đợi nâng cấp lên Cloud.
+- `content/pipeline/session.ts` (Bản đầy đủ):
+  - Tích hợp bộ đệm IndexedDB (`cache.load`, `cache.saveTrack`, `cache.saveLines`).
+  - Tính `sourceHash = fnv1a32(cues.map(c => c.text).join("\n"))`.
+  - Áp dụng bản dịch từ cache theo chế độ: `google` ưu tiên API; `gemini`/`hybrid` ưu tiên Cloud model đang chọn.
+  - Gom các dòng dịch mới vào buffer, tự động debounce 2s rồi gửi `cache.saveLines`.
+  - Khi dispose: flush toàn bộ buffer còn lại ngay lập tức và hủy các request dịch đang bay.
+  - Phản ứng tức thì khi người dùng đổi chế độ dịch hoặc model trong cài đặt mà không cần tải lại trang.
+- `content/index.ts`:
+  - Kết nối `BackgroundPort` và `Settings` vào `Session`.
+  - Truyền sự kiện cập nhật cài đặt tới session đang chạy.
+
+### Cần xác nhận thủ công (Load unpacked từ `dist/`)
+- [ ] Mở video YouTube tiếng Anh bất kỳ: phụ đề tiếng Việt dòng đầu tiên xuất hiện trong vòng 1-2 giây.
+- [ ] Tua video tới giữa hoặc cuối clip: phụ đề tiếng Việt tại vị trí mới xuất hiện nhanh chóng (≤ 2s với Google).
+- [ ] Chấm chỉ báo engine hiển thị đúng màu: emerald với API Google, cyan với Gemini Cloud.
+- [ ] F5 lại trang vừa xem: phụ đề tiếng Việt xuất hiện ngay lập tức từ IndexedDB cache mà không phát sinh request dịch mới.
+- [ ] Thử ngắt mạng tạm thời: extension không bị lỗi crash; khi có mạng lại tự động tiếp tục dịch.

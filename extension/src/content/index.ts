@@ -62,6 +62,7 @@ class ContentController {
       this.store.setState({ mode: next.subtitleMode, style: next.style });
       this.session?.onModeChanged(next.subtitleMode);
     }
+    this.session?.onSettingsChanged(next);
     this.updateNativeCaptions();
   }
 
@@ -189,6 +190,8 @@ class ContentController {
     scope.add(() => native.dispose());
 
     const session = new Session(video, source, store, native, {
+      port: this.getPort(),
+      settings: this.settings,
       onSourceChanged:
         adapter.rebuildOnSourceChange === false
           ? undefined
