@@ -1,6 +1,6 @@
 /**
  * SubTrans Extension — Xử lý kết nối và thông điệp trong Background (Messaging)
- * Phù hợp với Mục 6.2 và Phase 2 của PLAN.md
+ * Phù hợp với Mục 6.2 và Phase 2 & Phase 3 của PLAN.md
  */
 
 import type { B2C, BreakerView, C2B, UiReq } from "../shared/messages";
@@ -9,6 +9,7 @@ import { GeminiEngine } from "./engines/gemini";
 import type { CircuitBreaker } from "../shared/breaker";
 import type { StateManager } from "./state";
 import { apiFetch, createTimeoutSignal } from "./engines/http";
+import type { SubtransDB } from "./cache/db";
 
 export class MessagingHub {
   private activePorts = new Set<chrome.runtime.Port>();
@@ -19,7 +20,9 @@ export class MessagingHub {
     private gtxBreaker: CircuitBreaker,
     private geminiBreaker: CircuitBreaker,
     private geminiEngine: GeminiEngine,
-    private stateManager: StateManager
+    private stateManager: StateManager,
+    private db: SubtransDB,
+    private getCachePolicy?: () => Promise<{ maxTracks: number; maxAgeDays: number }>
   ) {}
 
   public init(): void {
@@ -128,8 +131,72 @@ export class MessagingHub {
         break;
       }
 
+      case "cache.load": {
+        this.db
+          .getTrack(msg.trackKey)
+          .then(async (track) => {
+            if (track && track.sourceHash === msg.sourceHash) {
+              await this.db.touchTrack(msg.trackKey);
+              const lines = await this.db.getLines(msg.trackKey);
+              const reply: B2C = {
+                type: "cache.loaded",
+                reqId: msg.reqId,
+                hit: true,
+                cues: track.cues,
+                lines,
+              };
+              port.postMessage(reply);
+            } else {
+              const reply: B2C = {
+                type: "cache.loaded",
+                reqId: msg.reqId,
+                hit: false,
+              };
+              port.postMessage(reply);
+            }
+          })
+          .catch((err) => {
+            console.warn("[SubTrans] cache.load error:", err);
+            port.postMessage({
+              type: "cache.loaded",
+              reqId: msg.reqId,
+              hit: false,
+            });
+          });
+        break;
+      }
+
+      case "cache.saveTrack": {
+        this.db
+          .putTrack(msg.track, msg.cues, msg.sourceHash)
+          .then(async () => {
+            if (this.getCachePolicy) {
+              const policy = await this.getCachePolicy();
+              await this.db.evict(policy);
+            }
+          })
+          .catch((err) => {
+            console.warn("[SubTrans] cache.saveTrack error:", err);
+          });
+        break;
+      }
+
+      case "cache.saveLines": {
+        this.db
+          .mergeLines(
+            msg.trackKey,
+            msg.engineKey,
+            msg.sourceHash,
+            msg.total,
+            msg.updates
+          )
+          .catch((err) => {
+            console.warn("[SubTrans] cache.saveLines error:", err);
+          });
+        break;
+      }
+
       default:
-        // Các message cache.* sẽ được tích hợp ở Phase 3
         break;
     }
   }
@@ -191,10 +258,10 @@ export class MessagingHub {
         return await GeminiEngine.listModels(msg.apiKey);
       }
       case "cache.stats": {
-        // Stub cho Phase 2, hoàn thiện ở Phase 3
-        return { tracks: 0, bytesApprox: 0 };
+        return await this.db.stats();
       }
       case "cache.clear": {
+        await this.db.clear(msg.trackKey);
         return { ok: true };
       }
       default:

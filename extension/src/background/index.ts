@@ -11,6 +11,7 @@ import { GeminiEngine } from "./engines/gemini";
 import { TranslationRouter } from "./router";
 import { StateManager } from "./state";
 import { MessagingHub } from "./messaging";
+import { SubtransDB } from "./cache/db";
 
 console.log("[SubTrans] Service Worker initializing...");
 
@@ -21,6 +22,7 @@ const geminiBreaker = new CircuitBreaker(defaultBreakerConfig());
 const geminiBucket = new TokenBucket(12);
 
 const gtxQueue = new GtxQueue(2, 150);
+const subtransDB = new SubtransDB();
 
 const geminiEngine = new GeminiEngine(
   {
@@ -53,10 +55,15 @@ const messagingHub = new MessagingHub(
   gtxBreaker,
   geminiBreaker,
   geminiEngine,
-  stateManager
+  stateManager,
+  subtransDB,
+  async () => {
+    const s = await loadSettings();
+    return s.cache;
+  }
 );
 
-// 2. Nạp settings và restore state
+// 2. Nạp settings, restore state và tự động dọn dẹp cache (eviction)
 async function init() {
   await stateManager.restore();
   const settings = await loadSettings();
@@ -77,6 +84,13 @@ async function init() {
     mode: settings.mode,
     geminiModel: settings.gemini.model,
   });
+
+  // Tự động evict cache theo policy khi khởi động SW
+  try {
+    await subtransDB.evict(settings.cache);
+  } catch (err) {
+    console.warn("[SubTrans] Eviction error during startup:", err);
+  }
 
   messagingHub.init();
   console.log("[SubTrans] Service Worker ready!");
