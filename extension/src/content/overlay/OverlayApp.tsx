@@ -7,14 +7,27 @@ import type React from "react";
 import type { OverlayStore } from "./store";
 import { SubtitleOverlay } from "./SubtitleOverlay";
 import { useDraggable } from "./useDraggable";
+import { MiniToolbar } from "./MiniToolbar";
 
 export interface OverlayAppProps {
   store: OverlayStore;
   getContainerRect: () => DOMRect | null;
   storageKey: string;
+  onOffsetChange?: (delta: number) => void;
+  onOffsetReset?: () => void;
+  onImportFile?: (file: File) => void;
+  onExport?: (format: "srt" | "vtt", mode: "bilingual" | "target" | "source") => void;
 }
 
-export function OverlayApp({ store, getContainerRect, storageKey }: OverlayAppProps) {
+export function OverlayApp({
+  store,
+  getContainerRect,
+  storageKey,
+  onOffsetChange,
+  onOffsetReset,
+  onImportFile,
+  onExport,
+}: OverlayAppProps) {
   const s = useSyncExternalStore(store.subscribe, store.getState);
   const onReset = useCallback(
     () => store.flashToast("Đã đưa vị trí phụ đề về mặc định (dưới cùng)"),
@@ -37,16 +50,23 @@ export function OverlayApp({ store, getContainerRect, storageKey }: OverlayAppPr
         <SubtitleOverlay item={s.item} mode={s.mode} pos={drag.pos} handlers={drag.handlers} />
       )}
 
+      {/* MiniToolbar ở góc trên phải */}
+      {s.visible && !s.nativeFallback && (
+        <MiniToolbar
+          offset={s.offset}
+          message={s.message}
+          hasTrack={s.hasTrack}
+          onOffsetChange={onOffsetChange ?? (() => {})}
+          onOffsetReset={onOffsetReset ?? (() => {})}
+          onImportFile={onImportFile ?? (() => {})}
+          onExport={onExport ?? (() => {})}
+        />
+      )}
+
+      {/* Toast thông báo ở giữa phía trên */}
       {s.toast && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 bg-black/90 text-amber-300 border border-amber-500/50 rounded-lg text-xs shadow-2xl font-medium pointer-events-none">
           {s.toast}
-        </div>
-      )}
-
-      {s.visible && s.message && (
-        <div className="absolute top-3 right-3 z-30 max-w-[60%] px-3 py-1.5 bg-black/85 text-neutral-200 border border-white/15 rounded-lg text-[11px] shadow-lg pointer-events-none">
-          <span className="text-amber-400 font-semibold mr-1">SubTrans</span>
-          {s.message}
         </div>
       )}
     </div>

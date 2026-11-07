@@ -5,7 +5,14 @@
  * ẩn CC gốc theo cài đặt hideNativeCaptions, phát hiện quảng cáo và chuyển trang SPA.
  */
 
-import { isEnabledFor, loadSettings, onSettingsChanged, type Settings } from "../shared/settings";
+import {
+  isEnabledFor,
+  loadSettings,
+  onSettingsChanged,
+  saveSettings,
+  type Settings,
+} from "../shared/settings";
+import type { SubtitleMode } from "../shared/types";
 import { Disposer } from "../shared/disposer";
 import { VideoDetector } from "./videoDetector";
 import { createHtml5Adapter } from "./adapters/html5";
@@ -16,6 +23,7 @@ import {
   setYouTubeNativeCaptionsHidden,
   watchYouTubeNavigation,
 } from "./adapters/youtube";
+import { ImportedSubtitleSource } from "./adapters/imported";
 import type { SiteAdapter, SubtitleSource } from "./adapters/types";
 import { OverlayHost } from "./overlay/mount";
 import { OverlayStore } from "./overlay/store";
@@ -29,6 +37,14 @@ const log = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.log("[SubTrans]", ...args);
 };
 
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!target || !(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  if (target.isContentEditable || target.getAttribute("contenteditable") === "true") return true;
+  return false;
+}
+
 class ContentController {
   private settings!: Settings;
   private readonly root = new Disposer();
@@ -39,6 +55,7 @@ class ContentController {
   private session: Session | null = null;
   private currentVideo: HTMLVideoElement | null = null;
   private generation = 0;
+  private offset = 0;
 
   public async init(): Promise<void> {
     // Content script KHÔNG đọc API key (PLAN 3.4)
@@ -108,8 +125,129 @@ class ContentController {
       d.add(offNav);
     }
 
+    // Đăng ký phím tắt bàn phím (V: đổi chế độ phụ đề, G/H: chỉnh lệch thời gian)
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!this.settings.shortcuts?.enabled) return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      if (isTypingTarget(e.target)) return;
+
+      const key = e.key.toLowerCase();
+      if (key === "v") {
+        e.stopPropagation();
+        e.preventDefault();
+        this.cycleSubtitleMode();
+      } else if (key === "g") {
+        e.stopPropagation();
+        e.preventDefault();
+        this.adjustOffset(-0.1);
+      } else if (key === "h") {
+        e.stopPropagation();
+        e.preventDefault();
+        this.adjustOffset(0.1);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    d.add(() => window.removeEventListener("keydown", handleKeyDown, true));
+
     detector.start();
     log("đã kích hoạt trên", location.hostname);
+  }
+
+  private cycleSubtitleMode(): void {
+    const current = this.settings.subtitleMode;
+    const modes: SubtitleMode[] = ["bilingual", "vi", "en", "off"];
+    const idx = modes.indexOf(current);
+    const nextMode = modes[(idx + 1) % modes.length];
+
+    const labels: Record<SubtitleMode, string> = {
+      bilingual: "Song ngữ",
+      vi: "Chỉ tiếng Việt",
+      en: "Chỉ tiếng Anh",
+      off: "Tắt phụ đề",
+    };
+
+    this.store?.flashToast(`Chế độ phụ đề: ${labels[nextMode]}`);
+    void saveSettings({ subtitleMode: nextMode });
+  }
+
+  private adjustOffset(delta: number): void {
+    const trackKey = this.session?.track?.trackKey;
+    this.offset = Math.round((this.offset + delta) * 10) / 10;
+    this.store?.setState({ offset: this.offset });
+    const sign = this.offset > 0 ? "+" : "";
+    this.store?.flashToast(`Độ lệch phụ đề: ${sign}${this.offset.toFixed(1)}s`);
+
+    if (trackKey && typeof chrome !== "undefined" && chrome.storage?.local) {
+      chrome.storage.local.set({ [`offset:${trackKey}`]: this.offset });
+    }
+  }
+
+  private resetOffset(): void {
+    const trackKey = this.session?.track?.trackKey;
+    this.offset = 0;
+    this.store?.setState({ offset: 0 });
+    this.store?.flashToast("Độ lệch phụ đề: 0.0s");
+
+    if (trackKey && typeof chrome !== "undefined" && chrome.storage?.local) {
+      chrome.storage.local.set({ [`offset:${trackKey}`]: 0 });
+    }
+  }
+
+  private async loadSavedOffset(trackKey: string): Promise<void> {
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      try {
+        const key = `offset:${trackKey}`;
+        const data = await chrome.storage.local.get(key);
+        if (typeof data[key] === "number") {
+          this.offset = data[key];
+          this.store?.setState({ offset: this.offset });
+          return;
+        }
+      } catch {
+        // Ignored
+      }
+    }
+    this.offset = 0;
+    this.store?.setState({ offset: 0 });
+  }
+
+  private async handleImportFile(file: File): Promise<void> {
+    if (!this.currentVideo || !this.active) return;
+    try {
+      const source = await ImportedSubtitleSource.fromFile(file);
+      this.store?.flashToast(`Đã nạp phụ đề: ${file.name}`);
+      const scope = this.videoScope ?? this.active.child();
+      this.videoScope = scope;
+      this.startSession(this.currentVideo, this.pickAdapter(), source, scope, this.generation);
+    } catch (err) {
+      this.store?.flashToast("Lỗi đọc file phụ đề");
+      if (import.meta.env.DEV) console.warn("[SubTrans] import file lỗi:", err);
+    }
+  }
+
+  private mountOverlayWithoutSession(
+    video: HTMLVideoElement,
+    adapter: SiteAdapter,
+    scope: Disposer,
+    _gen: number
+  ): void {
+    if (this.store) return;
+    const store = (this.store = new OverlayStore({
+      mode: this.settings.subtitleMode,
+      style: this.settings.style,
+      hasTrack: false,
+      message: "Chưa có phụ đề (bấm Nhập để thêm .srt/.vtt)",
+    }));
+
+    const overlay = new OverlayHost(video, store, {
+      container: adapter.getOverlayContainer(video),
+      onImportFile: (file) => void this.handleImportFile(file),
+      onExport: (format, mode) => this.handleExport(format, mode),
+      onOffsetChange: (delta) => this.adjustOffset(delta),
+      onOffsetReset: () => this.resetOffset(),
+    });
+    scope.add(() => overlay.dispose());
   }
 
   private deactivate(): void {
@@ -159,6 +297,7 @@ class ContentController {
   private teardownVideo(): void {
     this.generation++;
     this.currentVideo = null;
+    this.offset = 0;
     if (isYouTubeHost(location.hostname)) setYouTubeNativeCaptionsHidden(false, document);
     this.session?.dispose();
     this.session = null;
@@ -224,6 +363,7 @@ class ContentController {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    this.store?.flashToast(`Đã xuất file .${format}`);
     return true;
   }
 
@@ -238,9 +378,10 @@ class ContentController {
     const trySetup = async () => {
       if (gen !== this.generation || this.session) return;
       const sources = await adapter.listSources(video);
-      if (gen !== this.generation || this.session || sources.length === 0) {
-        for (const s of sources) if (gen !== this.generation || this.session) s.dispose();
-        if (sources.length === 0) log("video chưa có nguồn phụ đề phù hợp");
+      if (gen !== this.generation || this.session) return;
+      if (sources.length === 0) {
+        log("video chưa có nguồn phụ đề phù hợp");
+        this.mountOverlayWithoutSession(video, adapter, scope, gen);
         return;
       }
       this.startSession(video, adapter, sources[0], scope, gen);
@@ -261,16 +402,33 @@ class ContentController {
     scope: Disposer,
     gen: number
   ): void {
-    const store = (this.store = new OverlayStore({
-      mode: this.settings.subtitleMode,
-      style: this.settings.style,
-    }));
+    if (this.session) {
+      this.session.dispose();
+      this.session = null;
+    }
+
+    void this.loadSavedOffset(source.track.trackKey);
+
+    const store = (this.store =
+      this.store ??
+      new OverlayStore({
+        mode: this.settings.subtitleMode,
+        style: this.settings.style,
+      }));
+    store.setState({
+      hasTrack: true,
+      trackTitle: source.track.title,
+      offset: this.offset,
+      message: null,
+    });
+
     const native = new NativeTrackFallback(video);
     scope.add(() => native.dispose());
 
     const session = new Session(video, source, store, native, {
       port: this.getPort(),
       settings: this.settings,
+      getOffset: () => this.offset,
       onSourceChanged:
         adapter.rebuildOnSourceChange === false
           ? undefined
@@ -287,6 +445,10 @@ class ContentController {
         if (on) native.enable([...session.getItems()], store.getState().mode);
         else native.disable();
       },
+      onImportFile: (file) => void this.handleImportFile(file),
+      onExport: (format, mode) => this.handleExport(format, mode),
+      onOffsetChange: (delta) => this.adjustOffset(delta),
+      onOffsetReset: () => this.resetOffset(),
     });
     scope.add(() => overlay.dispose());
 

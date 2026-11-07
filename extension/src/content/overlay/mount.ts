@@ -29,6 +29,10 @@ export interface OverlayHostOptions {
   container?: HTMLElement | null;
   /** Gọi khi cần bật/tắt chế độ TextTrack gốc (fullscreen chính thẻ video) */
   onNativeFallback?: (on: boolean) => void;
+  onOffsetChange?: (delta: number) => void;
+  onOffsetReset?: () => void;
+  onImportFile?: (file: File) => void;
+  onExport?: (format: "srt" | "vtt", mode: "bilingual" | "target" | "source") => void;
 }
 
 const HOST_TAG = "subtrans-overlay";
@@ -107,6 +111,10 @@ export class OverlayHost {
         store,
         getContainerRect: this.getContainerRect,
         storageKey: overlayPosKey(location.hostname),
+        onOffsetChange: opts.onOffsetChange,
+        onOffsetReset: opts.onOffsetReset,
+        onImportFile: opts.onImportFile,
+        onExport: opts.onExport,
       })
     );
 

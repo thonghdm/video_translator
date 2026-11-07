@@ -1,12 +1,14 @@
 /**
  * SubTrans Extension — Giao diện adapter theo trang (PLAN 4.3)
  */
-import type { Cue, TrackRef } from "../../shared/types";
+import type { Cue, SubtitleItem, TrackRef } from "../../shared/types";
 
 export interface SubtitleSource {
   readonly track: TrackRef;
   /** Toàn bộ cue lấy được (rỗng nếu không lấy được) */
   load(): Promise<Cue[]>;
+  /** Dành cho nguồn đã có sẵn bản dịch (ví dụ: file song ngữ nhập vào) */
+  getInitialItems?(): SubtitleItem[];
   /** Track tải thêm cue (player HLS/DASH nạp dần). Trả về hàm hủy đăng ký. */
   onCuesChanged?(cb: (cues: Cue[]) => void): () => void;
   dispose(): void;

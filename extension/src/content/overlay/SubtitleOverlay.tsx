@@ -19,24 +19,32 @@ export interface SubtitleOverlayProps {
 function EngineBadge({ engine }: { engine: SubtitleItem["engine"] }) {
   if (!engine) return null;
   const isCloud = engine === "cloud";
+  const isFile = engine === "file";
+  const title = isCloud
+    ? "Dịch bằng Gemini Cloud"
+    : isFile
+    ? "Phụ đề nhập từ file"
+    : "Dịch bằng API Google siêu tốc";
+  const label = isCloud ? "Cloud" : isFile ? "File" : "API";
+  const dotColor = isCloud
+    ? "bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.9)]"
+    : isFile
+    ? "bg-neutral-400 shadow-[0_0_6px_rgba(163,163,163,0.9)]"
+    : "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]";
+  const textColor = isCloud
+    ? "text-cyan-300"
+    : isFile
+    ? "text-neutral-300"
+    : "text-emerald-300";
+
   return (
     <div
       className="absolute -top-2 right-2.5 flex items-center gap-1 bg-black/85 border border-white/10 rounded-full px-1.5 py-0.5 text-[9px] pointer-events-none shadow-sm"
-      title={isCloud ? "Dịch bằng Gemini Cloud" : "Dịch bằng API Google siêu tốc"}
+      title={title}
     >
-      <span
-        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-          isCloud
-            ? "bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.9)]"
-            : "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]"
-        }`}
-      />
-      <span
-        className={`font-semibold text-[8px] uppercase tracking-wider ${
-          isCloud ? "text-cyan-300" : "text-emerald-300"
-        }`}
-      >
-        {isCloud ? "Cloud" : "API"}
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
+      <span className={`font-semibold text-[8px] uppercase tracking-wider ${textColor}`}>
+        {label}
       </span>
     </div>
   );

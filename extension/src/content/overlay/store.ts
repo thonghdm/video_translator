@@ -19,6 +19,12 @@ export interface OverlayState {
   nativeFallback: boolean;
   /** Overlay có được hiển thị không (ví dụ ẩn khi đang có quảng cáo) */
   visible: boolean;
+  /** Độ lệch thời gian (giây), mặc định 0 */
+  offset: number;
+  /** Có track phụ đề nào đang nạp không */
+  hasTrack: boolean;
+  /** Tiêu đề track phụ đề đang phát */
+  trackTitle?: string;
 }
 
 export type Listener = () => void;
@@ -37,6 +43,8 @@ export class OverlayStore {
       toast: null,
       nativeFallback: false,
       visible: true,
+      offset: 0,
+      hasTrack: false,
       ...initial,
     };
   }

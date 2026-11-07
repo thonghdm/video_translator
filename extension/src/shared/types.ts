@@ -23,7 +23,7 @@ export interface SubtitleItem {
   source_text: string;
   target_text: string; // Rỗng khi chưa dịch
   translated: boolean;
-  engine: EngineId | null; // Engine đã dịch dòng này
+  engine: EngineId | "file" | null; // Engine đã dịch dòng này ("api", "cloud", hoặc "file" nếu nhập file song ngữ)
   ignored?: boolean; // true nếu isIgnoredSubtitle
 }
 

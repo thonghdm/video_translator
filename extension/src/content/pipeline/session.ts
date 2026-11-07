@@ -121,7 +121,12 @@ export class Session {
     if (this.disposer.isDisposed) return 0;
 
     this.sourceHash = computeSourceHash(cues);
-    this.items = cuesToItems(cues);
+    const initialItems = this.source.getInitialItems?.();
+    if (initialItems && initialItems.length === cues.length) {
+      this.items = initialItems;
+    } else {
+      this.items = cuesToItems(cues);
+    }
 
     // 1. Kiểm tra cache IndexedDB qua BackgroundPort
     if (this.opts.port && cues.length > 0) {

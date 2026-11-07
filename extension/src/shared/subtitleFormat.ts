@@ -195,6 +195,7 @@ export function parseSrtOrVttBilingual(content: string): SubtitleItem[] {
       targetText = "";
     }
 
+    const hasVi = targetText !== "";
     items.push({
       id: id++,
       block: 0,
@@ -202,8 +203,8 @@ export function parseSrtOrVttBilingual(content: string): SubtitleItem[] {
       end_sec: endSec,
       source_text: sourceText,
       target_text: targetText,
-      translated: targetText !== "",
-      engine: null,
+      translated: hasVi,
+      engine: hasVi ? "file" : null,
     });
   }
 
