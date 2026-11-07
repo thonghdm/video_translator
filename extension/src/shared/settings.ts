@@ -92,6 +92,13 @@ export function cloneDefaults(): Settings {
   return structuredClone(DEFAULT_SETTINGS);
 }
 
+/** Kiểm tra extension có được bật trên hostname này không */
+export function isEnabledFor(settings: Settings, hostname: string): boolean {
+  if (!settings.enabled) return false;
+  if (!hostname) return true;
+  return !(settings.disabledHosts || []).includes(hostname);
+}
+
 /**
  * Deep merge: luôn trả về object MỚI (deep clone), không chia sẻ tham chiếu với target/source,
  * để việc gán settings.gemini.apiKey sau đó không làm bẩn DEFAULT_SETTINGS.

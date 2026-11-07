@@ -71,9 +71,11 @@ export interface BreakerView {
 
 // Popup/Options -> Background (chrome.runtime.sendMessage, có trả lời)
 export type UiReq =
+  | { type: "status" }
   | { type: "gemini.test"; apiKey: string; model: string }
   | { type: "gemini.listModels"; apiKey: string }
   | { type: "cache.stats" }
+  | { type: "cache.listRecent"; limit?: number }
   | { type: "cache.clear"; trackKey?: string };
 
 // Popup -> Content của tab đang mở (chrome.tabs.sendMessage)

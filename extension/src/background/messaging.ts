@@ -274,6 +274,22 @@ export class MessagingHub {
 
   private async handleUiMessage(msg: UiReq): Promise<unknown> {
     switch (msg.type) {
+      case "status": {
+        return {
+          ok: true,
+          breakers: {
+            api: {
+              blocked: this.gtxBreaker.blocked(),
+              until: this.gtxBreaker.getBlockedUntil(),
+            },
+            cloud: {
+              blocked: this.geminiBreaker.blocked(),
+              until: this.geminiBreaker.getBlockedUntil(),
+            },
+          },
+          geminiReady: this.geminiEngine.isAvailable(),
+        };
+      }
       case "gemini.test": {
         return await GeminiEngine.testConnection(
           msg.apiKey,
@@ -286,6 +302,9 @@ export class MessagingHub {
       }
       case "cache.stats": {
         return await this.db.stats();
+      }
+      case "cache.listRecent": {
+        return await this.db.listRecent(msg.limit || 50);
       }
       case "cache.clear": {
         await this.db.clear(msg.trackKey);

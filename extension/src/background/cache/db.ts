@@ -243,6 +243,27 @@ export class SubtransDB {
   }
 
   /**
+   * Lấy danh sách tối đa `limit` track được mở gần đây nhất
+   */
+  public async listRecent(limit = 50): Promise<
+    Array<{ trackKey: string; title: string; platform: string; lastOpenedAt: number; linesCount: number }>
+  > {
+    const db = await this.getDB();
+    const tx = db.transaction("tracks", "readonly");
+    const allTracks = (await tx.store.getAll()) as TrackRecord[];
+    await tx.done;
+
+    allTracks.sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
+    return allTracks.slice(0, limit).map((t) => ({
+      trackKey: t.trackKey,
+      title: t.title || "Video",
+      platform: t.platform || "web",
+      lastOpenedAt: t.lastOpenedAt || 0,
+      linesCount: t.cues?.length || 0,
+    }));
+  }
+
+  /**
    * Xóa track và các bản ghi lines tương ứng. Nếu không truyền trackKey thì xóa toàn bộ.
    */
   public async clear(trackKey?: string): Promise<void> {

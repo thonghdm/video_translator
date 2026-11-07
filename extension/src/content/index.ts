@@ -5,7 +5,7 @@
  * ẩn CC gốc theo cài đặt hideNativeCaptions, phát hiện quảng cáo và chuyển trang SPA.
  */
 
-import { loadSettings, onSettingsChanged, type Settings } from "../shared/settings";
+import { isEnabledFor, loadSettings, onSettingsChanged, type Settings } from "../shared/settings";
 import { Disposer } from "../shared/disposer";
 import { VideoDetector } from "./videoDetector";
 import { createHtml5Adapter } from "./adapters/html5";
@@ -22,15 +22,12 @@ import { OverlayStore } from "./overlay/store";
 import { NativeTrackFallback } from "./overlay/nativeTrackFallback";
 import { Session } from "./pipeline/session";
 import { BackgroundPort, newReqId } from "./port";
-import type { B2C } from "../shared/messages";
+import { buildSubtitleContent } from "../shared/subtitleFormat";
+import type { B2C, PopupToTab, TabStatus } from "../shared/messages";
 
 const log = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.log("[SubTrans]", ...args);
 };
-
-function isEnabledFor(settings: Settings, hostname: string): boolean {
-  return settings.enabled && !settings.disabledHosts.includes(hostname);
-}
 
 class ContentController {
   private settings!: Settings;
@@ -49,6 +46,25 @@ class ContentController {
     this.root.add(
       onSettingsChanged((s) => this.applySettings(s), { includeApiKey: false })
     );
+
+    // Lắng nghe các thông điệp từ Popup (tab.status, tab.export)
+    if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+      chrome.runtime.onMessage.addListener(
+        (msg: PopupToTab, _sender, sendResponse: (res: any) => void) => {
+          if (!msg || typeof msg !== "object") return;
+          if (msg.type === "tab.status") {
+            sendResponse(this.getTabStatus());
+            return false;
+          }
+          if (msg.type === "tab.export") {
+            this.handleExport(msg.format, msg.mode);
+            sendResponse({ ok: true });
+            return false;
+          }
+        }
+      );
+    }
+
     if (isEnabledFor(this.settings, location.hostname)) this.activate();
   }
 
@@ -146,6 +162,64 @@ class ContentController {
     this.videoScope = null;
     this.store?.dispose();
     this.store = null;
+  }
+
+  private getTabStatus(): TabStatus {
+    if (!this.session) {
+      return {
+        active: false,
+        total: 0,
+        translated: 0,
+        byEngine: { api: 0, cloud: 0 },
+      };
+    }
+
+    const items = this.session.getItems();
+    let translated = 0;
+    let apiCount = 0;
+    let cloudCount = 0;
+
+    for (const it of items) {
+      if (it.translated) {
+        translated++;
+        if (it.engine === "api") apiCount++;
+        else if (it.engine === "cloud") cloudCount++;
+      }
+    }
+
+    return {
+      active: true,
+      platform: this.session.track?.platform || (isYouTubeHost(location.hostname) ? "youtube" : "web"),
+      title: this.session.track?.title || document.title,
+      total: items.length,
+      translated,
+      byEngine: { api: apiCount, cloud: cloudCount },
+      message: this.store?.getState().message || undefined,
+    };
+  }
+
+  private handleExport(
+    format: "srt" | "vtt",
+    mode: "source" | "target" | "bilingual"
+  ): void {
+    const items = [...(this.session?.getItems() ?? [])];
+    if (items.length === 0) return;
+
+    const content = buildSubtitleContent(items, format, mode);
+    const rawTitle = this.session?.track?.title || document.title || "subtitles";
+    const cleanTitle = rawTitle.replace(/[/\\?%*:|"<>]/g, "-").trim();
+    const modeLabel = mode === "bilingual" ? "bilingual" : mode === "target" ? "vi" : "en";
+    const filename = `${cleanTitle}.${modeLabel}.${format}`;
+
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
   private onVideo(video: HTMLVideoElement | null): void {
