@@ -5,6 +5,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useSettings } from "../shared/useSettings";
+import { NumberField } from "./NumberField";
 import type { UiReq } from "../shared/messages";
 import {
   Database,
@@ -198,16 +199,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Số kết nối đồng thời (Concurrency)
               </label>
-              <input
-                type="number"
-                min="1"
-                max="5"
+              <NumberField
+                limitKey="gtx.concurrency"
                 value={settings.gtx.concurrency}
-                onChange={(e) =>
-                  updateSettings({
-                    gtx: { ...settings.gtx, concurrency: parseInt(e.target.value, 10) || 1 },
-                  })
-                }
+                onCommit={(v) => updateSettings({ gtx: { ...settings.gtx, concurrency: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 2 kết nối</p>
@@ -217,17 +212,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Khoảng nghỉ giữa các batch (ms)
               </label>
-              <input
-                type="number"
-                min="0"
-                max="2000"
-                step="50"
-                value={settings.gtx.gapMs}
-                onChange={(e) =>
-                  updateSettings({
-                    gtx: { ...settings.gtx, gapMs: parseInt(e.target.value, 10) || 0 },
-                  })
-                }
+              <NumberField
+                limitKey="gtx.gapMs"
+                value={settings.gtx.gapMs} step={50}
+                onCommit={(v) => updateSettings({ gtx: { ...settings.gtx, gapMs: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 150ms</p>
@@ -237,17 +225,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Thời gian chờ tối đa Timeout (ms)
               </label>
-              <input
-                type="number"
-                min="1000"
-                max="15000"
-                step="500"
-                value={settings.gtx.timeoutMs}
-                onChange={(e) =>
-                  updateSettings({
-                    gtx: { ...settings.gtx, timeoutMs: parseInt(e.target.value, 10) || 5000 },
-                  })
-                }
+              <NumberField
+                limitKey="gtx.timeoutMs"
+                value={settings.gtx.timeoutMs} step={500}
+                onCommit={(v) => updateSettings({ gtx: { ...settings.gtx, timeoutMs: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 5000ms</p>
@@ -267,16 +248,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Giới hạn RPM (Requests / phút)
               </label>
-              <input
-                type="number"
-                min="1"
-                max="60"
+              <NumberField
+                limitKey="gemini.rpm"
                 value={settings.gemini.rpm}
-                onChange={(e) =>
-                  updateSettings({
-                    gemini: { ...settings.gemini, rpm: parseInt(e.target.value, 10) || 12 },
-                  })
-                }
+                onCommit={(v) => updateSettings({ gemini: { ...settings.gemini, rpm: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Gói miễn phí: khuyến nghị 12-15</p>
@@ -286,20 +261,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Timeout Tier 1 (Câu đang phát)
               </label>
-              <input
-                type="number"
-                min="1000"
-                max="15000"
-                step="500"
-                value={settings.gemini.timeoutTier1Ms}
-                onChange={(e) =>
-                  updateSettings({
-                    gemini: {
-                      ...settings.gemini,
-                      timeoutTier1Ms: parseInt(e.target.value, 10) || 3500,
-                    },
-                  })
-                }
+              <NumberField
+                limitKey="gemini.timeoutTier1Ms"
+                value={settings.gemini.timeoutTier1Ms} step={500}
+                onCommit={(v) => updateSettings({ gemini: { ...settings.gemini, timeoutTier1Ms: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 3500ms</p>
@@ -309,20 +274,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Timeout Tier 2 (Dịch trước)
               </label>
-              <input
-                type="number"
-                min="2000"
-                max="30000"
-                step="1000"
-                value={settings.gemini.timeoutTier2Ms}
-                onChange={(e) =>
-                  updateSettings({
-                    gemini: {
-                      ...settings.gemini,
-                      timeoutTier2Ms: parseInt(e.target.value, 10) || 8000,
-                    },
-                  })
-                }
+              <NumberField
+                limitKey="gemini.timeoutTier2Ms"
+                value={settings.gemini.timeoutTier2Ms} step={1000}
+                onCommit={(v) => updateSettings({ gemini: { ...settings.gemini, timeoutTier2Ms: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 8000ms</p>
@@ -332,19 +287,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Số câu tối đa Tier 1 (Batch)
               </label>
-              <input
-                type="number"
-                min="1"
-                max="25"
+              <NumberField
+                limitKey="gemini.maxItemsTier1"
                 value={settings.gemini.maxItemsTier1}
-                onChange={(e) =>
-                  updateSettings({
-                    gemini: {
-                      ...settings.gemini,
-                      maxItemsTier1: parseInt(e.target.value, 10) || 10,
-                    },
-                  })
-                }
+                onCommit={(v) => updateSettings({ gemini: { ...settings.gemini, maxItemsTier1: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 10 câu</p>
@@ -354,19 +300,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Số câu tối đa Tier 2 (Batch)
               </label>
-              <input
-                type="number"
-                min="5"
-                max="50"
+              <NumberField
+                limitKey="gemini.maxItemsTier2"
                 value={settings.gemini.maxItemsTier2}
-                onChange={(e) =>
-                  updateSettings({
-                    gemini: {
-                      ...settings.gemini,
-                      maxItemsTier2: parseInt(e.target.value, 10) || 20,
-                    },
-                  })
-                }
+                onCommit={(v) => updateSettings({ gemini: { ...settings.gemini, maxItemsTier2: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 20 câu</p>
@@ -481,20 +418,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Số lượng track tối đa lưu trong đệm (LRU)
               </label>
-              <input
-                type="number"
-                min="10"
-                max="1000"
-                step="10"
-                value={settings.cache.maxTracks}
-                onChange={(e) =>
-                  updateSettings({
-                    cache: {
-                      ...settings.cache,
-                      maxTracks: parseInt(e.target.value, 10) || 200,
-                    },
-                  })
-                }
+              <NumberField
+                limitKey="cache.maxTracks"
+                value={settings.cache.maxTracks} step={10}
+                onCommit={(v) => updateSettings({ cache: { ...settings.cache, maxTracks: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 200 track</p>
@@ -504,19 +431,10 @@ export function Options() {
               <label className="text-xs font-medium text-neutral-300">
                 Thời hạn tối đa lưu bản dịch (ngày)
               </label>
-              <input
-                type="number"
-                min="1"
-                max="365"
+              <NumberField
+                limitKey="cache.maxAgeDays"
                 value={settings.cache.maxAgeDays}
-                onChange={(e) =>
-                  updateSettings({
-                    cache: {
-                      ...settings.cache,
-                      maxAgeDays: parseInt(e.target.value, 10) || 30,
-                    },
-                  })
-                }
+                onCommit={(v) => updateSettings({ cache: { ...settings.cache, maxAgeDays: v } })}
                 className="w-full bg-player-bg border border-player-border rounded-md px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-400"
               />
               <p className="text-[11px] text-neutral-400">Mặc định: 30 ngày</p>

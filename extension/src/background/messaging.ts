@@ -308,6 +308,8 @@ export class MessagingHub {
       }
       case "cache.clear": {
         await this.db.clear(msg.trackKey);
+        // Xóa toàn bộ cache → xóa luôn cache cụm từ trong RAM của router
+        if (!msg.trackKey) this.router.clearPhraseCache?.();
         return { ok: true };
       }
       default:

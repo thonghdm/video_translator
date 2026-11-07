@@ -244,3 +244,25 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
 - [ ] Mode `hybrid` (có Gemini key): chấm chỉ báo ban đầu xanh lá (API), sau đó chuyển dần sang cyan (Cloud) khi đã dịch hết.
 - [ ] Rút mạng khoảng 20s rồi cắm lại: hiện "Đang tạm nghỉ…", sau đó tự dịch tiếp, không còn dòng nào bị bỏ.
 - [ ] Video 20 phút với mode `google`: dịch xong toàn bộ, không bị 429 khi dùng cấu hình mặc định.
+
+---
+
+## Sửa lỗi review Phase 7 (Popup / Options / useSettings)
+| # | Lỗi | Cách sửa | Test |
+|---|---|---|---|
+| 1 | Content script chạy ở **mọi frame**, frame nào cũng trả lời `tab.status`/`tab.export` (kể cả iframe quảng cáo/chat không có video). Popup chỉ nhận câu trả lời đầu tiên nên có thể báo "chưa có video" | Frame không có session thì **không trả lời**. Không frame nào có session thì popup nhận `lastError` và hiện "chưa có video". `tab.export` trả `ok: false` khi không có phụ đề | `phase7-fixes` › content |
+| 2 | Popup đóng (click ra ngoài) trong 300ms debounce thì thay đổi bị **mất** (ví dụ vừa dán API key) | `useSettings` lưu ngay khi `pagehide`, `visibilitychange = hidden` và khi unmount. Có thêm `flush()` | useSettings |
+| 3 | `storage.onChanged` từ lần lưu trước ghi đè state khi người dùng vẫn đang gõ, ô nhập "giật lùi" | Áp lại các thay đổi chưa lưu lên trên dữ liệu mới nhận. `saveSettings` ghi **1 lần** (key + blob), nên chỉ có 1 sự kiện | useSettings, sanitize |
+| 4 | Ô số ở Options: `min`/`max` của HTML không chặn giá trị gõ tay (RPM 1000, concurrency 50 → API bị chặn); xóa trắng ô thì nhảy về mặc định ngay | `sanitizeSettings()` + `SETTING_LIMITS` áp **khi load và khi save** (kể cả dữ liệu cũ, giá trị gõ từ console). Thêm component `NumberField`: gõ tự do, lưu khi blur/Enter, Esc để hủy, có kẹp giá trị | sanitize, NumberField |
+| 5 | Enum sai, màu không phải `#rrggbb`, endpoint không phải https, model có tiền tố `models/` vẫn được lưu | `sanitizeSettings()` đưa về mặc định hoặc chuẩn hóa | sanitize |
+| 6 | "Xóa toàn bộ cache" ở Options chỉ xóa IndexedDB; cache cụm từ trong RAM của router vẫn trả bản dịch cũ | `cache.clear` (không truyền `trackKey`) gọi thêm `router.clearPhraseCache()` | — |
+
+### Cần xác nhận thủ công (Load unpacked)
+- [ ] Popup trên YouTube (đang phát video có phụ đề): hiện tên video, thanh tiến độ, số dòng API/Cloud.
+- [ ] Dán API key rồi **click ra ngoài ngay**, mở lại popup: key vẫn còn.
+- [ ] Gõ API key nhanh: ô không bị giật lùi.
+- [ ] Nút "Kiểm tra" với key đúng thì hiện ✓ kèm độ trễ; key sai thì hiện lỗi, **không** lộ key. Nút ↻ tải danh sách model.
+- [ ] Đổi mode / cỡ chữ / màu khi đang xem: overlay đổi ngay, không cần F5.
+- [ ] Options: gõ RPM = 1000 rồi Tab ra ngoài thì ô về 60. Xóa trắng ô rồi gõ số mới không bị nhảy giá trị. Esc thì hủy.
+- [ ] Options: danh sách track gần đây, xóa từng track, xóa toàn bộ; sau đó mở lại video thì phụ đề được dịch lại.
+- [ ] Xuất 6 loại file từ popup: tên file đúng `<tiêu đề>.<vi|en|bilingual>.<srt|vtt>`.

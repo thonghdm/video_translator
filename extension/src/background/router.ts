@@ -96,6 +96,11 @@ export class TranslationRouter {
     this.config = { ...this.config, ...newConfig };
   }
 
+  /** Xóa cache cụm từ trong RAM (đi kèm "Xóa cache" ở Options, để lần dịch sau gọi API thật) */
+  public clearPhraseCache(): void {
+    this.phraseCache.clear();
+  }
+
   public async translate(options: TranslateOptions): Promise<TranslateOutput> {
     const { lines, srcLang = "auto", priority, prefer, signal } = options;
     const isTier1 = priority === "tier1";

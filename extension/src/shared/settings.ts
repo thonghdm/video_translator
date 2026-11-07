@@ -128,6 +128,81 @@ export function deepMerge<T>(target: T, source: unknown): T {
   return result as T;
 }
 
+/** Khoảng giá trị hợp lệ của các setting dạng số (dùng chung cho sanitize và UI) */
+export const SETTING_LIMITS = {
+  "gtx.concurrency": [1, 4],
+  "gtx.gapMs": [0, 2000],
+  "gtx.timeoutMs": [1000, 15000],
+  "gemini.rpm": [1, 60],
+  "gemini.timeoutTier1Ms": [1000, 15000],
+  "gemini.timeoutTier2Ms": [2000, 30000],
+  "gemini.maxItemsTier1": [1, 25],
+  "gemini.maxItemsTier2": [5, 50],
+  "style.fontScale": [0.8, 1.8],
+  "style.bgOpacity": [0, 1],
+  "cache.maxTracks": [10, 1000],
+  "cache.maxAgeDays": [1, 365],
+} as const satisfies Record<string, readonly [number, number]>;
+
+export type LimitKey = keyof typeof SETTING_LIMITS;
+
+export function clampSetting(key: LimitKey, value: unknown, fallback: number): number {
+  const [lo, hi] = SETTING_LIMITS[key];
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(hi, Math.max(lo, n));
+}
+
+const MODES = ["google", "gemini", "hybrid"] as const;
+const SUB_MODES = ["bilingual", "vi", "en", "off"] as const;
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+/**
+ * Chuẩn hóa settings (gọi khi load VÀ khi save): kẹp số về khoảng hợp lệ, enum sai → mặc định,
+ * màu không phải #rrggbb → mặc định, endpoint phải là https. Bảo vệ khỏi giá trị gõ tay/console/bản cũ
+ * (ví dụ rpm = 1000 hay concurrency = 50 sẽ làm API bị chặn).
+ */
+export function sanitizeSettings(input: Settings): Settings {
+  const d = DEFAULT_SETTINGS;
+  const s = structuredClone(input);
+  const int = (k: LimitKey, v: unknown, f: number) => Math.round(clampSetting(k, v, f));
+
+  s.enabled = typeof s.enabled === "boolean" ? s.enabled : d.enabled;
+  s.disabledHosts = Array.isArray(s.disabledHosts)
+    ? Array.from(new Set(s.disabledHosts.filter((h): h is string => typeof h === "string" && h.trim() !== "").map((h) => h.trim())))
+    : [];
+  s.mode = (MODES as readonly string[]).includes(s.mode) ? s.mode : d.mode;
+  s.subtitleMode = (SUB_MODES as readonly string[]).includes(s.subtitleMode) ? s.subtitleMode : d.subtitleMode;
+  s.targetLang = "vi";
+
+  const g = s.gemini;
+  g.apiKey = typeof g.apiKey === "string" ? g.apiKey.trim() : "";
+  g.model = typeof g.model === "string" && g.model.trim() ? g.model.trim().replace(/^models\//, "") : d.gemini.model;
+  g.endpoint = typeof g.endpoint === "string" && /^https:\/\/[^\s]+$/i.test(g.endpoint.trim()) ? g.endpoint.trim() : d.gemini.endpoint;
+  g.rpm = int("gemini.rpm", g.rpm, d.gemini.rpm);
+  g.timeoutTier1Ms = int("gemini.timeoutTier1Ms", g.timeoutTier1Ms, d.gemini.timeoutTier1Ms);
+  g.timeoutTier2Ms = int("gemini.timeoutTier2Ms", g.timeoutTier2Ms, d.gemini.timeoutTier2Ms);
+  g.maxItemsTier1 = int("gemini.maxItemsTier1", g.maxItemsTier1, d.gemini.maxItemsTier1);
+  g.maxItemsTier2 = int("gemini.maxItemsTier2", g.maxItemsTier2, d.gemini.maxItemsTier2);
+
+  s.gtx.concurrency = int("gtx.concurrency", s.gtx.concurrency, d.gtx.concurrency);
+  s.gtx.gapMs = int("gtx.gapMs", s.gtx.gapMs, d.gtx.gapMs);
+  s.gtx.timeoutMs = int("gtx.timeoutMs", s.gtx.timeoutMs, d.gtx.timeoutMs);
+
+  s.style.fontScale = Math.round(clampSetting("style.fontScale", s.style.fontScale, d.style.fontScale) * 100) / 100;
+  s.style.bgOpacity = Math.round(clampSetting("style.bgOpacity", s.style.bgOpacity, d.style.bgOpacity) * 100) / 100;
+  s.style.viColor = typeof s.style.viColor === "string" && HEX_COLOR.test(s.style.viColor) ? s.style.viColor : d.style.viColor;
+  s.style.enColor = typeof s.style.enColor === "string" && HEX_COLOR.test(s.style.enColor) ? s.style.enColor : d.style.enColor;
+
+  s.youtube.hideNativeCaptions = typeof s.youtube.hideNativeCaptions === "boolean" ? s.youtube.hideNativeCaptions : d.youtube.hideNativeCaptions;
+  s.youtube.preferManual = typeof s.youtube.preferManual === "boolean" ? s.youtube.preferManual : d.youtube.preferManual;
+  s.pretranslateWholeTrack = typeof s.pretranslateWholeTrack === "boolean" ? s.pretranslateWholeTrack : d.pretranslateWholeTrack;
+  s.cache.maxTracks = int("cache.maxTracks", s.cache.maxTracks, d.cache.maxTracks);
+  s.cache.maxAgeDays = int("cache.maxAgeDays", s.cache.maxAgeDays, d.cache.maxAgeDays);
+  s.shortcuts.enabled = typeof s.shortcuts.enabled === "boolean" ? s.shortcuts.enabled : d.shortcuts.enabled;
+  return s;
+}
+
 const SETTINGS_KEY = "settings";
 const API_KEY_KEY = "geminiApiKey";
 
@@ -151,11 +226,11 @@ export async function loadSettings(opts: LoadSettingsOptions = {}): Promise<Sett
   const keys = includeApiKey ? [SETTINGS_KEY, API_KEY_KEY] : [SETTINGS_KEY];
   const data = await chrome.storage.local.get(keys);
   const saved = data[SETTINGS_KEY];
-  const settings = deepMerge(DEFAULT_SETTINGS, saved);
+  const settings = sanitizeSettings(deepMerge(DEFAULT_SETTINGS, saved));
   settings.gemini.apiKey = "";
 
   if (includeApiKey && typeof data[API_KEY_KEY] === "string") {
-    settings.gemini.apiKey = data[API_KEY_KEY];
+    settings.gemini.apiKey = data[API_KEY_KEY].trim();
   }
 
   return settings;
@@ -170,18 +245,15 @@ export async function saveSettings(partial: Partial<Settings>): Promise<void> {
   }
 
   const current = await loadSettings();
-  const updated = deepMerge(current, partial);
+  const updated = sanitizeSettings(deepMerge(current, partial));
 
-  // Tách apiKey ra lưu riêng tại API_KEY_KEY
+  // Ghi 1 lần (key + blob) → chỉ 1 sự kiện storage.onChanged. API key lưu riêng, KHÔNG nằm trong blob.
+  const toSave = { ...updated, gemini: { ...updated.gemini, apiKey: "" } };
+  const payload: Record<string, unknown> = { [SETTINGS_KEY]: toSave };
   if (partial.gemini?.apiKey !== undefined) {
-    await chrome.storage.local.set({ [API_KEY_KEY]: partial.gemini.apiKey });
+    payload[API_KEY_KEY] = updated.gemini.apiKey;
   }
-
-  // Không lưu trực tiếp apiKey trong settings blob
-  const toSave = { ...updated };
-  toSave.gemini = { ...updated.gemini, apiKey: "" };
-
-  await chrome.storage.local.set({ [SETTINGS_KEY]: toSave });
+  await chrome.storage.local.set(payload);
 }
 
 export async function getApiKey(): Promise<string> {

@@ -52,13 +52,17 @@ class ContentController {
       chrome.runtime.onMessage.addListener(
         (msg: PopupToTab, _sender, sendResponse: (res: any) => void) => {
           if (!msg || typeof msg !== "object") return;
+          // Content script chạy ở MỌI frame (all_frames). Popup chỉ nhận câu trả lời ĐẦU TIÊN, nên frame
+          // không có session KHÔNG được trả lời — nếu không, iframe quảng cáo/chat sẽ báo "không có video".
+          // Không frame nào có session → popup nhận lastError → hiển thị "chưa có video được hỗ trợ".
+          if (!this.session) return;
           if (msg.type === "tab.status") {
             sendResponse(this.getTabStatus());
             return false;
           }
           if (msg.type === "tab.export") {
-            this.handleExport(msg.format, msg.mode);
-            sendResponse({ ok: true });
+            const ok = this.handleExport(msg.format, msg.mode);
+            sendResponse({ ok });
             return false;
           }
         }
@@ -201,9 +205,9 @@ class ContentController {
   private handleExport(
     format: "srt" | "vtt",
     mode: "source" | "target" | "bilingual"
-  ): void {
+  ): boolean {
     const items = [...(this.session?.getItems() ?? [])];
-    if (items.length === 0) return;
+    if (items.length === 0) return false;
 
     const content = buildSubtitleContent(items, format, mode);
     const rawTitle = this.session?.track?.title || document.title || "subtitles";
@@ -220,6 +224,7 @@ class ContentController {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
   }
 
   private onVideo(video: HTMLVideoElement | null): void {
