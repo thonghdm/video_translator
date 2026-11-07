@@ -441,8 +441,10 @@ export interface Settings {
 - Các lớp lỗi: `RateLimitedError` (có `retryAfterMs`), `NetworkError`, `CanceledError`, `DisabledError`, `EmptyTranslationError`, `InvalidResponseIdsError`.
 - `classifyErr(e): ErrKind` port từ `classifyErr`. Quy tắc:
   - Hủy bởi người dùng (signal của request bị abort) → `canceled`.
-  - Hết timeout (AbortController của timeout) → `other`, giống Go coi `DeadlineExceeded` là `other`.
+  - Hết timeout → `other`, giống Go coi `DeadlineExceeded` là `other`. **Bắt buộc** tạo timeout bằng `AbortSignal.timeout(ms)` gộp với signal hủy qua `AbortSignal.any([cancelSignal, AbortSignal.timeout(ms)])`. Timeout sẽ ném lỗi `TimeoutError`, còn hủy ném `AbortError`, nhờ vậy phân biệt được hai trường hợp. Không tự viết timeout bằng `AbortController.abort()`, vì khi đó timeout cũng ra `AbortError` và breaker sẽ bỏ qua nó.
   - `TypeError` của `fetch` (mất mạng/DNS) → `network`.
+- `toBreakerOutcome(e): BreakerOutcome` (kiểu nằm ở `shared/breaker.ts`): `RateLimitedError` → `{kind:"blocked", retryAfterMs}`; `EmptyTranslationError` → `{kind:"empty"}`; `canceled` → `{kind:"canceled"}`; `network` → `{kind:"network"}`; còn lại → `{kind:"other"}`. **Breaker không nhận `Error` thô** và không dò chuỗi message.
+- `TokenBucket.acquire()` trả về `"ok" | "timeout" | "aborted"`. `"timeout"` → `ErrRateLimitedLocal`: chuyển tầng, **không** report cho breaker. `"aborted"` → `canceled`: dừng, không chuyển tầng.
 
 **`engines/gtx.ts`** [P]
 - Mọi request đi qua `apiFetch()` (Mục 3.4, `credentials: "omit"`).

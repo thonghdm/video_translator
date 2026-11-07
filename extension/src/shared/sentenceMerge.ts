@@ -32,12 +32,21 @@ export function mergeAsrCues(
   const maxDurSec = opts.maxDurSec ?? 7;
   const maxChars = opts.maxChars ?? 120;
 
-  const merged: Cue[] = [];
-  let curStart = cues[0].start;
-  let curEnd = cues[0].end;
-  let curText = cues[0].text.trim();
+  // Bỏ qua các cue rỗng ở đầu danh sách (tránh câu gộp bị dư dấu cách ở đầu)
+  let first = 0;
+  while (first < cues.length && !cues[first].text.trim()) {
+    first++;
+  }
+  if (first >= cues.length) {
+    return [];
+  }
 
-  for (let i = 1; i < cues.length; i++) {
+  const merged: Cue[] = [];
+  let curStart = cues[first].start;
+  let curEnd = cues[first].end;
+  let curText = cues[first].text.trim();
+
+  for (let i = first + 1; i < cues.length; i++) {
     const cue = cues[i];
     const nextText = cue.text.trim();
     if (!nextText) {

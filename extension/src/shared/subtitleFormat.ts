@@ -183,8 +183,13 @@ export function parseSrtOrVttBilingual(content: string): SubtitleItem[] {
     let targetText = "";
 
     if (rawLines.length >= 2 && isVietnamese(rawLines[rawLines.length - 1])) {
+      // File song ngữ (Desktop _bilingual.srt): dòng cuối là tiếng Việt
       targetText = rawLines[rawLines.length - 1];
       sourceText = rawLines.slice(0, -1).join(" ");
+    } else if (rawLines.every((l) => isVietnamese(l))) {
+      // File chỉ có tiếng Việt (Desktop .vi.srt): coi là bản dịch, không đem đi dịch lại
+      targetText = rawLines.join(" ");
+      sourceText = "";
     } else {
       sourceText = rawLines.join(" ");
       targetText = "";
@@ -258,5 +263,6 @@ export function buildSubtitleContent(
     idx++;
   }
 
-  return lines.join("\n");
+  // Go ghi mỗi block là "idx\ntime\ntext\n\n" -> file kết thúc bằng "\n\n" (khớp byte-to-byte)
+  return lines.length === 0 ? "" : lines.join("\n") + "\n";
 }

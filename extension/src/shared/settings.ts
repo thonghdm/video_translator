@@ -87,12 +87,18 @@ export const DEFAULT_SETTINGS: Settings = {
   },
 };
 
+/** Bản sao sâu của DEFAULT_SETTINGS (không bao giờ trả về tham chiếu tới object mặc định) */
+export function cloneDefaults(): Settings {
+  return structuredClone(DEFAULT_SETTINGS);
+}
+
 /**
- * Deep merge hai object để đảm bảo các giá trị thiếu trong bản cũ được bù từ defaults
+ * Deep merge: luôn trả về object MỚI (deep clone), không chia sẻ tham chiếu với target/source,
+ * để việc gán settings.gemini.apiKey sau đó không làm bẩn DEFAULT_SETTINGS.
  */
 export function deepMerge<T>(target: T, source: unknown): T {
-  if (!source || typeof source !== "object") return { ...target };
-  const result = { ...target } as Record<string, unknown>;
+  if (!source || typeof source !== "object") return structuredClone(target);
+  const result = structuredClone(target) as Record<string, unknown>;
   const src = source as Record<string, unknown>;
 
   for (const key of Object.keys(src)) {
@@ -108,7 +114,7 @@ export function deepMerge<T>(target: T, source: unknown): T {
       ) {
         result[key] = deepMerge(tVal, sVal);
       } else {
-        result[key] = sVal;
+        result[key] = structuredClone(sVal);
       }
     }
   }
@@ -123,7 +129,7 @@ const API_KEY_KEY = "geminiApiKey";
  */
 export async function loadSettings(): Promise<Settings> {
   if (typeof chrome === "undefined" || !chrome.storage?.local) {
-    return { ...DEFAULT_SETTINGS };
+    return cloneDefaults();
   }
 
   const data = await chrome.storage.local.get([SETTINGS_KEY, API_KEY_KEY]);

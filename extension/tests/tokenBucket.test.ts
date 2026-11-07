@@ -50,10 +50,10 @@ describe("TokenBucket (Port từ gemini_test.go)", () => {
 
     const acquired = await tb.acquire(true, 1000);
     clearInterval(timer);
-    expect(acquired).toBe(true);
+    expect(acquired).toBe("ok");
   });
 
-  it("acquire: trả về false khi bị abort bởi AbortSignal", async () => {
+  it("acquire: trả về \"aborted\" khi bị abort bởi AbortSignal", async () => {
     let mockTime = 1000000;
     const tb = new TokenBucket(10, () => mockTime);
     tb.restore({ tokens: 0, lastRefillMs: mockTime });
@@ -61,8 +61,27 @@ describe("TokenBucket (Port từ gemini_test.go)", () => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 20);
 
+    const t0 = Date.now();
     const acquired = await tb.acquire(true, 1000, controller.signal);
-    expect(acquired).toBe(false);
+    expect(acquired).toBe("aborted");
+    expect(Date.now() - t0).toBeLessThan(500); // thức dậy ngay khi abort, không chờ hết 1000ms
+  });
+
+  it("acquire: signal đã abort từ trước -> \"aborted\" ngay, không tiêu token", async () => {
+    const tb = new TokenBucket(12, () => 1_000_000);
+    const c = new AbortController();
+    c.abort();
+    expect(await tb.acquire(true, 1000, c.signal)).toBe("aborted");
+    expect(tb.getTokens()).toBe(12);
+  });
+
+  it("acquire: đồng hồ đứng yên + hết token -> \"timeout\" (không treo vòng lặp)", async () => {
+    const frozen = 1_000_000;
+    const tb = new TokenBucket(12, () => frozen);
+    tb.restore({ tokens: 0, lastRefillMs: frozen });
+    const t0 = Date.now();
+    expect(await tb.acquire(false, 120)).toBe("timeout");
+    expect(Date.now() - t0).toBeLessThan(1000);
   });
 
   it("snapshot và restore", () => {

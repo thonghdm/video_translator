@@ -29,14 +29,24 @@ export interface BreakerSnapshot {
   backoffStep: number;
 }
 
-export interface RateLimitLike {
-  isRateLimit: true;
-  retryAfterMs?: number;
-}
+/**
+ * Kết quả của một request, đã được phân loại sẵn (Phase 2: engines/errors.ts → classifyErr).
+ * Breaker KHÔNG tự đoán loại lỗi bằng cách dò chuỗi message (dễ phân loại sai).
+ * Ánh xạ với breaker.go:
+ * - "ok"                → err == nil
+ * - "canceled", "empty" → context.Canceled / errEmptyTranslation: bỏ qua
+ * - "blocked"           → ErrRateLimited (429/403/503, captcha), kèm retryAfterMs nếu có
+ * - "network", "other"  → nhánh default (lỗi mạng, timeout, HTTP lỗi khác)
+ */
+export type BreakerOutcome =
+  | { kind: "ok" }
+  | { kind: "canceled" }
+  | { kind: "empty" }
+  | { kind: "blocked"; retryAfterMs?: number }
+  | { kind: "network" }
+  | { kind: "other" };
 
-export interface CanceledLike {
-  isCanceled: true;
-}
+export const OUTCOME_OK: BreakerOutcome = { kind: "ok" };
 
 export class CircuitBreaker {
   private blockedUntil = 0;
@@ -98,12 +108,12 @@ export class CircuitBreaker {
    * Report cập nhật trạng thái breaker sau khi thực hiện request.
    * Luôn giải phóng cờ probe khi isProbe == true.
    */
-  public report(err: unknown, isProbe: boolean): void {
+  public report(outcome: BreakerOutcome, isProbe: boolean): void {
     if (isProbe) {
       this.probing = false;
     }
 
-    if (!err) {
+    if (outcome.kind === "ok") {
       this.fails = 0;
       if (isProbe) {
         // Chỉ reset breaker và backoff khi request probe thành công
@@ -113,19 +123,19 @@ export class CircuitBreaker {
       return;
     }
 
-    // Bỏ qua lỗi canceled hoặc câu dịch rỗng
-    if (this.isCanceledError(err) || this.isEmptyError(err)) {
+    // Tua video / hủy tác vụ hoặc câu dịch rỗng: không phải lỗi của nhà cung cấp
+    if (outcome.kind === "canceled" || outcome.kind === "empty") {
       return;
     }
 
-    if (this.isRateLimitError(err)) {
+    if (outcome.kind === "blocked") {
       // Nếu breaker đã bị khóa hoặc đang half-open (blockedUntil != 0) và không phải probe thì bỏ qua
       if (!isProbe && this.blockedUntil !== 0) {
         return;
       }
 
-      const retryAfterMs = this.getRetryAfterMs(err);
-      if (retryAfterMs !== undefined && retryAfterMs > 0) {
+      const retryAfterMs = outcome.retryAfterMs;
+      if (typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
         let dur = retryAfterMs;
         // Đặt sàn tối thiểu 15s để tránh đóng-mở liên tục nếu Retry-After quá ngắn
         if (dur < 15 * 1000) {
@@ -165,7 +175,7 @@ export class CircuitBreaker {
       return;
     }
 
-    // Lỗi mạng hoặc timeout
+    // "network" | "other": lỗi mạng, timeout, HTTP lỗi khác (nhánh default của Go)
     if (isProbe) {
       this.blockedUntil = this.now() + this.config.probeFailCooldownMs;
     } else {
@@ -185,6 +195,15 @@ export class CircuitBreaker {
     return this.backoffStep;
   }
 
+  public getFails(): number {
+    return this.fails;
+  }
+
+  /** Chỉ dùng cho test: cờ probe half-open đang được giữ hay không */
+  public isProbing(): boolean {
+    return this.probing;
+  }
+
   public getConfig(): BreakerConfig {
     return { ...this.config };
   }
@@ -202,43 +221,5 @@ export class CircuitBreaker {
     this.fails = snapshot.fails || 0;
     this.backoffStep = snapshot.backoffStep || 0;
     this.probing = false;
-  }
-
-  private isRateLimitError(err: unknown): boolean {
-    if (typeof err === "object" && err !== null) {
-      if ((err as RateLimitLike).isRateLimit === true) return true;
-      const msg = String((err as Error).message || "");
-      if (msg.includes("429") || msg.toLowerCase().includes("rate limit")) return true;
-    }
-    return false;
-  }
-
-  private isCanceledError(err: unknown): boolean {
-    if (typeof err === "object" && err !== null) {
-      if ((err as CanceledLike).isCanceled === true) return true;
-      const name = (err as Error).name;
-      if (name === "AbortError" || name === "CanceledError") return true;
-      const msg = String((err as Error).message || "");
-      if (msg.toLowerCase().includes("abort") || msg.toLowerCase().includes("cancel")) return true;
-    }
-    return false;
-  }
-
-  private isEmptyError(err: unknown): boolean {
-    if (typeof err === "object" && err !== null) {
-      const msg = String((err as Error).message || "");
-      if (msg.includes("empty translation")) return true;
-    }
-    return false;
-  }
-
-  private getRetryAfterMs(err: unknown): number | undefined {
-    if (typeof err === "object" && err !== null) {
-      const ms = (err as RateLimitLike).retryAfterMs;
-      if (typeof ms === "number" && !isNaN(ms)) {
-        return ms;
-      }
-    }
-    return undefined;
   }
 }

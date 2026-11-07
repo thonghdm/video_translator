@@ -24,6 +24,7 @@ describe("Subtitle Engine - Pure Logic Tests", () => {
       target_text: "",
       translated: false,
       engine: null,
+      ignored: false,
     });
     expect(items[1].id).toBe(1);
     expect(items[1].source_text).toBe("World");

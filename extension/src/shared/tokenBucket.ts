@@ -8,6 +8,29 @@ export interface TokenBucketSnapshot {
   lastRefillMs: number;
 }
 
+export type AcquireResult = "ok" | "timeout" | "aborted";
+
+const POLL_MS = 40;
+
+/** Ngủ ms mili-giây; trả về true nếu bị abort trong lúc ngủ (thức dậy ngay khi abort) */
+function sleep(ms: number, signal?: AbortSignal): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(true);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(false);
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export class TokenBucket {
   private capacity: number;
   private tokens: number;
@@ -60,32 +83,36 @@ export class TokenBucket {
 
   /**
    * Chờ lấy token trong khoảng waitMs (poll mỗi 40ms, giống Go).
-   * Trả về true nếu lấy thành công, false nếu hết timeout hoặc bị abort.
+   * Kết quả tách bạch như Go:
+   * - "ok":      lấy được token
+   * - "timeout": hết thời gian chờ (Go: ErrRateLimitedLocal) -> tầng sau xử lý, KHÔNG phạt breaker
+   * - "aborted": bị hủy (Go: ctx.Err()) -> dừng ngay, không chuyển tầng
+   * Số vòng chờ tính theo số lần poll (không phụ thuộc đồng hồ inject), nên không thể treo
+   * khi test dùng đồng hồ giả đứng yên.
    */
   public async acquire(
     isTier1: boolean,
     waitMs = 3000,
     signal?: AbortSignal
-  ): Promise<boolean> {
-    if (this.tryAcquire(isTier1)) {
-      return true;
-    }
+  ): Promise<AcquireResult> {
     if (signal?.aborted) {
-      return false;
+      return "aborted";
+    }
+    if (this.tryAcquire(isTier1)) {
+      return "ok";
     }
 
-    const start = this.now();
-    while (this.now() - start < waitMs) {
-      if (signal?.aborted) {
-        return false;
+    const maxPolls = Math.max(1, Math.ceil(waitMs / POLL_MS));
+    for (let i = 0; i < maxPolls; i++) {
+      const aborted = await sleep(POLL_MS, signal);
+      if (aborted) {
+        return "aborted";
       }
-      await new Promise((resolve) => setTimeout(resolve, 40));
       if (this.tryAcquire(isTier1)) {
-        return true;
+        return "ok";
       }
     }
-
-    return false;
+    return "timeout";
   }
 
   public getTokens(): number {

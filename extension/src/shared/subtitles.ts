@@ -4,6 +4,7 @@
  */
 
 import type { Cue, SubtitleItem } from "./types";
+import { isIgnoredSubtitle } from "./text";
 
 export type { SubtitleItem };
 
@@ -20,6 +21,7 @@ export function cuesToItems(cues: Cue[]): SubtitleItem[] {
     target_text: "",
     translated: false,
     engine: null,
+    ignored: isIgnoredSubtitle(cue.text),
   }));
 }
 
