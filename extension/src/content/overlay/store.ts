@@ -23,6 +23,8 @@ export interface OverlayState {
   offset: number;
   /** Có track phụ đề nào đang nạp không */
   hasTrack: boolean;
+  /** Chuột đang ở trên vùng video (để hiện MiniToolbar; tự tắt sau ~2.5s đứng yên) */
+  hover: boolean;
   /** Tiêu đề track phụ đề đang phát */
   trackTitle?: string;
 }
@@ -45,6 +47,7 @@ export class OverlayStore {
       visible: true,
       offset: 0,
       hasTrack: false,
+      hover: false,
       ...initial,
     };
   }

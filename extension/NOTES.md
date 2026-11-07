@@ -266,3 +266,28 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
 - [ ] Options: gõ RPM = 1000 rồi Tab ra ngoài thì ô về 60. Xóa trắng ô rồi gõ số mới không bị nhảy giá trị. Esc thì hủy.
 - [ ] Options: danh sách track gần đây, xóa từng track, xóa toàn bộ; sau đó mở lại video thì phụ đề được dịch lại.
 - [ ] Xuất 6 loại file từ popup: tên file đúng `<tiêu đề>.<vi|en|bilingual>.<srt|vtt>`.
+
+---
+
+## Sửa lỗi review Phase 8 (nhập/xuất, MiniToolbar, độ lệch, phím tắt)
+| # | Lỗi | Cách sửa | Test |
+|---|---|---|---|
+| 1 | Mỗi lần **nhập file**, `startSession` tạo thêm `OverlayHost` + `NativeTrackFallback` + bộ kiểm tra quảng cáo, trong khi bản cũ vẫn còn → **2 overlay chồng nhau** (phụ đề hiện 2 lần) và nhiều track "SubTrans" | Mỗi video có đúng 1 **view** (`ensureView`: store + overlay + native + theo dõi quảng cáo). Session có `sessionScope` riêng; nhập file chỉ thay session | `phase8-fixes` › nhập file |
+| 2 | Phím **V/G/H bị chặn trên MỌI trang web** (listener ở `window` của mọi frame, kể cả trang không có video) → hỏng phím tắt của Gmail, GitHub, trình soạn thảo… | Chỉ xử lý khi frame đang có phụ đề (`session` + `hasTrack`); bỏ qua phím giữ (`repeat`) | phím tắt |
+| 3 | Đang gõ trong ô nhập nằm trong **Shadow DOM** (web component) vẫn bị cướp phím, vì `e.target` bị retarget về host | `isTypingEvent` dùng `composedPath()`; tính cả `role="textbox"` | phím tắt |
+| 4 | MiniToolbar **luôn hiện** ở góc trên phải mọi video trên mọi trang, chặn nút điều khiển của trang; video không có phụ đề thì hiện thông báo thường trực | Toolbar chỉ hiện khi rê chuột lên vùng video (tự ẩn sau 2.5s đứng yên), khi có thông báo, hoặc khi menu đang mở. Lúc ẩn dùng `pointer-events: none`. Bỏ thông báo thường trực "Chưa có phụ đề" | toolbar |
+| 5 | `Session.start()` **chờ `cache.load` xong mới hiện phụ đề**. SW không phản hồi thì chờ hết timeout Port (30s), kể cả với file vừa nhập đã có bản dịch | Hiện phụ đề ngay sau khi có cue. `cache.load` có timeout 3s; quá hạn coi như miss và dịch bình thường | nhập file |
+| 6 | Độ lệch (G/H) **không áp** khi fullscreen chính thẻ `<video>` (native fallback) | `NativeTrackFallback.setOffset()` dời cue theo `start − offset` | native offset |
+| 7 | File rỗng/sai định dạng vẫn "nạp thành công", xóa mất phụ đề đang có; file rất lớn | Kiểm tra số cue > 0 trước khi thay session; giới hạn 5MB; thông báo lỗi rõ ràng. Đọc file bằng `FileReader` khi không có `File.text()` | file không hợp lệ |
+| 8 | Content script nạp lại trên cùng trang để lại listener và overlay của bản cũ | `ContentController.dispose()`; khi khởi động thì dọn bản cũ (`globalThis.__subtransContent`) | (gián tiếp) |
+| 9 | Độ lệch đọc từ storage không được kiểm tra | Chỉ nhận số hữu hạn, kẹp trong ±30s | — |
+
+### Cần xác nhận thủ công (Load unpacked)
+- [ ] Mở `dev/test-page.html`, chọn video **không** kèm track (bỏ thẻ `<track>` hoặc dùng trang khác): rê chuột lên video thì toolbar hiện, rời chuột thì ẩn.
+- [ ] Nhập `_bilingual.srt` do bản Desktop xuất: hiện song ngữ ngay, chấm chỉ báo "File", không gọi API. Nhập thêm file khác: **chỉ 1** hộp phụ đề.
+- [ ] Nhập file chỉ có tiếng Anh: tự dịch sang tiếng Việt.
+- [ ] Nhập file `.txt` bất kỳ: báo "không có dòng phụ đề hợp lệ", phụ đề đang có vẫn giữ nguyên.
+- [ ] `G`/`H` chỉnh lệch ±0.1s có toast; F5 thì độ lệch được giữ theo track. Thử cả khi fullscreen chính thẻ video.
+- [ ] `V` xoay vòng 4 chế độ. Gõ chữ `v` trong ô bình luận YouTube: **không** đổi chế độ.
+- [ ] Trên một trang **không có video** (ví dụ GitHub, Gmail): phím `g`/`v` của trang vẫn chạy bình thường.
+- [ ] Xuất 6 loại file từ MiniToolbar: bản Desktop mở đúng.

@@ -30,6 +30,25 @@ export interface SessionOptions {
   onSourceChanged?: () => void;
 }
 
+/** Thời gian chờ cache.load tối đa; service worker không phản hồi thì vẫn hiện phụ đề và dịch bình thường */
+export const CACHE_LOAD_TIMEOUT_MS = 3000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => resolve(null), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
 export function computeSourceHash(cues: Array<{ text: string }>): string {
   return fnv1a32(cues.map((c) => c.text).join("\n"));
 }
@@ -127,17 +146,19 @@ export class Session {
     } else {
       this.items = cuesToItems(cues);
     }
+    // Hiện phụ đề gốc (và bản dịch có sẵn trong file nhập) NGAY — không chờ cache/background
+    this.setItems(this.items);
 
-    // 1. Kiểm tra cache IndexedDB qua BackgroundPort
+    // 1. Kiểm tra cache IndexedDB qua BackgroundPort (tối đa CACHE_LOAD_TIMEOUT_MS; quá hạn coi như miss)
     if (this.opts.port && cues.length > 0) {
       try {
         const reqId = newReqId();
-        const cacheRes = await this.opts.port.request<Extract<B2C, { type: "cache.loaded" }>>({
+        const cacheRes = await withTimeout(this.opts.port.request<Extract<B2C, { type: "cache.loaded" }>>({
           type: "cache.load",
           reqId,
           trackKey: this.source.track.trackKey,
           sourceHash: this.sourceHash,
-        });
+        }), CACHE_LOAD_TIMEOUT_MS);
 
         if (this.disposer.isDisposed) return 0;
 

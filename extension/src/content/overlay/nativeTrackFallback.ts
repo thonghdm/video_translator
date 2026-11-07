@@ -31,6 +31,8 @@ export class NativeTrackFallback {
   private active = false;
   private lastItems: SubtitleItem[] = [];
   private lastMode: SubtitleMode = "bilingual";
+  /** Độ lệch giống overlay: dòng hiện khi currentTime + offset ∈ [start, end] → cue tại [start − offset, end − offset] */
+  private offset = 0;
 
   constructor(private readonly video: HTMLVideoElement) {}
 
@@ -48,6 +50,12 @@ export class NativeTrackFallback {
     this.lastItems = items;
     this.lastMode = mode;
     if (this.active) this.render(items, mode);
+  }
+
+  public setOffset(offset: number): void {
+    if (offset === this.offset) return;
+    this.offset = offset;
+    if (this.active) this.render(this.lastItems, this.lastMode);
   }
 
   public disable(): void {
@@ -79,8 +87,11 @@ export class NativeTrackFallback {
     for (const it of items) {
       const text = cueTextForMode(it, mode);
       if (!text || !(it.end_sec > it.start_sec)) continue;
+      const start = Math.max(0, it.start_sec - this.offset);
+      const end = it.end_sec - this.offset;
+      if (!(end > start)) continue;
       try {
-        track.addCue(new Ctor(it.start_sec, it.end_sec, text));
+        track.addCue(new Ctor(start, end, text));
       } catch {
         /* cue lỗi thì bỏ qua */
       }

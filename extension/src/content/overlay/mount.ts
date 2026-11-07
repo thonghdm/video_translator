@@ -120,6 +120,7 @@ export class OverlayHost {
 
     this.setupPositioning();
     this.setupFullscreen();
+    this.setupHover();
   }
 
   /** Rect vùng player (dùng cho kéo thả) */
@@ -164,6 +165,45 @@ export class OverlayHost {
     window.addEventListener("resize", schedule, { passive: true, signal });
     // Dự phòng cho thay đổi layout không phát sự kiện (đổi theater mode, sidebar...)
     this.disposer.interval(schedule, 1000);
+  }
+
+  /**
+   * Phát hiện chuột ở trên vùng video để hiện MiniToolbar (giống thanh điều khiển của player).
+   * Nghe pointermove ở document (passive, gom theo rAF) và so với rect của video — vì nhiều player phủ
+   * một lớp div lên trên <video> nên sự kiện không tới chính thẻ video.
+   */
+  private setupHover(): void {
+    const doc = this.video.ownerDocument;
+    let idle: ReturnType<typeof setTimeout> | null = null;
+    let pending = false;
+    let lastX = 0;
+    let lastY = 0;
+    const HIDE_AFTER_MS = 2500;
+    const setHover = (on: boolean) => this.store.setState({ hover: on });
+    const check = () => {
+      pending = false;
+      if (this.disposer.isDisposed) return;
+      const r = this.video.getBoundingClientRect();
+      const inside = lastX >= r.left && lastX <= r.right && lastY >= r.top && lastY <= r.bottom;
+      if (idle) clearTimeout(idle);
+      idle = null;
+      setHover(inside);
+      if (inside) idle = setTimeout(() => setHover(false), HIDE_AFTER_MS);
+    };
+    const onMove = (e: PointerEvent) => {
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (pending) return;
+      pending = true;
+      raf(check);
+    };
+    const { signal } = this.disposer;
+    doc.addEventListener("pointermove", onMove, { capture: true, passive: true, signal });
+    doc.addEventListener("pointerdown", onMove, { capture: true, passive: true, signal });
+    doc.addEventListener("pointerleave", () => setHover(false), { signal });
+    this.disposer.add(() => {
+      if (idle) clearTimeout(idle);
+    });
   }
 
   private setupFullscreen(): void {

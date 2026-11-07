@@ -15,6 +15,8 @@ import {
 } from "lucide-react";
 
 export interface MiniToolbarProps {
+  /** Hiện toolbar (chuột trên video hoặc có thông báo). Ẩn thì không chặn click của trang. */
+  revealed?: boolean;
   offset: number;
   message: string | null;
   hasTrack: boolean;
@@ -25,6 +27,7 @@ export interface MiniToolbarProps {
 }
 
 export function MiniToolbar({
+  revealed = true,
   offset,
   message,
   hasTrack,
@@ -67,7 +70,13 @@ export function MiniToolbar({
   return (
     <div
       ref={menuRef}
-      className="absolute top-3 right-3 z-30 flex flex-col items-end gap-1.5 pointer-events-auto select-none"
+      data-testid="st-toolbar"
+      data-revealed={revealed || showExportMenu || showShortcutsHelp || Boolean(message) ? "true" : "false"}
+      className={`absolute top-3 right-3 z-30 flex flex-col items-end gap-1.5 select-none transition-opacity duration-200 ${
+        revealed || showExportMenu || showShortcutsHelp || message
+          ? "opacity-100 pointer-events-auto"
+          : "opacity-0 pointer-events-none"
+      }`}
     >
       {/* Thanh công cụ chính */}
       <div className="flex items-center gap-1.5 bg-black/85 hover:bg-black/95 backdrop-blur-md border border-white/15 rounded-lg px-2 py-1 shadow-2xl text-xs text-neutral-200 transition-all opacity-80 hover:opacity-100">

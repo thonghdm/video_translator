@@ -37,12 +37,21 @@ const log = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.log("[SubTrans]", ...args);
 };
 
-function isTypingTarget(target: EventTarget | null): boolean {
-  if (!target || !(target instanceof HTMLElement)) return false;
-  const tag = target.tagName.toLowerCase();
+function isEditable(el: EventTarget | null | undefined): boolean {
+  if (!el || !(el instanceof HTMLElement)) return false;
+  const tag = el.tagName.toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select") return true;
-  if (target.isContentEditable || target.getAttribute("contenteditable") === "true") return true;
-  return false;
+  return el.isContentEditable || el.getAttribute("contenteditable") === "true" || el.getAttribute("role") === "textbox";
+}
+
+/**
+ * Người dùng đang gõ chữ? Dùng composedPath() vì e.target bị "retarget" về host khi ô nhập nằm trong
+ * Shadow DOM (ví dụ ô bình luận/tìm kiếm của nhiều trang) — chỉ xét e.target sẽ chặn nhầm phím khi gõ.
+ */
+export function isTypingEvent(e: Pick<KeyboardEvent, "target" | "composedPath">): boolean {
+  const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+  if (path.length > 0) return path.some((n) => isEditable(n));
+  return isEditable(e.target);
 }
 
 class ContentController {
@@ -53,6 +62,10 @@ class ContentController {
   private port: BackgroundPort | null = null;
   private store: OverlayStore | null = null;
   private session: Session | null = null;
+  /** View của video hiện tại (store + overlay + native fallback + theo dõi quảng cáo) — tạo ĐÚNG 1 lần mỗi video */
+  private view: { store: OverlayStore; overlay: OverlayHost; native: NativeTrackFallback } | null = null;
+  /** Scope riêng của session: đổi nguồn phụ đề (nhập file) chỉ thay session, KHÔNG tạo overlay mới */
+  private sessionScope: Disposer | null = null;
   private currentVideo: HTMLVideoElement | null = null;
   private generation = 0;
   private offset = 0;
@@ -66,8 +79,7 @@ class ContentController {
 
     // Lắng nghe các thông điệp từ Popup (tab.status, tab.export)
     if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
-      chrome.runtime.onMessage.addListener(
-        (msg: PopupToTab, _sender, sendResponse: (res: any) => void) => {
+      const onPopupMessage = (msg: PopupToTab, _sender: unknown, sendResponse: (res: unknown) => void) => {
           if (!msg || typeof msg !== "object") return;
           // Content script chạy ở MỌI frame (all_frames). Popup chỉ nhận câu trả lời ĐẦU TIÊN, nên frame
           // không có session KHÔNG được trả lời — nếu không, iframe quảng cáo/chat sẽ báo "không có video".
@@ -82,11 +94,19 @@ class ContentController {
             sendResponse({ ok });
             return false;
           }
-        }
-      );
+          return undefined;
+        };
+      chrome.runtime.onMessage.addListener(onPopupMessage);
+      this.root.add(() => chrome.runtime.onMessage.removeListener?.(onPopupMessage));
     }
 
     if (isEnabledFor(this.settings, location.hostname)) this.activate();
+  }
+
+  /** Dọn toàn bộ (listener, overlay, session, port) — dùng khi content script được nạp lại trên cùng trang */
+  public dispose(): void {
+    this.deactivate();
+    this.root.disposeAll();
   }
 
   private applySettings(next: Settings): void {
@@ -128,8 +148,11 @@ class ContentController {
     // Đăng ký phím tắt bàn phím (V: đổi chế độ phụ đề, G/H: chỉnh lệch thời gian)
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!this.settings.shortcuts?.enabled) return;
-      if (e.ctrlKey || e.altKey || e.metaKey) return;
-      if (isTypingTarget(e.target)) return;
+      // Chỉ khi frame này đang có phụ đề — nếu không, V/G/H sẽ bị chặn trên MỌI trang web
+      // (Gmail, GitHub, trình soạn thảo... đều dùng các phím này).
+      if (!this.session || !this.store || !this.store.getState().hasTrack) return;
+      if (e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
+      if (isTypingEvent(e)) return;
 
       const key = e.key.toLowerCase();
       if (key === "v") {
@@ -175,6 +198,7 @@ class ContentController {
     const trackKey = this.session?.track?.trackKey;
     this.offset = Math.round((this.offset + delta) * 10) / 10;
     this.store?.setState({ offset: this.offset });
+    this.view?.native.setOffset(this.offset);
     const sign = this.offset > 0 ? "+" : "";
     this.store?.flashToast(`Độ lệch phụ đề: ${sign}${this.offset.toFixed(1)}s`);
 
@@ -187,6 +211,7 @@ class ContentController {
     const trackKey = this.session?.track?.trackKey;
     this.offset = 0;
     this.store?.setState({ offset: 0 });
+    this.view?.native.setOffset(0);
     this.store?.flashToast("Độ lệch phụ đề: 0.0s");
 
     if (trackKey && typeof chrome !== "undefined" && chrome.storage?.local) {
@@ -199,9 +224,10 @@ class ContentController {
       try {
         const key = `offset:${trackKey}`;
         const data = await chrome.storage.local.get(key);
-        if (typeof data[key] === "number") {
-          this.offset = data[key];
+        if (typeof data[key] === "number" && Number.isFinite(data[key])) {
+          this.offset = Math.max(-30, Math.min(30, data[key]));
           this.store?.setState({ offset: this.offset });
+          this.view?.native.setOffset(this.offset);
           return;
         }
       } catch {
@@ -210,45 +236,78 @@ class ContentController {
     }
     this.offset = 0;
     this.store?.setState({ offset: 0 });
+    this.view?.native.setOffset(0);
   }
 
   private async handleImportFile(file: File): Promise<void> {
-    if (!this.currentVideo || !this.active) return;
+    const video = this.currentVideo;
+    const scope = this.videoScope;
+    if (!video || !this.active || !scope) return;
+    const gen = this.generation;
     try {
+      if (file.size > 5 * 1024 * 1024) throw new Error("File quá lớn (> 5MB)");
       const source = await ImportedSubtitleSource.fromFile(file);
+      if (gen !== this.generation) return; // người dùng đã chuyển video trong lúc đọc file
+      const n = (await source.load()).length;
+      if (n === 0) {
+        source.dispose();
+        this.store?.flashToast("File không có dòng phụ đề hợp lệ (.srt/.vtt)");
+        return;
+      }
+      this.startSession(video, this.pickAdapter(), source, scope, gen);
       this.store?.flashToast(`Đã nạp phụ đề: ${file.name}`);
-      const scope = this.videoScope ?? this.active.child();
-      this.videoScope = scope;
-      this.startSession(this.currentVideo, this.pickAdapter(), source, scope, this.generation);
     } catch (err) {
-      this.store?.flashToast("Lỗi đọc file phụ đề");
+      this.store?.flashToast(`Lỗi đọc file phụ đề${err instanceof Error ? `: ${err.message}` : ""}`);
       if (import.meta.env.DEV) console.warn("[SubTrans] import file lỗi:", err);
     }
   }
 
-  private mountOverlayWithoutSession(
-    video: HTMLVideoElement,
-    adapter: SiteAdapter,
-    scope: Disposer,
-    _gen: number
-  ): void {
-    if (this.store) return;
+  /**
+   * Video chưa có phụ đề: chỉ dựng view để người dùng có thể "Nhập .srt/.vtt" từ MiniToolbar
+   * (toolbar chỉ hiện khi rê chuột lên video) — KHÔNG hiện thông báo thường trực trên mọi video của mọi trang.
+   */
+  private mountOverlayWithoutSession(video: HTMLVideoElement, adapter: SiteAdapter, scope: Disposer): void {
+    const view = this.ensureView(video, adapter, scope);
+    view.store.setState({ hasTrack: false, message: null });
+  }
+
+  /** Dựng view cho video (1 lần). Dọn theo scope của video. */
+  private ensureView(video: HTMLVideoElement, adapter: SiteAdapter, scope: Disposer) {
+    if (this.view) return this.view;
     const store = (this.store = new OverlayStore({
       mode: this.settings.subtitleMode,
       style: this.settings.style,
-      hasTrack: false,
-      message: "Chưa có phụ đề (bấm Nhập để thêm .srt/.vtt)",
+      offset: this.offset,
     }));
-
+    const native = new NativeTrackFallback(video);
+    native.setOffset(this.offset);
     const overlay = new OverlayHost(video, store, {
       container: adapter.getOverlayContainer(video),
+      onNativeFallback: (on) => {
+        if (on) native.enable([...(this.session?.getItems() ?? [])], store.getState().mode);
+        else native.disable();
+      },
       onImportFile: (file) => void this.handleImportFile(file),
       onExport: (format, mode) => this.handleExport(format, mode),
       onOffsetChange: (delta) => this.adjustOffset(delta),
       onOffsetReset: () => this.resetOffset(),
     });
-    scope.add(() => overlay.dispose());
+    // Ẩn overlay khi YouTube đang phát quảng cáo (ad-showing)
+    if (typeof adapter.isAdPlaying === "function") {
+      const checkAd = () => store.setState({ visible: !(adapter.isAdPlaying?.() ?? false) });
+      checkAd();
+      scope.interval(checkAd, 500);
+    }
+    const view = { store, overlay, native };
+    this.view = view;
+    scope.add(() => {
+      overlay.dispose();
+      native.dispose();
+      if (this.view === view) this.view = null;
+    });
+    return view;
   }
+
 
   private deactivate(): void {
     this.active?.disposeAll();
@@ -301,8 +360,10 @@ class ContentController {
     if (isYouTubeHost(location.hostname)) setYouTubeNativeCaptionsHidden(false, document);
     this.session?.dispose();
     this.session = null;
-    this.videoScope?.disposeAll();
+    this.sessionScope = null;
+    this.videoScope?.disposeAll(); // dọn session, overlay, native, theo dõi quảng cáo
     this.videoScope = null;
+    this.view = null;
     this.store?.dispose();
     this.store = null;
   }
@@ -381,7 +442,7 @@ class ContentController {
       if (gen !== this.generation || this.session) return;
       if (sources.length === 0) {
         log("video chưa có nguồn phụ đề phù hợp");
-        this.mountOverlayWithoutSession(video, adapter, scope, gen);
+        this.mountOverlayWithoutSession(video, adapter, scope);
         return;
       }
       this.startSession(video, adapter, sources[0], scope, gen);
@@ -402,30 +463,17 @@ class ContentController {
     scope: Disposer,
     gen: number
   ): void {
-    if (this.session) {
-      this.session.dispose();
-      this.session = null;
-    }
+    // Thay session cũ (nếu có) — overlay/store/native của video được DÙNG LẠI
+    this.sessionScope?.disposeAll();
+    this.sessionScope = null;
 
+    const view = this.ensureView(video, adapter, scope);
+    const store = view.store;
+    store.setState({ hasTrack: true, trackTitle: source.track.title, message: null, item: null });
     void this.loadSavedOffset(source.track.trackKey);
 
-    const store = (this.store =
-      this.store ??
-      new OverlayStore({
-        mode: this.settings.subtitleMode,
-        style: this.settings.style,
-      }));
-    store.setState({
-      hasTrack: true,
-      trackTitle: source.track.title,
-      offset: this.offset,
-      message: null,
-    });
-
-    const native = new NativeTrackFallback(video);
-    scope.add(() => native.dispose());
-
-    const session = new Session(video, source, store, native, {
+    const sessionScope = (this.sessionScope = scope.child());
+    const session = new Session(video, source, store, view.native, {
       port: this.getPort(),
       settings: this.settings,
       getOffset: () => this.offset,
@@ -438,29 +486,12 @@ class ContentController {
             },
     });
     this.session = session;
-
-    const overlay = new OverlayHost(video, store, {
-      container: adapter.getOverlayContainer(video),
-      onNativeFallback: (on) => {
-        if (on) native.enable([...session.getItems()], store.getState().mode);
-        else native.disable();
-      },
-      onImportFile: (file) => void this.handleImportFile(file),
-      onExport: (format, mode) => this.handleExport(format, mode),
-      onOffsetChange: (delta) => this.adjustOffset(delta),
-      onOffsetReset: () => this.resetOffset(),
+    sessionScope.add(() => {
+      session.dispose();
+      if (this.session === session) this.session = null;
+      if (this.sessionScope === sessionScope) this.sessionScope = null;
     });
-    scope.add(() => overlay.dispose());
-
-    // Kiểm tra và tự động ẩn overlay khi YouTube đang phát quảng cáo (ad-showing)
-    if (typeof adapter.isAdPlaying === "function") {
-      const checkAd = () => {
-        const ad = adapter.isAdPlaying?.() ?? false;
-        store.setState({ visible: !ad });
-      };
-      checkAd();
-      scope.interval(checkAd, 500);
-    }
+    if (view.native.isActive) view.native.enable([...session.getItems()], store.getState().mode);
 
     session
       .start()
@@ -481,7 +512,16 @@ class ContentController {
 
 // Chỉ chạy khi có DOM (an toàn với môi trường test)
 if (typeof document !== "undefined" && typeof chrome !== "undefined" && chrome.runtime?.id) {
-  void new ContentController().init().catch((err) => {
+  // Content script có thể bị nạp lại trên cùng trang (tiêm lại, extension cập nhật): dọn bản cũ trước
+  const g = globalThis as unknown as { __subtransContent?: { dispose(): void } };
+  try {
+    g.__subtransContent?.dispose();
+  } catch {
+    /* bản cũ thuộc context đã mất */
+  }
+  const controller = new ContentController();
+  g.__subtransContent = controller;
+  void controller.init().catch((err) => {
     if (import.meta.env.DEV) console.warn("[SubTrans] content init lỗi:", err);
   });
 }

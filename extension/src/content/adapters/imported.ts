@@ -35,8 +35,7 @@ export class ImportedSubtitleSource implements SubtitleSource {
   }
 
   public static async fromFile(file: File): Promise<ImportedSubtitleSource> {
-    const text = await file.text();
-    return new ImportedSubtitleSource(file.name, text);
+    return new ImportedSubtitleSource(file.name, await readFileText(file));
   }
 
   public async load(): Promise<Cue[]> {
@@ -50,4 +49,17 @@ export class ImportedSubtitleSource implements SubtitleSource {
   public dispose(): void {
     // Không có tài nguyên mạng hay event listener cần giải phóng
   }
+}
+
+/** Đọc nội dung file dạng UTF-8 (File.text() nếu có, nếu không dùng FileReader) */
+export function readFileText(file: Blob): Promise<string> {
+  if (typeof (file as Blob & { text?: () => Promise<string> }).text === "function") {
+    return file.text();
+  }
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result ?? ""));
+    r.onerror = () => reject(r.error ?? new Error("Không đọc được file"));
+    r.readAsText(file, "utf-8");
+  });
 }

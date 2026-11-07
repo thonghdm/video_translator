@@ -53,6 +53,7 @@ export function OverlayApp({
       {/* MiniToolbar ở góc trên phải */}
       {s.visible && !s.nativeFallback && (
         <MiniToolbar
+          revealed={s.hover}
           offset={s.offset}
           message={s.message}
           hasTrack={s.hasTrack}
