@@ -180,21 +180,25 @@ describe("DriveIndex", () => {
     // List view: [data-id] mang thuộc tính aria-label
     const listRow1 = doc.createElement("div");
     listRow1.setAttribute("data-id", "file_video_001_id_123456");
-    listRow1.setAttribute("aria-label", "001 Introduction.mp4");
+    listRow1.setAttribute("data-tooltip", "001 Introduction.mp4" + " Không xác định"); listRow1.textContent = "001 Introduction.mp4";
     doc.body.appendChild(listRow1);
 
     const listRow2 = doc.createElement("div");
     listRow2.setAttribute("data-id", "file_sub_001_en_id_123456");
-    listRow2.setAttribute("aria-label", "001 Introduction_en.srt");
+    listRow2.setAttribute("data-tooltip", "001 Introduction_en.srt" + " Không xác định"); listRow2.textContent = "001 Introduction_en.srt";
     doc.body.appendChild(listRow2);
 
-    // Grid view: [data-id] có tên trong text con hoặc sub-selector
+    // Grid view (DOM thật): gridcell[data-id] có aria-label kèm nhãn loại file; tên sạch ở div con [data-tooltip]
     const gridItem = doc.createElement("div");
     gridItem.setAttribute("data-id", "file_video_002_id_123456");
-    const nameSpan = doc.createElement("span");
-    nameSpan.className = "drive-item-name";
-    nameSpan.textContent = "002 Getting Started.mp4";
-    gridItem.appendChild(nameSpan);
+    gridItem.setAttribute("role", "gridcell");
+    gridItem.setAttribute("aria-label", "002 Getting Started.mp4 Video Thông tin khác (Alt + →)");
+    const nameDiv = doc.createElement("div");
+    nameDiv.setAttribute("data-id", "file_video_002_id_123456");
+    nameDiv.setAttribute("data-tooltip", "002 Getting Started.mp4 Video");
+    nameDiv.textContent = "002 Getting Started.mp4";
+    gridItem.appendChild(nameDiv);
+    gridItem.appendChild(doc.createTextNode("Thao tác khác"));
     doc.body.appendChild(gridItem);
 
     const index = new DriveIndex(doc, () => currentUrl);
@@ -207,19 +211,19 @@ describe("DriveIndex", () => {
     // ID sai regex
     const rowBadId = doc.createElement("div");
     rowBadId.setAttribute("data-id", "short");
-    rowBadId.setAttribute("aria-label", "Valid Name.mp4");
+    rowBadId.setAttribute("data-tooltip", "Valid Name.mp4" + " Không xác định"); rowBadId.textContent = "Valid Name.mp4";
     doc.body.appendChild(rowBadId);
 
     // Tên rỗng
     const rowEmptyName = doc.createElement("div");
     rowEmptyName.setAttribute("data-id", "valid_id_1234567890123");
-    rowEmptyName.setAttribute("aria-label", "    ");
+    rowEmptyName.setAttribute("data-tooltip", "    " + " Không xác định"); rowEmptyName.textContent = "    ";
     doc.body.appendChild(rowEmptyName);
 
     // Tên > 512 ký tự
     const rowLongName = doc.createElement("div");
     rowLongName.setAttribute("data-id", "valid_id_long_name_1234");
-    rowLongName.setAttribute("aria-label", "a".repeat(513));
+    rowLongName.setAttribute("data-tooltip", "a".repeat(513) + " Không xác định"); rowLongName.textContent = "a".repeat(513);
     doc.body.appendChild(rowLongName);
 
     const index = new DriveIndex(doc, () => currentUrl);
@@ -232,7 +236,7 @@ describe("DriveIndex", () => {
     for (let i = 0; i < 5005; i++) {
       const row = doc.createElement("div");
       row.setAttribute("data-id", `file_id_${String(i).padStart(6, "0")}_1234567`);
-      row.setAttribute("aria-label", `File_${i}.mp4`);
+      row.setAttribute("data-tooltip", `File_${i}.mp4` + " Không xác định"); row.textContent = `File_${i}.mp4`;
       doc.body.appendChild(row);
     }
 
@@ -247,7 +251,7 @@ describe("DriveIndex", () => {
 
     const row1 = doc.createElement("div");
     row1.setAttribute("data-id", "file_initial_id_123456");
-    row1.setAttribute("aria-label", "Initial.mp4");
+    row1.setAttribute("data-tooltip", "Initial.mp4" + " Không xác định"); row1.textContent = "Initial.mp4";
     doc.body.appendChild(row1);
 
     const index = new DriveIndex(doc, () => currentUrl);
@@ -259,7 +263,7 @@ describe("DriveIndex", () => {
     // Thêm phần tử mới vào DOM
     const row2 = doc.createElement("div");
     row2.setAttribute("data-id", "file_second_id_123456");
-    row2.setAttribute("aria-label", "Second.mp4");
+    row2.setAttribute("data-tooltip", "Second.mp4" + " Không xác định"); row2.textContent = "Second.mp4";
     doc.body.appendChild(row2);
 
     // Cho microtask của MutationObserver chạy để đặt timer debounce
@@ -293,7 +297,7 @@ describe("DriveIndex", () => {
   it("đổi folderId khi scan → map cũ bị xóa và nạp lại từ folder mới", () => {
     const row1 = doc.createElement("div");
     row1.setAttribute("data-id", "folder1_file_id_123456");
-    row1.setAttribute("aria-label", "Folder1.mp4");
+    row1.setAttribute("data-tooltip", "Folder1.mp4" + " Không xác định"); row1.textContent = "Folder1.mp4";
     doc.body.appendChild(row1);
 
     const index = new DriveIndex(doc, () => currentUrl);
@@ -306,7 +310,7 @@ describe("DriveIndex", () => {
 
     const row2 = doc.createElement("div");
     row2.setAttribute("data-id", "folder2_file_id_123456");
-    row2.setAttribute("aria-label", "Folder2.mp4");
+    row2.setAttribute("data-tooltip", "Folder2.mp4" + " Không xác định"); row2.textContent = "Folder2.mp4";
     doc.body.appendChild(row2);
 
     index.scan();
@@ -322,12 +326,12 @@ describe("DriveIndex", () => {
   it("lookup theo videoDocId khớp phụ đề", () => {
     const rowVideo = doc.createElement("div");
     rowVideo.setAttribute("data-id", "video_doc_id_12345678");
-    rowVideo.setAttribute("aria-label", "001 Setup.mp4");
+    rowVideo.setAttribute("data-tooltip", "001 Setup.mp4" + " Không xác định"); rowVideo.textContent = "001 Setup.mp4";
     doc.body.appendChild(rowVideo);
 
     const rowSub = doc.createElement("div");
     rowSub.setAttribute("data-id", "sub_doc_id_1234567890");
-    rowSub.setAttribute("aria-label", "001 Setup_en.srt");
+    rowSub.setAttribute("data-tooltip", "001 Setup_en.srt" + " Không xác định"); rowSub.textContent = "001 Setup_en.srt";
     doc.body.appendChild(rowSub);
 
     const index = new DriveIndex(doc, () => currentUrl);
@@ -352,7 +356,7 @@ describe("DriveIndex", () => {
 
     const rowSub = doc.createElement("div");
     rowSub.setAttribute("data-id", "sub_arch_id_1234567890");
-    rowSub.setAttribute("aria-label", "002 Architecture_en.srt");
+    rowSub.setAttribute("data-tooltip", "002 Architecture_en.srt" + " Không xác định"); rowSub.textContent = "002 Architecture_en.srt";
     doc.body.appendChild(rowSub);
 
     const index = new DriveIndex(doc, () => currentUrl);
@@ -379,23 +383,23 @@ describe("DriveIndex", () => {
     // 2 video cùng base name "Lesson 1" (.mp4 và .mkv)
     const rowV1 = doc.createElement("div");
     rowV1.setAttribute("data-id", "video1_id_1234567890");
-    rowV1.setAttribute("aria-label", "Lesson 1.mp4");
+    rowV1.setAttribute("data-tooltip", "Lesson 1.mp4" + " Không xác định"); rowV1.textContent = "Lesson 1.mp4";
     doc.body.appendChild(rowV1);
 
     const rowV2 = doc.createElement("div");
     rowV2.setAttribute("data-id", "video2_id_1234567890");
-    rowV2.setAttribute("aria-label", "Lesson 1.mkv");
+    rowV2.setAttribute("data-tooltip", "Lesson 1.mkv" + " Không xác định"); rowV2.textContent = "Lesson 1.mkv";
     doc.body.appendChild(rowV2);
 
     const rowSub = doc.createElement("div");
     rowSub.setAttribute("data-id", "sub_id_1234567890123");
-    rowSub.setAttribute("aria-label", "Lesson 1_en.srt");
+    rowSub.setAttribute("data-tooltip", "Lesson 1_en.srt" + " Không xác định"); rowSub.textContent = "Lesson 1_en.srt";
     doc.body.appendChild(rowSub);
 
-    // Tiêu đề preview là "Lesson 1" (không có đuôi video)
+    // Tiêu đề preview thật của Drive luôn kèm đuôi file (đã kiểm chứng 09/11/2026)
     const titleEl = doc.createElement("div");
     titleEl.setAttribute("role", "heading");
-    titleEl.textContent = "Lesson 1";
+    titleEl.textContent = "Lesson 1.mp4";
     doc.body.appendChild(titleEl);
 
     const index = new DriveIndex(doc, () => currentUrl);
@@ -410,7 +414,7 @@ describe("DriveIndex", () => {
 
     const row1 = doc.createElement("div");
     row1.setAttribute("data-id", "file1_id_1234567890");
-    row1.setAttribute("aria-label", "Test.mp4");
+    row1.setAttribute("data-tooltip", "Test.mp4" + " Không xác định"); row1.textContent = "Test.mp4";
     doc.body.appendChild(row1);
 
     const index = new DriveIndex(doc, () => currentUrl);
@@ -423,7 +427,7 @@ describe("DriveIndex", () => {
     // Thêm DOM sau khi dispose
     const row2 = doc.createElement("div");
     row2.setAttribute("data-id", "file2_id_1234567890");
-    row2.setAttribute("aria-label", "Test2.mp4");
+    row2.setAttribute("data-tooltip", "Test2.mp4" + " Không xác định"); row2.textContent = "Test2.mp4";
     doc.body.appendChild(row2);
 
     vi.advanceTimersByTime(500);
@@ -445,12 +449,12 @@ describe("Drive Top Frame Bootstrap & Message Handling", () => {
     mockDoc = document.implementation.createHTMLDocument("Bootstrap Test");
     const row = mockDoc.createElement("div");
     row.setAttribute("data-id", "video_id_1234567890");
-    row.setAttribute("aria-label", "001 Hello.mp4");
+    row.setAttribute("data-tooltip", "001 Hello.mp4" + " Không xác định"); row.textContent = "001 Hello.mp4";
     mockDoc.body.appendChild(row);
 
     const sub = mockDoc.createElement("div");
     sub.setAttribute("data-id", "sub_id_123456789012");
-    sub.setAttribute("aria-label", "001 Hello_en.srt");
+    sub.setAttribute("data-tooltip", "001 Hello_en.srt" + " Không xác định"); sub.textContent = "001 Hello_en.srt";
     mockDoc.body.appendChild(sub);
 
     mockWin = {

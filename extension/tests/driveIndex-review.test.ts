@@ -12,7 +12,7 @@ const FOLDER_B = "https://drive.google.com/drive/folders/folderBBBBBBBBBB";
 function row(doc: Document, id: string, name: string): HTMLElement {
   const el = doc.createElement("div");
   el.setAttribute("data-id", id);
-  el.setAttribute("aria-label", name);
+  el.setAttribute("data-tooltip", name + " Không xác định"); el.textContent = name;
   doc.body.appendChild(el);
   return el;
 }
@@ -91,18 +91,50 @@ describe("DriveIndex — các lỗi review", () => {
     expect(index.size).toBe(0);
   });
 
-  it("tên lấy từ aria-label, rồi data-tooltip (không dùng nhầm 'aria-label' làm selector)", () => {
+  it("DOM thật của Drive (list + grid): tên lấy từ text của [data-tooltip], không lấy tooltip/aria-label/text cả dòng", () => {
     const doc = document.implementation.createHTMLDocument("d");
-    const el = doc.createElement("div");
-    el.setAttribute("data-id", "file_tip_1234567890");
-    el.setAttribute("data-tooltip", "Tip.srt");
-    el.innerHTML = "<span>Tip.srt</span><span>me · 2 KB</span>";
-    doc.body.appendChild(el);
+    // List view: tr[role=row][data-id] không có aria-label; text cả dòng gồm loại file, chủ sở hữu, ngày, dung lượng
+    doc.body.innerHTML = `
+      <table><tbody>
+        <tr role="row" data-id="file_vid_1234567890">
+          <td><div data-id="file_vid_1234567890"></div>
+              <div data-id="file_vid_1234567890" data-tooltip="001 Introduction.mp4 Video">001 Introduction.mp4</div></td>
+          <td>Video Đã chia sẻ sharedevops4 29 thg 5 22 MB</td>
+        </tr>
+        <tr role="row" data-id="file_sub_1234567890">
+          <td><div data-id="file_sub_1234567890"></div>
+              <div data-id="file_sub_1234567890" data-tooltip="001 Introduction_en.srt Không xác định">001 Introduction_en.srt</div></td>
+          <td>Đã chia sẻ sharedevops4 29 thg 5 4 KB</td>
+        </tr>
+      </tbody></table>
+      <div role="gridcell" data-id="file_grid_1234567890" aria-label="002 Pods_en.srt Không xác định Thông tin khác (Alt + →)">
+        <div data-id="file_grid_1234567890"></div>
+        <div data-id="file_grid_1234567890" data-tooltip="002 Pods_en.srt Không xác định">002 Pods_en.srt</div>Thao tác khác
+      </div>`;
     const index = new DriveIndex(doc, () => FOLDER_A);
     index.scan();
-    // không lấy textContent gộp cả metadata
-    const res = (index as unknown as { map: Map<string, string> }).map.get("file_tip_1234567890");
-    expect(res).toBe("Tip.srt");
+    const map = (index as unknown as { map: Map<string, string> }).map;
+    expect(map.get("file_vid_1234567890")).toBe("001 Introduction.mp4");
+    expect(map.get("file_sub_1234567890")).toBe("001 Introduction_en.srt");
+    expect(map.get("file_grid_1234567890")).toBe("002 Pods_en.srt");
+    expect(index.lookup("file_vid_1234567890")).toMatchObject({ result: "match", id: "file_sub_1234567890" });
+  });
+
+  it("tiêu đề preview nằm trong iframe /viewer/ cùng origin; heading không có đuôi video bị bỏ qua", () => {
+    const doc = document.implementation.createHTMLDocument("d");
+    doc.body.innerHTML = `
+      <div role="heading">Thư mục và chế độ xem</div><div role="heading">Đường dẫn thư mục</div>
+      <div data-id="file_sub_1234567890" data-tooltip="001 Introduction_en.srt Không xác định">001 Introduction_en.srt</div>`;
+    const viewer = doc.createElement("iframe");
+    viewer.setAttribute("src", "https://drive.google.com/viewer/main?origin=https://drive.google.com&source=10");
+    doc.body.appendChild(viewer);
+    const vdoc = document.implementation.createHTMLDocument("viewer");
+    vdoc.body.innerHTML = `<div role="dialog"><span role="heading" aria-level="2">001 Introduction.mp4</span>
+      <div role="heading">Bản chép lời</div><div role="heading">Chương</div></div>`;
+    Object.defineProperty(viewer, "contentDocument", { value: vdoc });
+    const index = new DriveIndex(doc, () => FOLDER_A);
+    index.scan();
+    expect(index.lookup()).toMatchObject({ ok: true, result: "match", id: "file_sub_1234567890" });
   });
 
   it("tiêu đề preview: ưu tiên heading trong [role=dialog], không lấy nhầm heading tên thư mục", () => {

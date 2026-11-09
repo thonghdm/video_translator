@@ -552,3 +552,20 @@ Kiểm chứng guard thật: thêm `globalThis.__leak = { credentials: "include"
 - Mục 13 nói Udemy hoạt động, trước đó (Phase 9) chưa từng kiểm chứng Udemy.
 → Chỉ coi 13 mục là PASS khi chính người dùng chạy trên Drive thật. Cho tới lúc đó giữ "Google Drive preview" trong mục "Chưa kiểm chứng trên trang thật" của README.
 Kết quả: typecheck OK, 412/412 test, build + verify-dist OK.
+
+## Phase 9.5 – Sửa lỗi "không dịch được trên Drive" (kiểm chứng trên Drive thật, 09/11/2026)
+
+Đo trực tiếp DOM Drive (giao diện tiếng Việt, thư mục khóa học AWS, list + grid view). Kết quả D0 trước đó **sai** ở các điểm then chốt:
+
+| Điểm | D0 ghi | Thực tế |
+|---|---|---|
+| T3 tên file | `aria-label` của `[data-id]` | List view: dòng `tr[role=row][data-id]` **không có** `aria-label`. Grid view: `aria-label` = "tên + nhãn loại + Thông tin khác (Alt + →)". `data-tooltip` = "tên + nhãn loại" ("001 Introduction_en.srt Không xác định", "001 Introduction.mp4 Video"). Tên sạch = **textContent của phần tử `[data-tooltip]`** |
+| T4 tiêu đề preview | `[role="heading"]` ở top frame | Top frame chỉ có heading "Thư mục và chế độ xem", "Đường dẫn thư mục". Preview mở trong iframe **cùng origin** `drive.google.com/viewer/main`; tên file là `span[role=heading][aria-level=2]` trong iframe đó |
+| T1/T2 frame video | `/file/d/<id>/preview` hoặc `?id=` | top → `drive.google.com/viewer/main` → `youtube.googleapis.com/embed/` (query không có id file) → video. Không lấy được docId → luôn khớp theo tiêu đề preview |
+
+**Nguyên nhân không dịch được:** (1) map tên lưu "001 Introduction_en.srt Không xác định" (lấy từ data-tooltip / text cả dòng) → không entry nào kết thúc bằng `.srt` → `no_match` im lặng; (2) tiêu đề preview đọc nhầm "Đường dẫn thư mục" → không có tên video.
+
+**Sửa (`driveIndex.ts`):** tên = textContent của `[data-tooltip]` (ưu tiên phần tử cùng `data-id`), không dùng text cả dòng; tiêu đề = `[role=heading]` có đuôi video, tìm trong iframe `/viewer/` trước rồi top frame. Bỏ bản thử sửa chưa commit (quét mọi `div` tìm JSON, dùng class bị làm rối `.a6Vetd`, `.ndfHFb-…`). Fixture test đổi sang DOM thật (list + grid + iframe viewer).
+**Kiểm chứng:** chạy bundle `DriveIndex` đã build trên trang Drive thật với preview `001 Introduction.mp4` đang mở → `match` `001 Introduction_en.srt` (bỏ qua `_vi.srt`).
+**Chưa kiểm chứng được (cần chạy extension thật):** SW fetch có cookie (T7), YouTube adapter trong iframe embed của Drive, hiển thị overlay.
+Kết quả: typecheck OK, 413/413 test, build + verify-dist OK.

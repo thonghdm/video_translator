@@ -24,12 +24,40 @@ import {
 } from "../../shared/settings";
 import { getFolderId, isDriveTopFrame } from "./driveFrame";
 
+/**
+ * Selector Drive — ĐÃ KIỂM CHỨNG trên Drive thật (09/11/2026, giao diện tiếng Việt, list + grid view):
+ * - Mỗi file có nhiều phần tử cùng `data-id` (dòng `tr[role=row]` / `gridcell`, và các div con).
+ * - TÊN SẠCH nằm ở textContent của phần tử có `data-tooltip` (vd "001 Introduction_en.srt").
+ *   KHÔNG dùng giá trị data-tooltip ("001 Introduction_en.srt Không xác định") hay aria-label
+ *   (grid: "… Không xác định Thông tin khác (Alt + →)"; list: không có) — chúng kèm nhãn loại file theo ngôn ngữ.
+ * - Preview mở trong iframe CÙNG ORIGIN `drive.google.com/viewer/main`; tên file là
+ *   `[role="heading"]` (aria-level 2) bên trong iframe đó. Video nằm sâu hơn trong iframe youtube.googleapis.com/embed.
+ */
 export const DRIVE_SELECTORS = {
   row: "[data-id]",
   rowId: "data-id",
-  rowName: "aria-label",
-  previewTitle: '[role="heading"], [data-tooltip][aria-level="1"], .drive-preview-title',
+  rowName: "[data-tooltip]",
+  previewFrame: 'iframe[src*="/viewer/"]',
+  previewTitle: '[role="heading"]',
 } as const;
+
+function hasVideoExt(name: string): boolean {
+  const n = normalizeName(name);
+  return VIDEO_EXTS.some((ext) => n.endsWith(ext));
+}
+
+/** Tên sạch của file: textContent của phần tử `[data-tooltip]` (ưu tiên phần tử cùng data-id). Không lấy text cả dòng. */
+function readRowName(el: Element, id: string): string {
+  let nameEl: Element | null = el.matches(DRIVE_SELECTORS.rowName) ? el : null;
+  if (!nameEl) {
+    const all = el.querySelectorAll(DRIVE_SELECTORS.rowName);
+    for (let i = 0; i < all.length && !nameEl; i++) {
+      if (all[i].getAttribute(DRIVE_SELECTORS.rowId) === id) nameEl = all[i];
+    }
+    nameEl = nameEl ?? all[0] ?? null;
+  }
+  return (nameEl?.textContent || "").trim();
+}
 
 export class DriveIndex {
   private disposer = new Disposer();
@@ -108,11 +136,7 @@ export class DriveIndex {
       const id = el.getAttribute(DRIVE_SELECTORS.rowId);
       if (!id || !DRIVE_ID_RE.test(id)) continue;
 
-      // rowName là TÊN THUỘC TÍNH (không phải selector). Fallback: data-tooltip, rồi text của phần tử.
-      let name = el.getAttribute(DRIVE_SELECTORS.rowName) || el.getAttribute("data-tooltip") || "";
-      if (name.trim() === "") name = el.textContent || "";
-
-      name = name.trim();
+      const name = readRowName(el, id);
       if (!name || name.length > 512) continue;
 
       this.map.set(id, name);
@@ -137,11 +161,8 @@ export class DriveIndex {
     }
 
     if (!videoName) {
-      const titleEl = this.findPreviewTitle();
-      const rawTitle = (titleEl?.getAttribute("aria-label") || titleEl?.textContent || "").trim();
-      if (rawTitle) {
-        videoName = rawTitle;
-      }
+      const title = this.findPreviewTitle();
+      if (title) videoName = title;
     }
 
     if (!videoName) {
@@ -189,16 +210,30 @@ export class DriveIndex {
   }
 
   /**
-   * `[role="heading"]` có ở nhiều nơi (tên thư mục, tiêu đề mục...). Ưu tiên heading nằm trong preview
-   * (`[role="dialog"]`); không có thì lấy phần tử khớp CUỐI CÙNG (overlay preview được chèn sau danh sách).
+   * Tên video đang mở trong preview. Tìm `[role="heading"]` có tên kết thúc bằng đuôi video:
+   * trước hết trong iframe preview cùng origin (`/viewer/`), sau đó ở top frame. Heading khác
+   * ("Đường dẫn thư mục", "Bản chép lời"…) không có đuôi video nên tự bị loại.
    */
-  private findPreviewTitle(): Element | null {
-    const all = this.doc.querySelectorAll(DRIVE_SELECTORS.previewTitle);
-    if (all.length === 0) return null;
-    for (let i = all.length - 1; i >= 0; i--) {
-      if (all[i].closest('[role="dialog"]')) return all[i];
+  private findPreviewTitle(): string | null {
+    const docs: Document[] = [];
+    const frames = this.doc.querySelectorAll<HTMLIFrameElement>(DRIVE_SELECTORS.previewFrame);
+    for (let i = 0; i < frames.length; i++) {
+      try {
+        const d = frames[i].contentDocument;
+        if (d) docs.push(d);
+      } catch {
+        /* khác origin */
+      }
     }
-    return all[all.length - 1];
+    docs.push(this.doc);
+    for (const d of docs) {
+      const hs = d.querySelectorAll(DRIVE_SELECTORS.previewTitle);
+      for (let i = hs.length - 1; i >= 0; i--) {
+        const t = (hs[i].textContent || "").trim();
+        if (t && hasVideoExt(t)) return t;
+      }
+    }
+    return null;
   }
 
   public dispose(): void {
