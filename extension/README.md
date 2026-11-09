@@ -11,6 +11,7 @@ Tiện ích cho các trình duyệt nhân Chromium (Chrome, Edge, Brave, Cốc C
 **Nguồn phụ đề gốc (tiếng Anh)**
 - **YouTube** (`/watch`): phụ đề thủ công hoặc tự động (auto-CC). Tiện ích tự lấy phụ đề kể cả khi bạn đang tắt CC, và ẩn phụ đề gốc của YouTube để không bị hiện 2 lớp.
 - **Video HTML5 có `<track>`** trên mọi trang web.
+- **Google Drive preview:** tự nhận file phụ đề nằm cùng thư mục (xem chi tiết ở mục riêng bên dưới).
 - **Nhập file `.srt` / `.vtt`** cho video không có phụ đề (rê chuột lên video → nút **Nhập**). Đọc được file song ngữ `_bilingual.srt` do bản Desktop xuất (hiện song ngữ ngay, không gọi API) và file chỉ có tiếng Việt.
 
 **Dịch** (chọn trong popup)
@@ -32,6 +33,45 @@ Tiện ích cho các trình duyệt nhân Chromium (Chrome, Edge, Brave, Cốc C
 - Trang Options: thông số nâng cao (RPM, timeout, batch, giới hạn cache…), danh sách video đã lưu, xóa cache.
 
 **Xuất phụ đề:** `.srt` hoặc `.vtt` × (Song ngữ / Tiếng Việt / Tiếng Anh), từ popup hoặc từ MiniToolbar trên video. Tên file: `<tiêu đề>.<bilingual|vi|en>.<srt|vtt>`. Định dạng giống hệt bản Desktop xuất, nên hai bên mở được file của nhau.
+
+---
+
+## Google Drive: tự nhận phụ đề
+
+Khi mở preview video trong thư mục trên Google Drive (ví dụ: `001.mp4`), SubTrans tự động quét danh sách file cùng thư mục trong DOM, tìm file phụ đề tương ứng, tải ngầm và hiển thị song ngữ ngay khi bạn phát video.
+
+### Quy tắc đặt tên file phụ đề
+
+File phụ đề phải nằm **cùng thư mục** và có **cùng tên** với video (không phân biệt hoa thường), cộng thêm một trong các hậu tố sau. Ví dụ với `001 Intro.mp4`:
+
+| Ưu tiên | Hậu tố | Ví dụ | Hành vi |
+|:---:|---|---|---|
+| 1 | `_bilingual`, `.bilingual`, `-bilingual`, ` bilingual` | `001 Intro_bilingual.srt` | File song ngữ (bản Desktop xuất): hiện ngay, **không gọi API dịch** |
+| 2 | `_en`, `.en`, `-en`, ` en`, `_eng`, `.eng`, `_english`, `.english`, ` (english)`, ` [english]`, `.en-US`, `_en-US`, `-en-US`, `_en_US`, `.en_US` | `001 Intro_en.srt` | Phụ đề tiếng Anh, tự dịch sang tiếng Việt |
+| 3 | (không hậu tố) | `001 Intro.srt` | Coi là tiếng Anh, tự dịch |
+
+- Nhận cả `.srt` và `.vtt`; cùng mức ưu tiên thì `.srt` được chọn trước.
+- File tiếng Việt (`_vi`, `.vi`, `-vi`, `_vie`, `.vie`) **không** được tự nhận. Muốn dùng thì bấm **Nhập**.
+- Tên phải khớp toàn bộ: `001 Intro.mp4` không nhận nhầm `0010 Intro_en.srt` hay `001 Intro part2_en.srt`.
+
+### Thứ tự ưu tiên nguồn phụ đề
+
+1. **Nhập file thủ công (`user`):** Ưu tiên tuyệt đối. Khi bạn đã bấm **Nhập** file từ máy, tiện ích sẽ không bao giờ để bất kỳ nguồn tự động nào đè lên.
+2. **Google Drive tự nhận (`sidecar`):** Tự động nhận file phụ đề nằm cạnh video; có thể thay thế track mặc định của player.
+3. **Player HTML5 / YouTube (`adapter`):** Track phụ đề có sẵn trong trình phát video.
+
+### Cách tắt tính năng
+
+Nếu không muốn tiện ích tự tìm và tải phụ đề trên Drive:
+1. Nhấp chuột phải vào biểu tượng SubTrans → chọn **Tùy chọn** (Options).
+2. Bỏ chọn ô **"Tự nhận phụ đề .srt cùng thư mục trên Google Drive"**.
+3. Khi tắt, SubTrans hoàn toàn không gửi request tìm kiếm hay tải file trên Google Drive. Bạn vẫn có thể dùng nút **Nhập** file thủ công.
+
+### Giới hạn
+
+- **Thư mục dài (> 50–60 file):** Do Google Drive ảo hóa danh sách DOM (chỉ dựng các phần tử đang hiển thị trên màn hình), nếu video nằm ở cuối thư mục chưa được cuộn tới, file `.srt` có thể chưa xuất hiện trong DOM. Bạn chỉ cần cuộn danh sách xuống trước khi mở video để Drive nạp các phần tử vào DOM.
+- **Thư mục cấm tải xuống:** Với các thư mục chia sẻ có chính sách hạn chế quyền tải xuống của người xem, Google Drive chặn tải file phụ đề (báo toast *"Không có quyền tải phụ đề – bấm Nhập để chọn file"*). Trong trường hợp này, bạn có thể tự nhập file phụ đề từ máy.
+- **File trùng tên:** Nếu trong cùng thư mục có nhiều file phụ đề cùng khớp với video ở cùng mức ưu tiên, SubTrans sẽ dừng và báo toast *"Có nhiều file trùng tên – bấm Nhập để chọn"* để tránh nạp sai nội dung.
 
 ---
 
@@ -101,7 +141,7 @@ Mặc định giới hạn 12 request/phút cho Gemini, để không vượt h�
 
 - **Dùng cá nhân (Load unpacked).** Chưa đưa lên Chrome Web Store. Chế độ `google` dùng endpoint Google Translate không chính thức (`translate_a/single?client=gtx`), có thể bị chặn bất cứ lúc nào. Nếu muốn publish cần đổi engine và thu hẹp quyền (xem `PLAN.md` › R9).
 - **Quyền rộng:** tiện ích chạy trên mọi trang (`<all_urls>`) để tìm `<video>`. Trên trang không có phụ đề, tiện ích không hiện gì và không chiếm phím tắt.
-- **Quyền riêng tư:** câu phụ đề được gửi tới Google Translate hoặc Gemini để dịch. Gemini API key được lưu trong `chrome.storage.local` trên máy bạn, chỉ gửi tới `generativelanguage.googleapis.com` (qua header, không nằm trên URL), và không bao giờ được đưa vào trang web. Mọi request dịch đều **không gửi kèm cookie** đăng nhập Google của bạn.
+- **Quyền riêng tư:** câu phụ đề được gửi tới Google Translate hoặc Gemini để dịch. Gemini API key được lưu trong `chrome.storage.local` trên máy bạn, chỉ gửi tới `generativelanguage.googleapis.com` (qua header, không nằm trên URL), và không bao giờ được đưa vào trang web. Mọi request dịch đều **không gửi kèm cookie** đăng nhập Google của bạn. Trên Google Drive, SubTrans dùng phiên đăng nhập của bạn để tải file phụ đề nằm cùng thư mục với video đang xem. File chỉ được đọc trong tiện ích, không gửi đi nơi khác ngoài bước dịch như bình thường.
 - **YouTube:** không hỗ trợ Shorts và livestream đang phát (VOD của livestream đã kết thúc thì vẫn được). Video YouTube nhúng trên trang khác: phụ đề chỉ được lấy sau khi bấm play.
 - **Chưa kiểm chứng trên trang thật:** Google Drive preview, Udemy, Coursera, edX (xem `NOTES.md` › Phase 9 để tự kiểm tra). Nếu tiện ích không lấy được phụ đề trên các trang này, bạn vẫn dùng được nút **Nhập** `.srt`.
 - **Video có DRM** (Netflix, Disney+…) không lấy được phụ đề gốc.

@@ -761,9 +761,9 @@ export interface SiteAdapter {
 
 ---
 
-### Phase 9.5: Tự nhận `.srt` cùng thư mục trên Google Drive
+### Phase 9.5: Tự nhận `.srt` cùng thư mục trên Google Drive (đã hoàn thành)
 
-Chi tiết: xem `PLAN-drive-sidecar.md` (có khảo sát [T] bắt buộc trước khi code).
+Chi tiết: xem `PLAN-drive-sidecar.md` (đã hoàn thành D0–D6).
 
 ### Phase 10 (thử nghiệm, không bắt buộc): Video không có phụ đề → thu âm tab gửi Gemini
 - Quyền thêm: `tabCapture`, `offscreen`.

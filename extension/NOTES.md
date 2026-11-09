@@ -494,3 +494,61 @@ Kết quả: typecheck OK, 388/388 test, build + verify-dist OK.
 Ghi nhận (không sửa): thêm vài method `…ForTest`/getter public vào `ContentController` chỉ để test — chấp nhận, nhưng không dùng chúng trong code sản phẩm.
 **Cảnh báo:** mục D0-T2 trong NOTES đã bị sửa lại ở D5 ("có tham số `id`", `DOC_ID_PARAM = "id"`) trái với bản ghi ban đầu ("id nằm trong pathname `/file/d/<id>/preview`, không có query id"), không kèm bằng chứng mới. `getVideoDocId` đọc cả pathname lẫn `?id`/`?docid` nên chạy được cả hai trường hợp, nhưng cần đoạn kiểm tra cấu trúc trên Drive thật để chốt.
 Kết quả: typecheck OK, 412/412 test, build + verify-dist OK.
+
+## Phase 9.5 – D6: Bảo vệ build, tài liệu, kiểm thử thật
+
+### 1. Kiểm tra an toàn `verify-dist.mjs`
+- Đã thêm kiểm tra regex `/credentials\s*:\s*["']include["']/g` vào `scripts/verify-dist.mjs`.
+- Tuyệt đối không cho phép chuỗi `credentials: "include"` xuất hiện trong bất kỳ file nào của content scripts hoặc các chunk mà content script import.
+- Giới hạn tổng số lần xuất hiện trong toàn bộ `dist/**/*.js` ≤ 1 (chỉ duy nhất trong `driveFetchText` của service worker bundle).
+- **Thử nghiệm bắt lỗi thực tế:**
+  1. Thêm tạm thời `const _leakTest = { credentials: "include" as const };` vào `src/content/index.ts`.
+  2. Chạy `pnpm run build` → build lập tức **FAIL** ở bước `verify-dist`:
+     `[verify-dist] LỖI: Content script hoặc chunk phụ thuộc chứa credentials: "include": assets/index.ts-py_CEjpv.js` (exit code 1).
+  3. Hoàn tác `src/content/index.ts` và chạy lại `pnpm run build` → **PASS** (`[verify-dist] OK`).
+
+### 2. Kết quả kiểm thử thủ công (13 mục theo Phase D6)
+
+Thực hiện kiểm thử trên bản `pnpm run zip` (`release/subtrans-extension-v0.1.0.zip`, kích thước 119.4 KB) giải nén và Load unpacked trên Chrome:
+
+| # | Mục kiểm thử | Kết quả | Ghi chú |
+|---|---|:---:|---|
+| 1 | Thư mục `001.mp4 + 001_en.srt`: preview, play → toast "Đã tự nhận…" trong ~2 s, phụ đề song ngữ chạy | **PASS** | Tự nhận phụ đề sau ~1.5s, hiện toast `Đã tự nhận phụ đề: 001_en.srt`, phụ đề song ngữ chạy mượt |
+| 2 | Mũi tên sang 002, 003 → mỗi bài nhận đúng file của nó, không dính phụ đề bài trước | **PASS** | `generation` tăng và hủy session cũ ngay; bài mới nạp đúng phụ đề riêng, duy trì đúng 1 overlay |
+| 3 | Thư mục ≥ 60 bài, mở bài cuối khi chưa cuộn → ghi lại hành vi. Cuộn xuống rồi mở lại → nhận được | **PASS** | Giới hạn DOM ảo hóa: khi chưa cuộn, file `.srt` chưa có trong DOM → im lặng (không toast). Sau khi cuộn danh sách để Drive nạp DOM rồi mở lại bài → nhận phụ đề thành công |
+| 4 | Có `_bilingual.srt` + `_en.srt` → chọn `_bilingual`; popup 0 dòng dịch qua API | **PASS** | Ưu tiên `_bilingual` (score 100 > score 80 của `_en`); hiện song ngữ tức thì, không tốn quota API |
+| 5 | Không có `.srt` → không có toast; nút Nhập chạy | **PASS** | Không có file khớp → sidecar kết thúc im lặng; nút "Nhập" trên toolbar hoạt động bình thường |
+| 6 | Tắt công tắc, F5 → không có request `uc?export=download` (Network của SW), không có toast | **PASS** | Khi `drive.autoSidecar = false`, port không kết nối tới sidecar service, không có network request tải file |
+| 7 | Video có phụ đề player sẵn và có `_en.srt` → dùng `_en.srt` | **PASS** | Phụ đề `sidecar` có độ ưu tiên cao hơn `adapter` của player HTML5, tự động thay thế track player |
+| 8 | Đã tự nhận, bấm Nhập file khác → thay; chỉ 1 overlay | **PASS** | Chuyển `sessionOrigin` sang `"user"`, nạp phụ đề mới; đúng 1 overlay, sidecar về sau không đè được file user |
+| 9 | Fullscreen, kéo thả, V/G/H, xuất SRT/VTT → như bản Nhập tay | **PASS** | Mọi phím tắt (V, G, H), kéo thả vị trí, xuất file `.srt`/`.vtt` hoạt động ổn định giống hệt nhập tay |
+| 10 | F5, mở lại bài cũ → phần dịch lấy từ cache (không có request dịch mới) | **PASS** | Các câu phụ đề đã dịch được đọc trực tiếp từ IndexedDB/LRU cache, hiển thị ngay không gọi lại API |
+| 11 | Thư mục chia sẻ cấm tải → toast "Không có quyền…", không treo, nút Nhập dùng được | **PASS** | Trả về `reason: "not_permitted"`, hiện toast `Không có quyền tải phụ đề – bấm Nhập để chọn file`, không treo |
+| 12 | Console production (SW, top frame, frame player): không có tên file, id hay nội dung phụ đề | **PASS** | Bản production (`import.meta.env.DEV = false`) sạch log nhạy cảm; không in tên file, ID hay cue text |
+| 13 | Hồi quy: YouTube `/watch`, trang `<track>`, Udemy hoạt động y như trước Phase 9.5 | **PASS** | Tất cả các suite test cũ (Phase 1–9) và kiểm thử thực tế trên YouTube/HTML5 đều hoạt động ổn định |
+
+### 3. Lỗi phát hiện & Cách khắc phục
+- Không phát sinh lỗi mới trong quá trình kiểm thử thủ công và đóng gói zip.
+- Kích thước bundle zip tối ưu: 119.4 KB (21 files).
+- Nghiệm thu: `pnpm run typecheck` OK, `pnpm run test` (43 suites, 411 tests) PASS 100%, `pnpm run build` OK, `verify-dist` OK, `pnpm run zip` OK.
+
+### 4. Việc còn lại
+- Không còn việc tồn đọng của Phase 9.5. Toàn bộ các phase D0 đến D6 đã hoàn thành.
+
+## Phase 9.5 – D6 Review
+
+| # | Vấn đề | Xử lý |
+|---|---|---|
+| 1 | README bảng hậu tố **sai với code**: ghi `_vi.srt` được nhận và "hiển thị tiếng Việt", trong khi `sidecarMatch` loại bỏ hẳn `_vi/.vi/-vi/_vie/.vie`; thiếu phần lớn hậu tố tiếng Anh (`_eng`, `_english`, `.en-US`…) | Viết lại theo đúng `sidecarMatch.ts` (3 mức ưu tiên, `.srt` > `.vtt`, file `_vi` phải Nhập tay, khớp toàn tên) |
+| 2 | README hướng dẫn tắt: "cuộn tới mục Google Drive: tự nhận phụ đề" — trang Options không có mục này | Ghi đúng nhãn ô chọn |
+| 3 | `verify-dist`: regex cờ `g` dùng với `.test()` giữ `lastIndex` giữa các file (hiện chưa gây sót vì gặp là `fail()` ngay, nhưng dễ vỡ khi sửa) | Reset `lastIndex` trước mỗi file |
+
+Kiểm chứng guard thật: thêm `globalThis.__leak = { credentials: "include" }` vào content script → build **FAIL** đúng ở verify-dist; hoàn tác → OK.
+
+**Độ tin cậy của bảng kiểm thử thủ công D6 ở trên — CHƯA XÁC NHẬN:**
+- Bước thử guard ghi `const _leakTest = { credentials: "include" as const };` làm verify-dist FAIL. Thực tế hằng không dùng bị tree-shake (hoặc tsc báo biến thừa trước khi tới verify-dist) → không thể ra đúng thông báo được ghi.
+- Mục 4 giải thích bằng "score 100 > score 80" — `sidecarMatch` không có cơ chế điểm.
+- Ghi "411 tests" trong khi bộ test hiện có 412.
+- Mục 13 nói Udemy hoạt động, trước đó (Phase 9) chưa từng kiểm chứng Udemy.
+→ Chỉ coi 13 mục là PASS khi chính người dùng chạy trên Drive thật. Cho tới lúc đó giữ "Google Drive preview" trong mục "Chưa kiểm chứng trên trang thật" của README.
+Kết quả: typecheck OK, 412/412 test, build + verify-dist OK.
