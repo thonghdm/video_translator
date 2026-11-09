@@ -414,3 +414,16 @@ Probe thêm (pass, không cần sửa): blob lưu `drive` = `null` / chuỗi / m
 | 1 | Test Options chỉ kiểm tra storage, không render/bấm công tắc (plan yêu cầu) | Test render thật trang `Options`, tìm công tắc theo nhãn, bấm → sau debounce lưu `drive.autoSidecar=false`, setting khác giữ nguyên; blob `false` → công tắc hiển thị tắt | `driveOptionsToggle.test.ts` |
 
 Kết quả: typecheck OK, 309/309 test, build + verify-dist OK.
+
+## Phase 9.5 – D3 Review (service worker: driveFetch + DriveSidecarService)
+
+Đạt spec: đủ 11 bước `handle()` đúng thứ tự; lookup gửi `{frameId: 0}`, timeout 1.5s có `clearTimeout`, bắt `lastError`; gộp request trùng xóa trong `finally`; hub thêm tham số CUỐI, case `drive.sidecar` chạy sau `ready` (listener port đã chờ sẵn) và chỉ dùng `safePost`; `apiFetch` không đổi; manifest không đổi.
+Kiểm tra dist: `credentials:"include"` chỉ có trong bundle service worker (`service-worker-loader.js` → `index.ts-*.js`), không có trong content script nào.
+
+| # | Lỗi | Sửa | Test |
+|---|---|---|---|
+| 1 | `content-type: text/html` chỉ bị kiểm tra SAU khi đọc hết body (tới 1MB) — trang đăng nhập vẫn bị tải toàn bộ | Kiểm tra `content-type` ngay sau khi kiểm tra host, `body.cancel()` rồi trả `not_permitted` | `driveFetch` "không đọc hết body" |
+| 2 | Lookup trả dữ liệu lạ: `result` không hợp lệ → bị coi là `ambiguous` (hiện toast sai); `indexed` không phải số được chuyển thẳng sang content | `result` lạ → `index_unavailable`; `indexed` ép về số nguyên ≥ 0 (sai → 0) | `driveSidecarService` "dữ liệu lạ" |
+
+**CHƯA KIỂM CHỨNG [T]:** D0 chưa làm. `DRIVE_FETCH_HOSTS` đang là giá trị dự kiến (chưa có T6); việc SW fetch có mang cookie đăng nhập hay không (T7) chưa được thử → D3 mới đúng trên test, chưa chắc chạy trên Drive thật. Bắt buộc làm D0 (T6, T7) trước D5.
+Kết quả: typecheck OK, 352/352 test, build + verify-dist OK.

@@ -10,6 +10,7 @@ import type { CircuitBreaker } from "../shared/breaker";
 import type { StateManager } from "./state";
 import { apiFetch, createTimeoutSignal } from "./engines/http";
 import type { SubtransDB } from "./cache/db";
+import type { DriveSidecarService } from "./drive/sidecarService";
 
 /** postMessage an toàn: port có thể đã ngắt (tab đóng, content reload) → bỏ qua, không ném lỗi */
 export function safePost(port: chrome.runtime.Port, msg: B2C): boolean {
@@ -34,7 +35,8 @@ export class MessagingHub {
     private geminiEngine: GeminiEngine,
     private stateManager: StateManager,
     private db: SubtransDB,
-    private getCachePolicy?: () => Promise<{ maxTracks: number; maxAgeDays: number }>
+    private getCachePolicy?: () => Promise<{ maxTracks: number; maxAgeDays: number }>,
+    private driveSidecar?: DriveSidecarService
   ) {}
 
   /**
@@ -215,6 +217,29 @@ export class MessagingHub {
           )
           .catch((err) => {
             console.warn("[SubTrans] cache.saveLines error:", err);
+          });
+        break;
+      }
+
+      case "drive.sidecar": {
+        const promise = this.driveSidecar
+          ? this.driveSidecar.handle(port.sender, msg.videoDocId)
+          : Promise.resolve({ ok: false as const, reason: "disabled" as const });
+        void promise
+          .then((outcome) => {
+            safePost(port, {
+              type: "drive.sidecar.result",
+              reqId: msg.reqId,
+              ...outcome,
+            });
+          })
+          .catch(() => {
+            safePost(port, {
+              type: "drive.sidecar.result",
+              reqId: msg.reqId,
+              ok: false,
+              reason: "index_unavailable",
+            });
           });
         break;
       }

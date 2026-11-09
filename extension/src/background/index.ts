@@ -16,6 +16,7 @@ import { TranslationRouter } from "./router";
 import { StateManager } from "./state";
 import { MessagingHub } from "./messaging";
 import { SubtransDB } from "./cache/db";
+import { DriveSidecarService } from "./drive/sidecarService";
 
 const log = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.log("[SubTrans][SW]", ...args);
@@ -54,6 +55,8 @@ const router = new TranslationRouter(
 
 const stateManager = new StateManager(gtxBreaker, geminiBreaker, geminiBucket);
 let cachePolicy: Settings["cache"] = { ...D.cache };
+let driveAuto = DEFAULT_SETTINGS.drive.autoSidecar;
+const driveSidecar = new DriveSidecarService({ isEnabled: () => driveAuto });
 
 const messagingHub = new MessagingHub(
   router,
@@ -62,7 +65,8 @@ const messagingHub = new MessagingHub(
   geminiEngine,
   stateManager,
   subtransDB,
-  async () => cachePolicy
+  async () => cachePolicy,
+  driveSidecar
 );
 
 function applySettings(s: Settings): void {
@@ -79,6 +83,7 @@ function applySettings(s: Settings): void {
   gtxQueue.updateConfig(s.gtx.concurrency, s.gtx.gapMs);
   router.updateConfig({ mode: s.mode, geminiModel: s.gemini.model, gtxTimeoutMs: s.gtx.timeoutMs });
   cachePolicy = { ...s.cache };
+  driveAuto = s.drive.autoSidecar;
 }
 
 // 2. Khởi tạo bất đồng bộ

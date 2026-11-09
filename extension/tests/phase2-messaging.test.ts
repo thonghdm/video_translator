@@ -39,7 +39,7 @@ function fakePort() {
   };
 }
 
-function makeHub(router: { translate: Fn }) {
+function makeHub(router: { translate: Fn }, driveSidecar?: unknown) {
   const br = { blocked: () => false, getBlockedUntil: () => 0 };
   return new MessagingHub(
     router as never,
@@ -47,7 +47,9 @@ function makeHub(router: { translate: Fn }) {
     br as never,
     { isAvailable: () => false, getEndpoint: () => "https://x" } as never,
     { scheduleSave: vi.fn() } as never,
-    {} as never
+    {} as never,
+    undefined,
+    driveSidecar as never
   );
 }
 
@@ -114,5 +116,89 @@ describe("MessagingHub.init (MV3)", () => {
     const port = fakePort();
     port.dead = true;
     expect(safePost(port as never, { type: "fetchText.result", reqId: "r", ok: false })).toBe(false);
+  });
+
+  it("drive.sidecar qua fake port → đúng drive.sidecar.result cùng reqId", async () => {
+    const { onConnect } = fakeChrome();
+    const mockSidecar = {
+      handle: vi.fn(async (_sender, _docId) => ({
+        ok: true as const,
+        fileName: "test.srt",
+        text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
+      })),
+    };
+    makeHub({ translate: vi.fn() }, mockSidecar).init();
+    const port = Object.assign(fakePort(), {
+      sender: { tab: { id: 10, url: "https://drive.google.com/test" } },
+    });
+    onConnect[0](port);
+
+    port.emit({
+      type: "drive.sidecar",
+      reqId: "req-sidecar-1",
+      videoDocId: "doc_1234567890",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockSidecar.handle).toHaveBeenCalledWith(port.sender, "doc_1234567890");
+
+    const result = port.sent.find((m) => (m as { type: string }).type === "drive.sidecar.result");
+    expect(result).toEqual({
+      type: "drive.sidecar.result",
+      reqId: "req-sidecar-1",
+      ok: true,
+      fileName: "test.srt",
+      text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
+    });
+  });
+
+  it("drive.sidecar khi không truyền driveSidecar → trả về disabled", async () => {
+    const { onConnect } = fakeChrome();
+    makeHub({ translate: vi.fn() }).init();
+    const port = fakePort();
+    onConnect[0](port);
+
+    port.emit({
+      type: "drive.sidecar",
+      reqId: "req-sidecar-2",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    const result = port.sent.find((m) => (m as { type: string }).type === "drive.sidecar.result");
+    expect(result).toEqual({
+      type: "drive.sidecar.result",
+      reqId: "req-sidecar-2",
+      ok: false,
+      reason: "disabled",
+    });
+  });
+
+  it("drive.sidecar khi port đã ngắt trước khi có kết quả → không ném lỗi", async () => {
+    const { onConnect } = fakeChrome();
+    let resolveHandle!: (val: unknown) => void;
+    const mockSidecar = {
+      handle: vi.fn(() => new Promise((r) => (resolveHandle = r))),
+    };
+    makeHub({ translate: vi.fn() }, mockSidecar).init();
+    const port = fakePort();
+    onConnect[0](port);
+
+    port.emit({
+      type: "drive.sidecar",
+      reqId: "req-sidecar-3",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+    port.drop();
+
+    const unhandled = vi.fn();
+    const proc = (globalThis as unknown as { process: { on: Fn; off: Fn } }).process;
+    proc.on("unhandledRejection", unhandled);
+
+    resolveHandle({ ok: true, fileName: "001.srt", text: "cues" });
+    await new Promise((r) => setTimeout(r, 10));
+
+    proc.off("unhandledRejection", unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
   });
 });
