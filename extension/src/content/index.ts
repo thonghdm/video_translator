@@ -33,6 +33,7 @@ import { Session } from "./pipeline/session";
 import { BackgroundPort, newReqId } from "./port";
 import { buildSubtitleContent } from "../shared/subtitleFormat";
 import type { B2C, PopupToTab, TabStatus } from "../shared/messages";
+import { initDriveTopFrame } from "./drive/driveIndex";
 
 const log = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.log("[SubTrans]", ...args);
@@ -554,6 +555,11 @@ if (typeof document !== "undefined" && typeof chrome !== "undefined" && chrome.r
   void controller.init().catch((err) => {
     if (import.meta.env.DEV) console.warn("[SubTrans] content init lỗi:", err);
   });
+
+  // Khởi tạo Drive Top Frame gom index phụ đề (nếu là top frame của Google Drive)
+  if (typeof window !== "undefined") {
+    initDriveTopFrame(window, document);
+  }
 }
 
 export {};

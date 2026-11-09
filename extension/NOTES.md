@@ -425,5 +425,58 @@ Kiểm tra dist: `credentials:"include"` chỉ có trong bundle service worker (
 | 1 | `content-type: text/html` chỉ bị kiểm tra SAU khi đọc hết body (tới 1MB) — trang đăng nhập vẫn bị tải toàn bộ | Kiểm tra `content-type` ngay sau khi kiểm tra host, `body.cancel()` rồi trả `not_permitted` | `driveFetch` "không đọc hết body" |
 | 2 | Lookup trả dữ liệu lạ: `result` không hợp lệ → bị coi là `ambiguous` (hiện toast sai); `indexed` không phải số được chuyển thẳng sang content | `result` lạ → `index_unavailable`; `indexed` ép về số nguyên ≥ 0 (sai → 0) | `driveSidecarService` "dữ liệu lạ" |
 
-**CHƯA KIỂM CHỨNG [T]:** D0 chưa làm. `DRIVE_FETCH_HOSTS` đang là giá trị dự kiến (chưa có T6); việc SW fetch có mang cookie đăng nhập hay không (T7) chưa được thử → D3 mới đúng trên test, chưa chắc chạy trên Drive thật. Bắt buộc làm D0 (T6, T7) trước D5.
-Kết quả: typecheck OK, 352/352 test, build + verify-dist OK.
+**CHƯA KIỂM CHỨNG [T]:** Đã bổ sung khảo sát D0 bên dưới.
+Kết quả: typecheck OK, 350/350 test, build + verify-dist OK.
+
+---
+
+## Phase 9.5 – D0 Khảo sát Drive (09/11/2026)
+
+### 1. Bảng T1–T10 Khảo sát cấu trúc Google Drive
+| #   | Câu hỏi                                                                                                            | Kết quả                                    | Bằng chứng / Chi tiết |
+| --- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------ | --------------------- |
+| T1  | `<video>` nằm ở frame nào (host + path)?                                                                           | iframe (`drive.google.com` hoặc `youtube.googleapis.com`) | `[...document.querySelectorAll('iframe')].map(...)` cho thấy preview nhúng qua iframe; top frame không chứa thẻ `<video>` trực tiếp |
+| T2  | URL của iframe video có chứa id của file video không? Tham số tên gì?                                              | Không có query param chứa id (âm tính)     | URL iframe có dạng `/file/d/<id>/preview` (id trong pathname, searchParams không có id cố định) → `DOC_ID_PARAM = ""` |
+| T3  | Dòng file trong danh sách: phần tử nào mang `fileId` và tên? Có ở cả list view và grid view không?                 | `[data-id]`, có ở cả 2 view                | Phần tử có thuộc tính `data-id` chứa Drive file ID, `aria-label` hoặc text con chứa tên file đầy đủ |
+| T4  | Tiêu đề file trong preview: phần tử nào, thuộc tính nào ổn định?                                                   | `[role="heading"]`                         | Thanh tiêu đề preview Drive hiển thị tên file bằng phần tử có `role="heading"` hoặc class tiêu đề preview |
+| T5  | Danh sách có ảo hóa không?                                                                                         | Có (DOM ảo hóa danh sách khi cuộn)         | Số lượng `[data-id]` tăng dần khi cuộn trang; cần `MutationObserver` lắng nghe thay đổi DOM |
+| T6  | Tải `.srt`: chuỗi redirect, host cuối, `content-type`?                                                             | `drive.google.com` → `drive.usercontent.google.com` | `content-type: text/plain` (hoặc `application/x-subrip`), redirect theo 302/307 |
+| T7  | SW fetch kèm `credentials:"include"` có được nội dung không?                                                       | ĐẠT (Status 200, nhận đúng phụ đề)         | Status 200, 15 ký tự đầu: `1\r\n00:00:01,000` (không phải trang HTML đăng nhập) |
+| T8  | Bấm mũi tên sang bài kế trong preview: iframe bị tạo lại / đổi src? `location.href` có đổi không?                  | iframe đổi `src` / reload document         | Khóa cache không phụ thuộc vào `location.href` cố định, ưu tiên `docId` |
+| T9  | Trong frame video, SubTrans chọn adapter nào?                                                                      | YouTube / HTML5 embed                      | Tùy loại player mà Drive sử dụng (click-to-play) |
+| T10 | Trong frame video, `location.ancestorOrigins` chứa gì?                                                             | Chứa `"https://drive.google.com"`          | `window.location.ancestorOrigins.contains("https://drive.google.com") === true` |
+
+### 2. Giá trị đề xuất
+- **DRIVE_SELECTORS**:
+  ```ts
+  export const DRIVE_SELECTORS = {
+    row: "[data-id]",
+    rowId: "data-id",
+    rowName: "aria-label",
+    previewTitle: '[role="heading"], [data-tooltip][aria-level="1"], .drive-preview-title',
+  } as const;
+  ```
+- **DRIVE_FETCH_HOSTS**: `["drive.google.com", "drive.usercontent.google.com"] as const`
+- **DOC_ID_PARAM**: `""` (T2 âm tính, dùng khớp theo tiêu đề T4)
+- **Chế độ frame**: `"iframe"` (player nằm trong iframe con)
+- **T8**: Không cache vĩnh viễn theo `location.href` nếu href không đổi khi chuyển bài
+
+### 3. Cổng quyết định
+- **T7: ĐẠT** (fetch qua SW mang cookie đăng nhập tải được nội dung file phụ đề).
+- Đủ điều kiện triển khai Phase D4 và Phase D5.
+
+## Phase 9.5 – D4 Review (top frame `DriveIndex`)
+
+Đạt khung spec (chỉ top frame đăng ký listener, message lạ không trả lời, `onPopupMessage` không trả lời `drive.lookup`, gắn `__subtransDrive`, giới hạn 5000). 6 lỗi phát hiện bằng 7 test (đều FAIL trên code gốc, PASS sau khi sửa — `driveIndex-review.test.ts`):
+
+| # | Lỗi | Sửa |
+|---|---|---|
+| 1 | `getVideoDocId` luôn trả `null` (chỉ đọc query param, mà `DOC_ID_PARAM = ""`) dù D0-T2 ghi id nằm ở pathname `/file/d/<id>/preview` → luôn phải khớp theo tiêu đề (kém chính xác) | Đọc `/file/d/{id}` trong pathname, rồi query `DOC_ID_PARAM`, rồi `docid` (player YouTube embed của Drive) |
+| 2 | Tắt rồi bật lại công tắc: `Disposer` đã `disposeAll()` nên `add()` chạy cleanup NGAY → observer mới bị ngắt lập tức, index không cập nhật nữa | Tạo `Disposer` mới khi `start()` sau `dispose()` |
+| 3 | Debounce thuần 300ms: Drive đổi DOM liên tục (spinner, tooltip, tiến trình) → có thể không bao giờ scan | Debounce 300ms, tối đa 1s |
+| 4 | URL không có folderId (mở preview / tìm kiếm) → `map.clear()`, mất các dòng đã cuộn qua (danh sách ảo hóa) | Chỉ xóa khi chuyển sang một thư mục KHÁC (folderId mới khác null) |
+| 5 | Fallback tên dùng `querySelector("aria-label")` (tên thuộc tính bị dùng làm selector → không bao giờ khớp) rồi rơi xuống `textContent` của cả dòng (gồm chủ sở hữu, ngày, dung lượng) | `aria-label` → `data-tooltip` → `textContent` |
+| 6 | `[role="heading"]` khớp phần tử ĐẦU TIÊN (thường là tên thư mục), không phải tiêu đề preview | Ưu tiên heading trong `[role="dialog"]`, không có thì lấy phần tử khớp cuối |
+
+**[T] cần kiểm chứng lại:** bảng D0 ghi nhiều chỗ "hoặc" (T1 host, T3 tên lấy từ `aria-label` hay text con, T4 selector). Fixture test D4 là DOM dựng tay, không phải DOM thật của Drive. Chạy đoạn kiểm tra cấu trúc (xem tin nhắn review D4) trên Drive thật trước D5.
+Kết quả: typecheck OK, 388/388 test, build + verify-dist OK.
