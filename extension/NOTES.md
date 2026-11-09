@@ -390,3 +390,16 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
 - [ ] Giải nén `release/*.zip` → Load unpacked → chạy ma trận PLAN §8.
 - [ ] Đo RAM/CPU (Chrome Task Manager) trên video YouTube dài 1h+, ghi số vào đây.
 - [ ] Kiểm chứng Drive / Udemy / Coursera thật (checklist Phase 9).
+
+## Phase 9.5 – D1 Review (hàm khớp tên `sidecarMatch.ts`)
+
+Đúng chữ ký API và 10 quy tắc; 15 test bắt buộc đủ. Probe thêm phát hiện:
+
+| # | Lỗi | Sửa | Test |
+|---|---|---|---|
+| 1 | Tiêu đề video dư khoảng trắng cuối (`"Lesson.mp4 "`) không cắt được đuôi → `none` | `normalizeName` trước khi `stripExt` | 16 |
+| 2 | `Lesson .mp4` ↔ `Lesson _en.srt` / `Lesson .srt` không khớp (base bị trim, stem thì không) | `stemMatches()`: so `stem === base + suffix`, chấp nhận khoảng trắng ngay trước hậu tố; vẫn so toàn chuỗi | 16 |
+| 3 | Thiếu hậu tố có mã vùng (`.en-US`, `_en_US`… do yt-dlp/trình tải khóa học tạo) | Thêm 5 hậu tố vào nhóm `en` (cập nhật PLAN-drive-sidecar D1) | 17 |
+
+Ghi nhận (không phải lỗi): `L.en.srt` + `L_en.srt` → chọn `_en` theo thứ tự hậu tố, không `ambiguous` (đúng spec). Hiệu năng: ~3.4 ms/lần với 5000 entry (chỉ gọi khi mở video) — chấp nhận.
+Kết quả: typecheck OK, 299/299 test, build + verify-dist OK.

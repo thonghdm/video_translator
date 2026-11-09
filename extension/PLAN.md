@@ -110,6 +110,8 @@ cd extension; pnpm install; pnpm run typecheck; pnpm run test; pnpm run build; c
 
 ---
 
+> **Ngoại lệ duy nhất cho `credentials:"omit"`:** `driveFetchText()` ở Phase 9.5, ràng buộc tại `PLAN-drive-sidecar.md` §3.
+
 ## 4. Kiến trúc
 
 ### 4.1. Sơ đồ
@@ -758,6 +760,10 @@ export interface SiteAdapter {
 - Mỗi adapter mới phải **tự cô lập**: lỗi ở adapter không được làm hỏng adapter `html5`.
 
 ---
+
+### Phase 9.5: Tự nhận `.srt` cùng thư mục trên Google Drive
+
+Chi tiết: xem `PLAN-drive-sidecar.md` (có khảo sát [T] bắt buộc trước khi code).
 
 ### Phase 10 (thử nghiệm, không bắt buộc): Video không có phụ đề → thu âm tab gửi Gemini
 - Quyền thêm: `tabCapture`, `offscreen`.
