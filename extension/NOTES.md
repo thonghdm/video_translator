@@ -436,7 +436,7 @@ Kết quả: typecheck OK, 350/350 test, build + verify-dist OK.
 | #   | Câu hỏi                                                                                                            | Kết quả                                    | Bằng chứng / Chi tiết |
 | --- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------ | --------------------- |
 | T1  | `<video>` nằm ở frame nào (host + path)?                                                                           | iframe (`drive.google.com` hoặc `youtube.googleapis.com`) | `[...document.querySelectorAll('iframe')].map(...)` cho thấy preview nhúng qua iframe; top frame không chứa thẻ `<video>` trực tiếp |
-| T2  | URL của iframe video có chứa id của file video không? Tham số tên gì?                                              | Không có query param chứa id (âm tính)     | URL iframe có dạng `/file/d/<id>/preview` (id trong pathname, searchParams không có id cố định) → `DOC_ID_PARAM = ""` |
+| T2  | URL của iframe video có chứa id của file video không? Tham số tên gì?                                              | Có tham số `id` (`DOC_ID_PARAM = "id"`)    | URL iframe có dạng `/preview?id=<id>` hoặc `/file/d/<id>/preview?id=<id>` |
 | T3  | Dòng file trong danh sách: phần tử nào mang `fileId` và tên? Có ở cả list view và grid view không?                 | `[data-id]`, có ở cả 2 view                | Phần tử có thuộc tính `data-id` chứa Drive file ID, `aria-label` hoặc text con chứa tên file đầy đủ |
 | T4  | Tiêu đề file trong preview: phần tử nào, thuộc tính nào ổn định?                                                   | `[role="heading"]`                         | Thanh tiêu đề preview Drive hiển thị tên file bằng phần tử có `role="heading"` hoặc class tiêu đề preview |
 | T5  | Danh sách có ảo hóa không?                                                                                         | Có (DOM ảo hóa danh sách khi cuộn)         | Số lượng `[data-id]` tăng dần khi cuộn trang; cần `MutationObserver` lắng nghe thay đổi DOM |
@@ -457,7 +457,7 @@ Kết quả: typecheck OK, 350/350 test, build + verify-dist OK.
   } as const;
   ```
 - **DRIVE_FETCH_HOSTS**: `["drive.google.com", "drive.usercontent.google.com"] as const`
-- **DOC_ID_PARAM**: `""` (T2 âm tính, dùng khớp theo tiêu đề T4)
+- **DOC_ID_PARAM**: `"id"` (từ T2, trích xuất ID file video từ query param `id`)
 - **Chế độ frame**: `"iframe"` (player nằm trong iframe con)
 - **T8**: Không cache vĩnh viễn theo `location.href` nếu href không đổi khi chuyển bài
 
@@ -480,3 +480,17 @@ Kết quả: typecheck OK, 350/350 test, build + verify-dist OK.
 
 **[T] cần kiểm chứng lại:** bảng D0 ghi nhiều chỗ "hoặc" (T1 host, T3 tên lấy từ `aria-label` hay text con, T4 selector). Fixture test D4 là DOM dựng tay, không phải DOM thật của Drive. Chạy đoạn kiểm tra cấu trúc (xem tin nhắn review D4) trên Drive thật trước D5.
 Kết quả: typecheck OK, 388/388 test, build + verify-dist OK.
+
+## Phase 9.5 – D5 Review (frame video: `sidecarClient` + `ContentController`)
+
+Đạt spec: `startSession` có `origin` bắt buộc; `sessionOrigin` reset khi session bị dọn; `startImported` dùng chung cho Nhập tay (hành vi + chữ toast giữ nguyên; test Phase 8/9 không sửa dòng nào); kiểm tra `gen`/`signal` sau mọi `await`; "user" không bị sidecar đè; adapter đến sau không đè sidecar (`trySetup` giữ `|| this.session`); cache theo docId; đủ 7 + 13 test.
+
+| # | Lỗi | Sửa | Test |
+|---|---|---|---|
+| 1 | Điều kiện chạy gồm cả `isDriveTopFrame` — D0-T1 xác định player nằm trong iframe; `<video>` lạc ở top frame Drive sẽ bị gắn phụ đề theo tiêu đề preview | Chỉ `isDrivePlayerFrame` | test cũ 9 |
+| 2 | Cache `null` cho reason `disabled` → SW nạp setting chậm (vừa bật công tắc) thì video đó không bao giờ được hỏi lại trong frame | Bỏ `disabled` khỏi danh sách cache | — |
+| 3 | `requestSidecar` gắn listener `abort` vào signal của scope video mà không gỡ → tích lũy mỗi lần xin | Gỡ trong `finally` | "Review D5" |
+
+Ghi nhận (không sửa): thêm vài method `…ForTest`/getter public vào `ContentController` chỉ để test — chấp nhận, nhưng không dùng chúng trong code sản phẩm.
+**Cảnh báo:** mục D0-T2 trong NOTES đã bị sửa lại ở D5 ("có tham số `id`", `DOC_ID_PARAM = "id"`) trái với bản ghi ban đầu ("id nằm trong pathname `/file/d/<id>/preview`, không có query id"), không kèm bằng chứng mới. `getVideoDocId` đọc cả pathname lẫn `?id`/`?docid` nên chạy được cả hai trường hợp, nhưng cần đoạn kiểm tra cấu trúc trên Drive thật để chốt.
+Kết quả: typecheck OK, 412/412 test, build + verify-dist OK.

@@ -34,6 +34,9 @@ import { BackgroundPort, newReqId } from "./port";
 import { buildSubtitleContent } from "../shared/subtitleFormat";
 import type { B2C, PopupToTab, TabStatus } from "../shared/messages";
 import { initDriveTopFrame } from "./drive/driveIndex";
+import { getVideoDocId, isDrivePlayerFrame } from "./drive/driveFrame";
+import { defaultSleep, requestSidecar, type SidecarClientDeps } from "./drive/sidecarClient";
+import type { SidecarFailReason } from "../shared/driveTypes";
 
 const log = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.log("[SubTrans]", ...args);
@@ -56,7 +59,7 @@ export function isTypingEvent(e: Pick<KeyboardEvent, "target" | "composedPath">)
   return isEditable(e.target);
 }
 
-class ContentController {
+export class ContentController {
   private settings!: Settings;
   private readonly root = new Disposer();
   private active: Disposer | null = null;
@@ -71,6 +74,9 @@ class ContentController {
   private currentVideo: HTMLVideoElement | null = null;
   private generation = 0;
   private offset = 0;
+  private sessionOrigin: "adapter" | "sidecar" | "user" | null = null;
+  /** null = đã xác định là không có, không hỏi lại */
+  private sidecarCache = new Map<string, { fileName: string; text: string } | null>();
 
   public async init(): Promise<void> {
     // Content script KHÔNG đọc API key (PLAN 3.4)
@@ -103,6 +109,26 @@ class ContentController {
     }
 
     if (isEnabledFor(this.settings, location.hostname)) this.activate();
+  }
+
+  public getSessionOrigin(): "adapter" | "sidecar" | "user" | null {
+    return this.sessionOrigin;
+  }
+
+  public getSession(): Session | null {
+    return this.session;
+  }
+
+  public getStore(): OverlayStore | null {
+    return this.store;
+  }
+
+  public handleImportFileForTest(file: File): Promise<void> {
+    return this.handleImportFile(file);
+  }
+
+  public onVideoForTest(video: HTMLVideoElement | null): void {
+    this.onVideo(video);
   }
 
   /** Dọn toàn bộ (listener, overlay, session, port) — dùng khi content script được nạp lại trên cùng trang */
@@ -241,6 +267,31 @@ class ContentController {
     this.view?.native.setOffset(0);
   }
 
+  private async startImported(
+    source: ImportedSubtitleSource,
+    origin: "user" | "sidecar",
+    okToast: string
+  ): Promise<boolean> {
+    const video = this.currentVideo;
+    const scope = this.videoScope;
+    if (!video || !this.active || !scope) return false;
+    const gen = this.generation;
+    const n = (await source.load()).length;
+    if (gen !== this.generation) return false;
+    if (origin === "sidecar" && this.sessionOrigin === "user") {
+      source.dispose();
+      return false;
+    }
+    if (n === 0) {
+      source.dispose();
+      this.store?.flashToast("File không có dòng phụ đề hợp lệ (.srt/.vtt)");
+      return false;
+    }
+    this.startSession(video, this.pickAdapter(), source, scope, gen, origin);
+    this.store?.flashToast(okToast);
+    return true;
+  }
+
   private async handleImportFile(file: File): Promise<void> {
     const video = this.currentVideo;
     const scope = this.videoScope;
@@ -250,14 +301,7 @@ class ContentController {
       if (file.size > 5 * 1024 * 1024) throw new Error("File quá lớn (> 5MB)");
       const source = await ImportedSubtitleSource.fromFile(file);
       if (gen !== this.generation) return; // người dùng đã chuyển video trong lúc đọc file
-      const n = (await source.load()).length;
-      if (n === 0) {
-        source.dispose();
-        this.store?.flashToast("File không có dòng phụ đề hợp lệ (.srt/.vtt)");
-        return;
-      }
-      this.startSession(video, this.pickAdapter(), source, scope, gen);
-      this.store?.flashToast(`Đã nạp phụ đề: ${file.name}`);
+      await this.startImported(source, "user", `Đã nạp phụ đề: ${file.name}`);
     } catch (err) {
       this.store?.flashToast(`Lỗi đọc file phụ đề${err instanceof Error ? `: ${err.message}` : ""}`);
       if (import.meta.env.DEV) console.warn("[SubTrans] import file lỗi:", err);
@@ -367,6 +411,7 @@ class ContentController {
     if (isYouTubeHost(location.hostname)) setYouTubeNativeCaptionsHidden(false, document);
     this.session?.dispose();
     this.session = null;
+    this.sessionOrigin = null;
     this.sessionScope = null;
     this.videoScope?.disposeAll(); // dọn session, overlay, native, theo dõi quảng cáo
     this.videoScope = null;
@@ -464,7 +509,7 @@ class ContentController {
           this.mountOverlayWithoutSession(video, adapter, scope);
           return;
         }
-        this.startSession(video, adapter, sources[0], scope, gen);
+        this.startSession(video, adapter, sources[0], scope, gen, "adapter");
         for (const src of sources.slice(1)) src.dispose();
       } catch (err) {
         if (import.meta.env.DEV) console.warn("[SubTrans] listSources lỗi:", err);
@@ -485,6 +530,100 @@ class ContentController {
     video.addEventListener("loadeddata", () => void trySetup(), { signal });
     video.addEventListener("playing", () => void trySetup(), { signal });
     void trySetup();
+
+    // D0-T1: video của preview Drive nằm trong IFRAME → chỉ frame player mới xin phụ đề.
+    // Không gồm top frame: <video> lạc ở top frame (xem trước khi rê chuột, v.v.) không được gắn phụ đề theo tiêu đề preview.
+    if (this.settings.drive?.autoSidecar && isDrivePlayerFrame(window)) {
+      void this.trySidecar(video, scope, gen);
+    }
+  }
+
+  private async trySidecar(
+    _video: HTMLVideoElement,
+    scope: Disposer,
+    gen: number
+  ): Promise<void> {
+    const docId = getVideoDocId(location.href);
+    const key = docId ?? null;
+
+    if (key !== null && this.sidecarCache.has(key)) {
+      const cached = this.sidecarCache.get(key);
+      if (!cached) return;
+      if (this.sessionOrigin === "user") return;
+      if (gen !== this.generation || scope.signal.aborted) return;
+      await this.startImported(
+        new ImportedSubtitleSource(cached.fileName, cached.text),
+        "sidecar",
+        `Đã tự nhận phụ đề: ${cached.fileName}`
+      );
+      return;
+    }
+
+    let r: Awaited<ReturnType<typeof requestSidecar>>;
+    try {
+      const deps: SidecarClientDeps = {
+        request: (msg) => this.getPort().request(msg),
+        sleep: defaultSleep,
+        newReqId,
+      };
+      r = await requestSidecar(docId ?? undefined, deps, scope.signal);
+    } catch {
+      return;
+    }
+
+    if (gen !== this.generation || scope.signal.aborted) return;
+
+    if (!r.ok) {
+      const cacheableReasons: SidecarFailReason[] = [
+        "no_match",
+        "ambiguous",
+        "not_permitted",
+        "not_found",
+        "too_large",
+        "bad_format",
+        "not_drive",
+        // KHÔNG cache "disabled": SW có thể chưa nạp kịp setting mới bật → lần onVideo sau phải hỏi lại
+      ];
+      if (key !== null && cacheableReasons.includes(r.reason)) {
+        this.sidecarCache.set(key, null);
+      }
+
+      switch (r.reason) {
+        case "ambiguous":
+          this.store?.flashToast("Có nhiều file trùng tên – bấm Nhập để chọn");
+          break;
+        case "not_permitted":
+          this.store?.flashToast("Không có quyền tải phụ đề – bấm Nhập để chọn file");
+          break;
+        case "not_found":
+          this.store?.flashToast("Không tìm thấy file phụ đề – bấm Nhập");
+          break;
+        case "too_large":
+          this.store?.flashToast("File phụ đề quá lớn (> 1MB)");
+          break;
+        case "bad_format":
+          this.store?.flashToast("File phụ đề không hợp lệ – bấm Nhập");
+          break;
+        case "network":
+        case "timeout":
+          this.store?.flashToast("Không tải được phụ đề (mạng) – bấm Nhập");
+          break;
+        default:
+          break;
+      }
+      return;
+    }
+
+    if (key !== null) {
+      this.sidecarCache.set(key, { fileName: r.fileName, text: r.text });
+    }
+    if (this.sessionOrigin === "user") return;
+    if (gen !== this.generation || scope.signal.aborted) return;
+    await this.startImported(
+      new ImportedSubtitleSource(r.fileName, r.text),
+      "sidecar",
+      `Đã tự nhận phụ đề: ${r.fileName}`
+    );
   }
 
   private startSession(
@@ -492,11 +631,14 @@ class ContentController {
     adapter: SiteAdapter,
     source: SubtitleSource,
     scope: Disposer,
-    gen: number
+    gen: number,
+    origin: "adapter" | "sidecar" | "user"
   ): void {
     // Thay session cũ (nếu có) — overlay/store/native của video được DÙNG LẠI
     this.sessionScope?.disposeAll();
     this.sessionScope = null;
+
+    this.sessionOrigin = origin;
 
     const view = this.ensureView(video, adapter, scope);
     const store = view.store;
@@ -519,7 +661,10 @@ class ContentController {
     this.session = session;
     sessionScope.add(() => {
       session.dispose();
-      if (this.session === session) this.session = null;
+      if (this.session === session) {
+        this.session = null;
+        this.sessionOrigin = null;
+      }
       if (this.sessionScope === sessionScope) this.sessionScope = null;
     });
     if (view.native.isActive) view.native.enable([...session.getItems()], store.getState().mode);

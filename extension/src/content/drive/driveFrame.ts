@@ -9,7 +9,7 @@ import { DRIVE_ID_RE } from "../../shared/driveTypes";
  * Tên tham số query chứa ID file video trong URL của iframe preview (từ khảo sát D0).
  * Rỗng nếu T2 âm tính (không có query param cố định).
  */
-export const DOC_ID_PARAM = "";
+export const DOC_ID_PARAM = "id";
 
 /**
  * Kiểm tra xem window hiện tại có phải là top frame của Google Drive hay không.

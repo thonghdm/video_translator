@@ -44,9 +44,19 @@ describe("driveFrame utility functions", () => {
   });
 
   describe("getVideoDocId", () => {
-    it("trả về null khi DOC_ID_PARAM rỗng", () => {
-      expect(DOC_ID_PARAM).toBe("");
-      expect(getVideoDocId("https://drive.google.com/preview?id=valid_id_1234567890")).toBeNull();
+    it("trích xuất đúng docId khi có tham số id", () => {
+      expect(DOC_ID_PARAM).toBe("id");
+      expect(
+        getVideoDocId("https://drive.google.com/preview?id=valid_id_1234567890")
+      ).toBe("valid_id_1234567890");
+    });
+
+    it("trả về null khi thiếu tham số id", () => {
+      expect(getVideoDocId("https://drive.google.com/preview")).toBeNull();
+    });
+
+    it("trả về null khi id sai regex", () => {
+      expect(getVideoDocId("https://drive.google.com/preview?id=short")).toBeNull();
     });
   });
 
