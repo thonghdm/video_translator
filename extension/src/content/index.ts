@@ -36,7 +36,12 @@ import type { B2C, PopupToTab, TabStatus } from "../shared/messages";
 import { initDriveTopFrame } from "./drive/driveIndex";
 import { getVideoDocId, isDrivePlayerFrame } from "./drive/driveFrame";
 import { defaultSleep, requestSidecar, type SidecarClientDeps } from "./drive/sidecarClient";
-import type { SidecarFailReason } from "../shared/driveTypes";
+import type {
+  SidecarFailReason,
+  SidecarFile,
+  SidecarMode,
+} from "../shared/driveTypes";
+import { PAIR_MIN_RATIO } from "../shared/subtitlePair";
 
 const log = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.log("[SubTrans]", ...args);
@@ -76,7 +81,15 @@ export class ContentController {
   private offset = 0;
   private sessionOrigin: "adapter" | "sidecar" | "user" | null = null;
   /** null = đã xác định là không có, không hỏi lại */
-  private sidecarCache = new Map<string, { fileName: string; text: string } | null>();
+  private sidecarCache = new Map<
+    string,
+    {
+      mode: SidecarMode;
+      en?: SidecarFile;
+      vi?: SidecarFile;
+      bi?: SidecarFile;
+    } | null
+  >();
 
   public async init(): Promise<void> {
     // Content script KHÔNG đọc API key (PLAN 3.4)
@@ -546,16 +559,68 @@ export class ContentController {
     const docId = getVideoDocId(location.href);
     const key = docId ?? null;
 
+    const buildSource = (data: {
+      mode: SidecarMode;
+      en?: SidecarFile;
+      vi?: SidecarFile;
+      bi?: SidecarFile;
+    }): { source: ImportedSubtitleSource; toast: string } | null => {
+      if (data.mode === "pair") {
+        if (data.en && data.vi) {
+          const { source, stats } = ImportedSubtitleSource.fromPair(data.en, data.vi);
+          if (stats.ratio >= PAIR_MIN_RATIO) {
+            return {
+              source,
+              toast: `Đã tự nhận phụ đề EN + VI: ${data.en.name}`,
+            };
+          }
+          return {
+            source: new ImportedSubtitleSource(data.en.name, data.en.text),
+            toast: `Phụ đề VI lệch thời gian – dùng bản dịch máy cho ${data.en.name}`,
+          };
+        }
+        if (data.en) {
+          return {
+            source: new ImportedSubtitleSource(data.en.name, data.en.text),
+            toast: `Đã tự nhận phụ đề: ${data.en.name}`,
+          };
+        }
+        if (data.vi) {
+          return {
+            source: new ImportedSubtitleSource(data.vi.name, data.vi.text, { forceLang: "vi" }),
+            toast: `Đã tự nhận phụ đề tiếng Việt: ${data.vi.name}`,
+          };
+        }
+      }
+      if (data.mode === "en" && data.en) {
+        return {
+          source: new ImportedSubtitleSource(data.en.name, data.en.text),
+          toast: `Đã tự nhận phụ đề: ${data.en.name}`,
+        };
+      }
+      if (data.mode === "vi" && data.vi) {
+        return {
+          source: new ImportedSubtitleSource(data.vi.name, data.vi.text, { forceLang: "vi" }),
+          toast: `Đã tự nhận phụ đề tiếng Việt: ${data.vi.name}`,
+        };
+      }
+      if (data.mode === "bilingual" && data.bi) {
+        return {
+          source: new ImportedSubtitleSource(data.bi.name, data.bi.text),
+          toast: `Đã tự nhận phụ đề: ${data.bi.name}`,
+        };
+      }
+      return null;
+    };
+
     if (key !== null && this.sidecarCache.has(key)) {
       const cached = this.sidecarCache.get(key);
       if (!cached) return;
       if (this.sessionOrigin === "user") return;
       if (gen !== this.generation || scope.signal.aborted) return;
-      await this.startImported(
-        new ImportedSubtitleSource(cached.fileName, cached.text),
-        "sidecar",
-        `Đã tự nhận phụ đề: ${cached.fileName}`
-      );
+      const built = buildSource(cached);
+      if (!built) return;
+      await this.startImported(built.source, "sidecar", built.toast);
       return;
     }
 
@@ -615,15 +680,18 @@ export class ContentController {
     }
 
     if (key !== null) {
-      this.sidecarCache.set(key, { fileName: r.fileName, text: r.text });
+      this.sidecarCache.set(key, {
+        mode: r.mode,
+        en: r.en,
+        vi: r.vi,
+        bi: r.bi,
+      });
     }
     if (this.sessionOrigin === "user") return;
     if (gen !== this.generation || scope.signal.aborted) return;
-    await this.startImported(
-      new ImportedSubtitleSource(r.fileName, r.text),
-      "sidecar",
-      `Đã tự nhận phụ đề: ${r.fileName}`
-    );
+    const built = buildSource(r);
+    if (!built) return;
+    await this.startImported(built.source, "sidecar", built.toast);
   }
 
   private startSession(

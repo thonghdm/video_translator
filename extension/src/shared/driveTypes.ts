@@ -28,9 +28,7 @@ export type DriveLookupRes =
   | { ok: true; indexed: number; result: "en"; en: DriveFileRef }
   | { ok: true; indexed: number; result: "vi"; vi: DriveFileRef }
   | { ok: true; indexed: number; result: "none" | "ambiguous" }
-  | { ok: false }
-  /** @deprecated Dạng của top frame cũ (D4, trước E4) — SW coi như "en". XÓA ở Phase 9.6 E4. */
-  | { ok: true; indexed: number; result: "match"; id: string; name: string };
+  | { ok: false };
 
 export type SidecarMode = "bilingual" | "pair" | "en" | "vi";
 

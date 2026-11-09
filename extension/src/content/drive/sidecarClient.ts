@@ -4,10 +4,24 @@
  */
 
 import type { B2C, C2B } from "../../shared/messages";
-import type { SidecarFailReason } from "../../shared/driveTypes";
+import type {
+  SidecarFailReason,
+  SidecarFile,
+  SidecarMode,
+} from "../../shared/driveTypes";
 
 type Req = Extract<C2B, { type: "drive.sidecar" }>;
 type Res = Extract<B2C, { type: "drive.sidecar.result" }>;
+
+export type SidecarClientResult =
+  | {
+      ok: true;
+      mode: SidecarMode;
+      en?: SidecarFile;
+      vi?: SidecarFile;
+      bi?: SidecarFile;
+    }
+  | { ok: false; reason: SidecarFailReason };
 
 export interface SidecarClientDeps {
   request(msg: Req): Promise<Res>;
@@ -58,10 +72,7 @@ export async function requestSidecar(
   videoDocId: string | undefined,
   deps: SidecarClientDeps,
   signal: AbortSignal
-): Promise<
-  | { ok: true; fileName: string; text: string }
-  | { ok: false; reason: SidecarFailReason }
-> {
+): Promise<SidecarClientResult> {
   if (signal.aborted) {
     const err = new Error("Aborted");
     err.name = "AbortError";
@@ -84,10 +95,7 @@ export async function requestSidecar(
     signal.addEventListener("abort", onAbort, { once: true });
   });
 
-  const runRequest = async (): Promise<
-    | { ok: true; fileName: string; text: string }
-    | { ok: false; reason: SidecarFailReason }
-  > => {
+  const runRequest = async (): Promise<SidecarClientResult> => {
     // Lần 1
     let res: Res;
     try {
@@ -101,7 +109,13 @@ export async function requestSidecar(
     }
 
     if (res.ok) {
-      return { ok: true, fileName: res.fileName, text: res.text };
+      return {
+        ok: true,
+        mode: res.mode,
+        en: res.en,
+        vi: res.vi,
+        bi: res.bi,
+      };
     }
 
     // Nếu index_unavailable, hoặc no_match với indexed === 0 → sleep(2000) → gửi lại đúng 1 lần
@@ -140,7 +154,13 @@ export async function requestSidecar(
     }
 
     if (res2.ok) {
-      return { ok: true, fileName: res2.fileName, text: res2.text };
+      return {
+        ok: true,
+        mode: res2.mode,
+        en: res2.en,
+        vi: res2.vi,
+        bi: res2.bi,
+      };
     }
     return { ok: false, reason: res2.reason };
   };

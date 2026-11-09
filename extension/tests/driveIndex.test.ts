@@ -341,9 +341,11 @@ describe("DriveIndex", () => {
     expect(res).toEqual({
       ok: true,
       indexed: 2,
-      result: "match",
-      id: "sub_doc_id_1234567890",
-      name: "001 Setup_en.srt",
+      result: "en",
+      en: {
+        id: "sub_doc_id_1234567890",
+        name: "001 Setup_en.srt",
+      },
     });
   });
 
@@ -366,9 +368,11 @@ describe("DriveIndex", () => {
     expect(res).toEqual({
       ok: true,
       indexed: 1,
-      result: "match",
-      id: "sub_arch_id_1234567890",
-      name: "002 Architecture_en.srt",
+      result: "en",
+      en: {
+        id: "sub_arch_id_1234567890",
+        name: "002 Architecture_en.srt",
+      },
     });
   });
 
@@ -529,9 +533,11 @@ describe("Drive Top Frame Bootstrap & Message Handling", () => {
     expect(capturedRes).toEqual({
       ok: true,
       indexed: 2,
-      result: "match",
-      id: "sub_id_123456789012",
-      name: "001 Hello_en.srt",
+      result: "en",
+      en: {
+        id: "sub_id_123456789012",
+        name: "001 Hello_en.srt",
+      },
     });
 
     handle?.dispose();

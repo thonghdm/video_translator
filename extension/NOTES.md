@@ -590,3 +590,10 @@ Kết quả: typecheck OK, 456/456 test, build + verify-dist OK.
 
 Ghi nhận — **phần tương thích tạm** (hợp lý, vì content/top frame chưa đổi tới E4 nên bản build giữa hai commit vẫn chạy): `DriveLookupRes` còn `result: "match"`; kết quả thành công vẫn kèm `fileName`/`text` (ở `pair` nội dung EN bị gửi 2 lần qua port); `messages.ts` có thêm biến thể không `mode`. Đã đánh dấu `@deprecated … XÓA ở Phase 9.6 E4` và thêm việc dọn vào PLAN-drive-envi "Phase E4" mục 4 + prompt E4.
 Kết quả: typecheck OK, 465/465 test, build + verify-dist OK.
+
+## Phase 9.6 – E4 Review (top frame + frame video)
+
+Đạt: `DriveIndex.lookup` dùng `findSidecarSet` (không đụng `scan`/`findPreviewTitle`/`DRIVE_SELECTORS`); `trySidecar` dựng nguồn theo mode (`pair` → `fromPair` + ngưỡng `PAIR_MIN_RATIO`, lệch thì quay về EN + toast cảnh báo; `vi` → `forceLang`; `en`/`bilingual` như cũ); kiểm tra `gen`/`signal` sau `await` và không đè bản "user" giữ nguyên; `sidecarCache` lưu mode + file.
+Dọn tương thích tạm của E3: đã bỏ `result:"match"`, `fileName`/`text`, biến thể không `mode` — `grep "@deprecated" src/shared src/background/drive` rỗng.
+Test: đủ 8 case controller E4 (pair khớp tốt / lệch / khớp 80% chỉ dịch câu thiếu / vi / en / bilingual / Nhập đè / đổi video); test D5 cũ không bỏ expect nào. Không phát hiện lỗi.
+Kết quả: typecheck OK, 473/473 test, build + verify-dist OK.

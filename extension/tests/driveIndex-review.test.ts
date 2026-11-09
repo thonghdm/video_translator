@@ -117,7 +117,7 @@ describe("DriveIndex — các lỗi review", () => {
     expect(map.get("file_vid_1234567890")).toBe("001 Introduction.mp4");
     expect(map.get("file_sub_1234567890")).toBe("001 Introduction_en.srt");
     expect(map.get("file_grid_1234567890")).toBe("002 Pods_en.srt");
-    expect(index.lookup("file_vid_1234567890")).toMatchObject({ result: "match", id: "file_sub_1234567890" });
+    expect(index.lookup("file_vid_1234567890")).toMatchObject({ result: "en", en: { id: "file_sub_1234567890" } });
   });
 
   it("tiêu đề preview nằm trong iframe /viewer/ cùng origin; heading không có đuôi video bị bỏ qua", () => {
@@ -134,7 +134,7 @@ describe("DriveIndex — các lỗi review", () => {
     Object.defineProperty(viewer, "contentDocument", { value: vdoc });
     const index = new DriveIndex(doc, () => FOLDER_A);
     index.scan();
-    expect(index.lookup()).toMatchObject({ ok: true, result: "match", id: "file_sub_1234567890" });
+    expect(index.lookup()).toMatchObject({ ok: true, result: "en", en: { id: "file_sub_1234567890" } });
   });
 
   it("tiêu đề preview: ưu tiên heading trong [role=dialog], không lấy nhầm heading tên thư mục", () => {
@@ -158,6 +158,6 @@ describe("DriveIndex — các lỗi review", () => {
 
     const index = new DriveIndex(doc, () => FOLDER_A);
     index.scan();
-    expect(index.lookup()).toMatchObject({ ok: true, result: "match", id: "file_sub_1234567890" });
+    expect(index.lookup()).toMatchObject({ ok: true, result: "en", en: { id: "file_sub_1234567890" } });
   });
 });

@@ -128,8 +128,6 @@ describe("MessagingHub.init (MV3)", () => {
           name: "test.srt",
           text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
         },
-        fileName: "test.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
       })),
     };
     makeHub({ translate: vi.fn() }, mockSidecar as never).init();
@@ -157,8 +155,6 @@ describe("MessagingHub.init (MV3)", () => {
         name: "test.srt",
         text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
       },
-      fileName: "test.srt",
-      text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
     });
   });
 

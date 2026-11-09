@@ -30,8 +30,6 @@ export type SidecarOutcome =
       en?: SidecarFile;
       vi?: SidecarFile;
       bi?: SidecarFile;
-      fileName: string;
-      text: string;
     }
   | { ok: false; reason: SidecarFailReason; indexed?: number };
 
@@ -216,20 +214,14 @@ export class DriveSidecarService {
         ok: true,
         mode: "bilingual",
         bi: res.file,
-        fileName: res.file.name,
-        text: res.file.text,
       };
     }
 
-    if (lookupRes.result === "en" || lookupRes.result === "match") {
-      const ref =
-        lookupRes.result === "en"
-          ? lookupRes.en
-          : { id: (lookupRes as { id: string }).id, name: (lookupRes as { name: string }).name };
-      if (!isValidRef(ref)) {
+    if (lookupRes.result === "en") {
+      if (!isValidRef(lookupRes.en)) {
         return { ok: false, reason: "index_unavailable" };
       }
-      const res = await this.fetchOne(ref.id, ref.name);
+      const res = await this.fetchOne(lookupRes.en.id, lookupRes.en.name);
       if (!res.ok) {
         return { ok: false, reason: res.reason };
       }
@@ -237,8 +229,6 @@ export class DriveSidecarService {
         ok: true,
         mode: "en",
         en: res.file,
-        fileName: res.file.name,
-        text: res.file.text,
       };
     }
 
@@ -254,8 +244,6 @@ export class DriveSidecarService {
         ok: true,
         mode: "vi",
         vi: res.file,
-        fileName: res.file.name,
-        text: res.file.text,
       };
     }
 
@@ -278,8 +266,6 @@ export class DriveSidecarService {
           ok: true,
           mode: "en",
           en: res.file,
-          fileName: res.file.name,
-          text: res.file.text,
         };
       }
 
@@ -293,8 +279,6 @@ export class DriveSidecarService {
           ok: true,
           mode: "vi",
           vi: res.file,
-          fileName: res.file.name,
-          text: res.file.text,
         };
       }
 
@@ -311,24 +295,18 @@ export class DriveSidecarService {
           mode: "pair",
           en: enRes.file,
           vi: viRes.file,
-          fileName: enRes.file.name,
-          text: enRes.file.text,
         };
       } else if (enRes.ok) {
         return {
           ok: true,
           mode: "en",
           en: enRes.file,
-          fileName: enRes.file.name,
-          text: enRes.file.text,
         };
       } else if (viRes.ok) {
         return {
           ok: true,
           mode: "vi",
           vi: viRes.file,
-          fileName: viRes.file.name,
-          text: viRes.file.text,
         };
       } else {
         // Cả hai lỗi → trả reason của file en

@@ -10,7 +10,7 @@ import {
 } from "../../shared/driveTypes";
 import { Disposer } from "../../shared/disposer";
 import {
-  findSidecar,
+  findSidecarSet,
   normalizeName,
   stripExt,
   VIDEO_EXTS,
@@ -193,14 +193,38 @@ export class DriveIndex {
       entries.push({ id, name });
     }
 
-    const matchRes = findSidecar(videoName, entries);
-    if (matchRes.status === "match") {
+    const matchRes = findSidecarSet(videoName, entries);
+    if (matchRes.status === "bilingual") {
       return {
         ok: true,
         indexed: this.size,
-        result: "match",
-        id: matchRes.entry.id,
-        name: matchRes.entry.name,
+        result: "bilingual",
+        bi: { id: matchRes.bi.id, name: matchRes.bi.name },
+      };
+    }
+    if (matchRes.status === "pair") {
+      return {
+        ok: true,
+        indexed: this.size,
+        result: "pair",
+        en: { id: matchRes.en.id, name: matchRes.en.name },
+        vi: { id: matchRes.vi.id, name: matchRes.vi.name },
+      };
+    }
+    if (matchRes.status === "en") {
+      return {
+        ok: true,
+        indexed: this.size,
+        result: "en",
+        en: { id: matchRes.en.id, name: matchRes.en.name },
+      };
+    }
+    if (matchRes.status === "vi") {
+      return {
+        ok: true,
+        indexed: this.size,
+        result: "vi",
+        vi: { id: matchRes.vi.id, name: matchRes.vi.name },
       };
     }
     if (matchRes.status === "ambiguous") {

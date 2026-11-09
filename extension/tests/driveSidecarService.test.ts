@@ -176,8 +176,6 @@ describe("DriveSidecarService", () => {
       ok: true,
       mode: "en",
       en: { name: validName, text: validSubtitleText },
-      fileName: validName,
-      text: validSubtitleText,
     });
     expect(deps.fetchText).toHaveBeenCalledTimes(1);
 
@@ -187,8 +185,6 @@ describe("DriveSidecarService", () => {
       ok: true,
       mode: "en",
       en: { name: validName, text: validSubtitleText },
-      fileName: validName,
-      text: validSubtitleText,
     });
     expect(deps.fetchText).toHaveBeenCalledTimes(1); // vẫn chỉ 1 lần
   });
@@ -220,15 +216,11 @@ describe("DriveSidecarService", () => {
       ok: true,
       mode: "en",
       en: { name: validName, text: validSubtitleText },
-      fileName: validName,
-      text: validSubtitleText,
     });
     expect(res2).toEqual({
       ok: true,
       mode: "en",
       en: { name: validName, text: validSubtitleText },
-      fileName: validName,
-      text: validSubtitleText,
     });
     expect(deps.fetchText).toHaveBeenCalledTimes(1);
   });
@@ -265,13 +257,11 @@ describe("DriveSidecarService", () => {
       ok: true,
       mode: "en",
       en: { name: validName, text: validSubtitleText },
-      fileName: validName,
-      text: validSubtitleText,
     });
     expect(deps.fetchText).toHaveBeenCalledTimes(2);
   });
 
-  // Bước 11: Thành công → lưu LRU và trả { ok: true, fileName, text }
+  // Bước 11: Thành công → lưu LRU và trả { ok: true, mode, en }
   it("Bước 11: thành công → trả đúng dữ liệu và lưu LRU", async () => {
     const service = new DriveSidecarService(deps);
     const res = await service.handle(validSender);
@@ -279,8 +269,6 @@ describe("DriveSidecarService", () => {
       ok: true,
       mode: "en",
       en: { name: validName, text: validSubtitleText },
-      fileName: validName,
-      text: validSubtitleText,
     });
   });
 });
@@ -473,8 +461,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       mode: "pair",
       en: { name: enName, text: enText },
       vi: { name: viName, text: viText },
-      fileName: enName,
-      text: enText,
     });
   });
 
@@ -499,8 +485,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       ok: true,
       mode: "en",
       en: { name: enName, text: enText },
-      fileName: enName,
-      text: enText,
     });
 
     // 2b. en lỗi (too_large), vi OK → mode "vi"
@@ -523,8 +507,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       ok: true,
       mode: "vi",
       vi: { name: viName, text: viText },
-      fileName: viName,
-      text: viText,
     });
 
     // 2c. Cả hai lỗi → trả reason của en
@@ -569,8 +551,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       ok: true,
       mode: "en",
       en: { name: enName, text: enText },
-      fileName: enName,
-      text: enText,
     });
   });
 
@@ -591,8 +571,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       ok: true,
       mode: "vi",
       vi: { name: viName, text: viText },
-      fileName: viName,
-      text: viText,
     });
     expect(fetchTextMock).toHaveBeenCalledTimes(1);
     expect(fetchTextMock).toHaveBeenCalledWith(viId);
@@ -617,8 +595,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       ok: true,
       mode: "en",
       en: { name: enName, text: enText },
-      fileName: enName,
-      text: enText,
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(enId);
@@ -641,8 +617,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       ok: true,
       mode: "vi",
       vi: { name: viName, text: viText },
-      fileName: viName,
-      text: viText,
     });
     expect(fetchMockVi).toHaveBeenCalledTimes(1);
     expect(fetchMockVi).toHaveBeenCalledWith(viId);
@@ -708,8 +682,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       mode: "pair",
       en: { name: enName, text: enText },
       vi: { name: viName, text: viText },
-      fileName: enName,
-      text: enText,
     });
     // fetchText chỉ được gọi thêm đúng 1 lần cho viId
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -760,8 +732,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       mode: "pair",
       en: { name: enName, text: enText },
       vi: { name: viName, text: viText },
-      fileName: enName,
-      text: enText,
     });
     expect(r2).toEqual(r1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -788,8 +758,6 @@ describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và h
       ok: true,
       mode: "bilingual",
       bi: { name: biName, text: biText },
-      fileName: biName,
-      text: biText,
     });
   });
 });

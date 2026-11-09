@@ -33,8 +33,11 @@ describe("requestSidecar (sidecarClient.ts)", () => {
           type: "drive.sidecar.result" as const,
           reqId: msg.reqId,
           ok: true as const,
-          fileName: "001 Intro_en.srt",
-          text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello\r\n",
+          mode: "en" as const,
+          en: {
+            name: "001 Intro_en.srt",
+            text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello\r\n",
+          },
         };
       }),
       sleep: vi.fn(async () => {}),
@@ -53,8 +56,11 @@ describe("requestSidecar (sidecarClient.ts)", () => {
 
     expect(res).toEqual({
       ok: true,
-      fileName: "001 Intro_en.srt",
-      text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello\r\n",
+      mode: "en",
+      en: {
+        name: "001 Intro_en.srt",
+        text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello\r\n",
+      },
     });
     expect(deps.request).toHaveBeenCalledTimes(1);
     expect(deps.sleep).not.toHaveBeenCalled();
@@ -74,16 +80,22 @@ describe("requestSidecar (sidecarClient.ts)", () => {
         type: "drive.sidecar.result",
         reqId: "req_2",
         ok: true,
-        fileName: "retry_ok.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nSuccess\r\n",
+        mode: "en",
+        en: {
+          name: "retry_ok.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nSuccess\r\n",
+        },
       });
 
     const res = await requestSidecar("video123", deps, controller.signal);
 
     expect(res).toEqual({
       ok: true,
-      fileName: "retry_ok.srt",
-      text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nSuccess\r\n",
+      mode: "en",
+      en: {
+        name: "retry_ok.srt",
+        text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nSuccess\r\n",
+      },
     });
     expect(deps.request).toHaveBeenCalledTimes(2);
     expect(deps.sleep).toHaveBeenCalledWith(SIDECAR_RETRY_DELAY_MS, controller.signal);
@@ -239,7 +251,17 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
     };
 
     mockPort = {
-      postMessage: vi.fn(),
+      postMessage: vi.fn((msg) => {
+        if (msg && typeof msg === "object" && (msg as { type?: string }).type === "cache.load") {
+          queueMicrotask(() => {
+            messageCallback?.({
+              type: "cache.loaded",
+              reqId: (msg as { reqId: string }).reqId,
+              hit: false,
+            });
+          });
+        }
+      }),
       onMessage: {
         addListener: (fn) => {
           messageCallback = fn;
@@ -362,8 +384,8 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: lastMsg.reqId,
         ok: true,
-        fileName: "Lesson01_en.srt",
-        text: srtText,
+        mode: "en",
+        en: { name: "Lesson01_en.srt", text: srtText },
       });
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -406,8 +428,11 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: sidecarCall![0].reqId,
         ok: true,
-        fileName: "SidecarWins.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nSidecar cue\r\n",
+        mode: "en",
+        en: {
+          name: "SidecarWins.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nSidecar cue\r\n",
+        },
       });
       await new Promise((r) => setTimeout(r, 20));
     });
@@ -434,8 +459,11 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: lastMsg.reqId,
         ok: true,
-        fileName: "First.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nFirst\r\n",
+        mode: "en",
+        en: {
+          name: "First.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nFirst\r\n",
+        },
       });
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -482,8 +510,11 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: lastMsg![0].reqId,
         ok: true,
-        fileName: "LateSidecar.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nLate\r\n",
+        mode: "en",
+        en: {
+          name: "LateSidecar.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nLate\r\n",
+        },
       });
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -510,8 +541,11 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: lastMsg.reqId,
         ok: true,
-        fileName: "InitialSidecar.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nInitial\r\n",
+        mode: "en",
+        en: {
+          name: "InitialSidecar.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nInitial\r\n",
+        },
       });
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -556,8 +590,11 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: lastMsg.reqId,
         ok: true,
-        fileName: "OldVideo.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nOld\r\n",
+        mode: "en",
+        en: {
+          name: "OldVideo.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nOld\r\n",
+        },
       });
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -588,8 +625,11 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: lastMsg.reqId,
         ok: true,
-        fileName: "Cached.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nCached\r\n",
+        mode: "en",
+        en: {
+          name: "Cached.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nCached\r\n",
+        },
       });
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -757,8 +797,11 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: lastMsg.reqId,
         ok: true,
-        fileName: "AfterDispose.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nDead\r\n",
+        mode: "en",
+        en: {
+          name: "AfterDispose.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nDead\r\n",
+        },
       });
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -781,8 +824,11 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
         type: "drive.sidecar.result",
         reqId: lastMsg.reqId,
         ok: true,
-        fileName: "SidecarStatus.srt",
-        text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nStatus test\r\n",
+        mode: "en",
+        en: {
+          name: "SidecarStatus.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:02,000\r\nStatus test\r\n",
+        },
       });
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -817,6 +863,381 @@ describe("ContentController — Tích hợp Sidecar Drive", () => {
 
     controller.dispose();
   });
+
+  // ============================================================================
+  // Tests bổ sung Phase 9.6 E4: Controller với mode en / vi / pair
+  // ============================================================================
+
+  it("E4.1: pair khớp tốt → session có item engine = 'file', không gửi translate, toast 'EN + VI'", async () => {
+    setupFakeEnvironment(true, true);
+    const controller = new ContentController();
+    await controller.init();
+
+    const v = makeVideo();
+    controller.onVideoForTest(v);
+
+    const lastMsg = mockPort.postMessage.mock.calls[0][0] as { reqId: string };
+    const enText =
+      "1\r\n00:00:01,000 --> 00:00:03,000\r\nHello\r\n\r\n" +
+      "2\r\n00:00:04,000 --> 00:00:06,000\r\nWorld\r\n";
+    const viText =
+      "1\r\n00:00:01,000 --> 00:00:03,000\r\nXin chào\r\n\r\n" +
+      "2\r\n00:00:04,000 --> 00:00:06,000\r\nThế giới\r\n";
+
+    await act(async () => {
+      messageCallback?.({
+        type: "drive.sidecar.result",
+        reqId: lastMsg.reqId,
+        ok: true,
+        mode: "pair",
+        en: { name: "Lesson01_en.srt", text: enText },
+        vi: { name: "Lesson01_vi.srt", text: viText },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(controller.getSessionOrigin()).toBe("sidecar");
+    expect(controller.getStore()?.getState().toast).toBe("Đã tự nhận phụ đề EN + VI: Lesson01_en.srt");
+
+    const session = controller.getSession();
+    expect(session).not.toBeNull();
+    const items = session!.getItems();
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({
+      source_text: "Hello",
+      target_text: "Xin chào",
+      translated: true,
+      engine: "file",
+    });
+    expect(items[1]).toMatchObject({
+      source_text: "World",
+      target_text: "Thế giới",
+      translated: true,
+      engine: "file",
+    });
+
+    // Không có translate nào được gửi
+    const translateCalls = mockPort.postMessage.mock.calls.filter((c) => c[0].type === "translate");
+    expect(translateCalls).toHaveLength(0);
+
+    controller.dispose();
+  });
+
+  it("E4.2: pair lệch (ratio thấp) → dùng như en, toast cảnh báo, có translate được gửi", async () => {
+    setupFakeEnvironment(true, true);
+    const controller = new ContentController();
+    await controller.init();
+
+    const v = makeVideo();
+    controller.onVideoForTest(v);
+
+    const lastMsg = mockPort.postMessage.mock.calls[0][0] as { reqId: string };
+    const enText =
+      "1\r\n00:00:01,000 --> 00:00:03,000\r\nOne\r\n\r\n" +
+      "2\r\n00:00:04,000 --> 00:00:06,000\r\nTwo\r\n\r\n" +
+      "3\r\n00:00:07,000 --> 00:00:09,000\r\nThree\r\n";
+    // VI hoàn toàn lệch thời gian → ratio 0 < PAIR_MIN_RATIO (0.6)
+    const viText = "1\r\n00:02:00,000 --> 00:02:03,000\r\nLệch\r\n";
+
+    await act(async () => {
+      messageCallback?.({
+        type: "drive.sidecar.result",
+        reqId: lastMsg.reqId,
+        ok: true,
+        mode: "pair",
+        en: { name: "Lesson02_en.srt", text: enText },
+        vi: { name: "Lesson02_vi.srt", text: viText },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(controller.getSessionOrigin()).toBe("sidecar");
+    expect(controller.getStore()?.getState().toast).toBe(
+      "Phụ đề VI lệch thời gian – dùng bản dịch máy cho Lesson02_en.srt"
+    );
+
+    const session = controller.getSession();
+    expect(session).not.toBeNull();
+    const items = session!.getItems();
+    expect(items).toHaveLength(3);
+    // Dùng như EN: translated = false, engine = null
+    for (const item of items) {
+      expect(item.engine).toBeNull();
+      expect(item.translated).toBe(false);
+    }
+
+    // Có translate được gửi
+    const translateCalls = mockPort.postMessage.mock.calls.filter((c) => c[0].type === "translate");
+    expect(translateCalls.length).toBeGreaterThan(0);
+
+    controller.dispose();
+  });
+
+  it("E4.3: pair khớp một phần (80%) → chỉ những câu chưa ghép được gửi đi translate", async () => {
+    setupFakeEnvironment(true, true);
+    const controller = new ContentController();
+    await controller.init();
+
+    const v = makeVideo();
+    controller.onVideoForTest(v);
+
+    const lastMsg = mockPort.postMessage.mock.calls[0][0] as { reqId: string };
+    // 5 câu EN, 4 câu VI khớp (1-3s, 4-6s, 7-9s, 10-12s match; câu 5: 13-15s không có VI)
+    // ratio = 4/5 = 0.8 >= 0.6
+    const enText =
+      "1\r\n00:00:01,000 --> 00:00:03,000\r\nOne\r\n\r\n" +
+      "2\r\n00:00:04,000 --> 00:00:06,000\r\nTwo\r\n\r\n" +
+      "3\r\n00:00:07,000 --> 00:00:09,000\r\nThree\r\n\r\n" +
+      "4\r\n00:00:10,000 --> 00:00:12,000\r\nFour\r\n\r\n" +
+      "5\r\n00:00:13,000 --> 00:00:15,000\r\nFive\r\n";
+    const viText =
+      "1\r\n00:00:01,000 --> 00:00:03,000\r\nMột\r\n\r\n" +
+      "2\r\n00:00:04,000 --> 00:00:06,000\r\nHai\r\n\r\n" +
+      "3\r\n00:00:07,000 --> 00:00:09,000\r\nBa\r\n\r\n" +
+      "4\r\n00:00:10,000 --> 00:00:12,000\r\nBốn\r\n";
+
+    await act(async () => {
+      messageCallback?.({
+        type: "drive.sidecar.result",
+        reqId: lastMsg.reqId,
+        ok: true,
+        mode: "pair",
+        en: { name: "Lesson03_en.srt", text: enText },
+        vi: { name: "Lesson03_vi.srt", text: viText },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(controller.getSessionOrigin()).toBe("sidecar");
+    expect(controller.getStore()?.getState().toast).toBe("Đã tự nhận phụ đề EN + VI: Lesson03_en.srt");
+
+    const session = controller.getSession();
+    expect(session).not.toBeNull();
+    const items = session!.getItems();
+    expect(items).toHaveLength(5);
+
+    // 4 câu đầu đã dịch bằng file
+    for (let i = 0; i < 4; i++) {
+      expect(items[i].translated).toBe(true);
+      expect(items[i].engine).toBe("file");
+    }
+    // Câu thứ 5 chưa dịch
+    expect(items[4].translated).toBe(false);
+    expect(items[4].engine).toBeNull();
+
+    // Chỉ câu thứ 5 ("Five") được gửi đi translate
+    const translateCalls = mockPort.postMessage.mock.calls.filter((c) => c[0].type === "translate");
+    expect(translateCalls.length).toBeGreaterThan(0);
+    const allSentLines = translateCalls.flatMap((c) => (c[0] as { lines: string[] }).lines);
+    expect(allSentLines).toContain("Five");
+    expect(allSentLines).not.toContain("One");
+    expect(allSentLines).not.toContain("Two");
+    expect(allSentLines).not.toContain("Three");
+    expect(allSentLines).not.toContain("Four");
+
+    controller.dispose();
+  });
+
+  it("E4.4: vi → mọi item translated = true, không gửi translate, toast 'tiếng Việt'", async () => {
+    setupFakeEnvironment(true, true);
+    const controller = new ContentController();
+    await controller.init();
+
+    const v = makeVideo();
+    controller.onVideoForTest(v);
+
+    const lastMsg = mockPort.postMessage.mock.calls[0][0] as { reqId: string };
+    const viText =
+      "1\r\n00:00:01,000 --> 00:00:03,000\r\nChào bạn\r\n\r\n" +
+      "2\r\n00:00:04,000 --> 00:00:06,000\r\nCảm ơn\r\n";
+
+    await act(async () => {
+      messageCallback?.({
+        type: "drive.sidecar.result",
+        reqId: lastMsg.reqId,
+        ok: true,
+        mode: "vi",
+        vi: { name: "Lesson04_vi.srt", text: viText },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(controller.getSessionOrigin()).toBe("sidecar");
+    expect(controller.getStore()?.getState().toast).toBe("Đã tự nhận phụ đề tiếng Việt: Lesson04_vi.srt");
+
+    const session = controller.getSession();
+    expect(session).not.toBeNull();
+    const items = session!.getItems();
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({
+      source_text: "",
+      target_text: "Chào bạn",
+      translated: true,
+      engine: "file",
+    });
+    expect(items[1]).toMatchObject({
+      source_text: "",
+      target_text: "Cảm ơn",
+      translated: true,
+      engine: "file",
+    });
+
+    // Không gửi translate nào
+    const translateCalls = mockPort.postMessage.mock.calls.filter((c) => c[0].type === "translate");
+    expect(translateCalls).toHaveLength(0);
+
+    controller.dispose();
+  });
+
+  it("E4.5: en → hành vi như cũ, toast thường, có gửi translate", async () => {
+    setupFakeEnvironment(true, true);
+    const controller = new ContentController();
+    await controller.init();
+
+    const v = makeVideo();
+    controller.onVideoForTest(v);
+
+    const lastMsg = mockPort.postMessage.mock.calls[0][0] as { reqId: string };
+    const enText = "1\r\n00:00:01,000 --> 00:00:03,000\r\nHello English\r\n";
+
+    await act(async () => {
+      messageCallback?.({
+        type: "drive.sidecar.result",
+        reqId: lastMsg.reqId,
+        ok: true,
+        mode: "en",
+        en: { name: "Lesson05_en.srt", text: enText },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(controller.getSessionOrigin()).toBe("sidecar");
+    expect(controller.getStore()?.getState().toast).toBe("Đã tự nhận phụ đề: Lesson05_en.srt");
+
+    const session = controller.getSession();
+    expect(session).not.toBeNull();
+    const items = session!.getItems();
+    expect(items).toHaveLength(1);
+    expect(items[0].translated).toBe(false);
+    expect(items[0].engine).toBeNull();
+
+    const translateCalls = mockPort.postMessage.mock.calls.filter((c) => c[0].type === "translate");
+    expect(translateCalls.length).toBeGreaterThan(0);
+
+    controller.dispose();
+  });
+
+  it("E4.6: bilingual → toast như cũ, nạp bilingual", async () => {
+    setupFakeEnvironment(true, true);
+    const controller = new ContentController();
+    await controller.init();
+
+    const v = makeVideo();
+    controller.onVideoForTest(v);
+
+    const lastMsg = mockPort.postMessage.mock.calls[0][0] as { reqId: string };
+    const biText = "1\r\n00:00:01,000 --> 00:00:03,000\r\nHello\r\nXin chào\r\n";
+
+    await act(async () => {
+      messageCallback?.({
+        type: "drive.sidecar.result",
+        reqId: lastMsg.reqId,
+        ok: true,
+        mode: "bilingual",
+        bi: { name: "Lesson06_bilingual.srt", text: biText },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(controller.getSessionOrigin()).toBe("sidecar");
+    expect(controller.getStore()?.getState().toast).toBe("Đã tự nhận phụ đề: Lesson06_bilingual.srt");
+
+    const session = controller.getSession();
+    expect(session).not.toBeNull();
+    const items = session!.getItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      source_text: "Hello",
+      target_text: "Xin chào",
+      translated: true,
+      engine: "file",
+    });
+
+    controller.dispose();
+  });
+
+  it("E4.7: Bấm Nhập sau khi đã có pair → thay thế, đúng 1 overlay, sessionOrigin = user", async () => {
+    setupFakeEnvironment(true, true);
+    const controller = new ContentController();
+    await controller.init();
+
+    const v = makeVideo();
+    controller.onVideoForTest(v);
+
+    const lastMsg = mockPort.postMessage.mock.calls[0][0] as { reqId: string };
+    await act(async () => {
+      messageCallback?.({
+        type: "drive.sidecar.result",
+        reqId: lastMsg.reqId,
+        ok: true,
+        mode: "pair",
+        en: { name: "Lesson_en.srt", text: "1\r\n00:00:01,000 --> 00:00:02,000\r\nPair EN\r\n" },
+        vi: { name: "Lesson_vi.srt", text: "1\r\n00:00:01,000 --> 00:00:02,000\r\nPair VI\r\n" },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(controller.getSessionOrigin()).toBe("sidecar");
+    expect(document.querySelectorAll("subtrans-overlay")).toHaveLength(1);
+
+    // Người dùng bấm Nhập file đè lên
+    const manualFile = new File(
+      ["1\r\n00:00:01,000 --> 00:00:02,000\r\nManual Sub\r\n"],
+      "manual.srt",
+      { type: "text/plain" }
+    );
+    await act(async () => {
+      await controller.handleImportFileForTest(manualFile);
+    });
+
+    expect(controller.getSessionOrigin()).toBe("user");
+    expect(document.querySelectorAll("subtrans-overlay")).toHaveLength(1);
+    expect(controller.getStore()?.getState().trackTitle).toBe("manual");
+
+    controller.dispose();
+  });
+
+  it("E4.8: Kết quả pair đến sau khi đổi video → bị bỏ, không tạo session sai", async () => {
+    setupFakeEnvironment(true, true);
+    const controller = new ContentController();
+    await controller.init();
+
+    const v1 = makeVideo();
+    controller.onVideoForTest(v1);
+
+    const lastMsg = mockPort.postMessage.mock.calls[0][0] as { reqId: string };
+
+    // Đổi video khác
+    const v2 = makeVideo();
+    controller.onVideoForTest(v2);
+
+    // Kết quả cho video 1 đến sau
+    await act(async () => {
+      messageCallback?.({
+        type: "drive.sidecar.result",
+        reqId: lastMsg.reqId,
+        ok: true,
+        mode: "pair",
+        en: { name: "OldVideo_en.srt", text: "1\r\n00:00:01,000 --> 00:00:02,000\r\nOld EN\r\n" },
+        vi: { name: "OldVideo_vi.srt", text: "1\r\n00:00:01,000 --> 00:00:02,000\r\nOld VI\r\n" },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    expect(controller.getStore()?.getState().toast).not.toBe("Đã tự nhận phụ đề EN + VI: OldVideo_en.srt");
+
+    controller.dispose();
+  });
 });
 
 describe("Review D5", () => {
@@ -827,7 +1248,13 @@ describe("Review D5", () => {
     const r = await requestSidecar(
       undefined,
       {
-        request: async (m) => ({ type: "drive.sidecar.result", reqId: m.reqId, ok: true, fileName: "a.srt", text: "x" }),
+        request: async (m) => ({
+          type: "drive.sidecar.result",
+          reqId: m.reqId,
+          ok: true,
+          mode: "en",
+          en: { name: "a.srt", text: "x" },
+        }),
         sleep: async () => undefined,
         newReqId: () => "r1",
       },
