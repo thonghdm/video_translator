@@ -1,6 +1,6 @@
 /**
  * SubTrans Extension — So khớp tên file phụ đề đi kèm (Sidecar Matcher)
- * Phase 9.5 D1: Hàm thuần quyết định file nào là phụ đề tương ứng của video
+ * Phase 9.5 D1 & Phase 9.6 E1: Hàm thuần quyết định file nào là phụ đề tương ứng của video
  */
 
 export interface DriveEntry {
@@ -12,6 +12,14 @@ export type SidecarKind = "bilingual" | "en" | "plain";
 
 export type SidecarResult =
   | { status: "match"; entry: DriveEntry; kind: SidecarKind }
+  | { status: "none" }
+  | { status: "ambiguous" };
+
+export type SidecarSet =
+  | { status: "bilingual"; bi: DriveEntry }
+  | { status: "pair"; en: DriveEntry; vi: DriveEntry }
+  | { status: "en"; en: DriveEntry }
+  | { status: "vi"; vi: DriveEntry }
   | { status: "none" }
   | { status: "ambiguous" };
 
@@ -29,14 +37,14 @@ export const SUB_EXTS: readonly string[] = [
   ".vtt",
 ] as const;
 
-const BILINGUAL_SUFFIXES = [
+export const BILINGUAL_SUFFIXES = [
   "_bilingual",
   ".bilingual",
   "-bilingual",
   " bilingual",
 ] as const;
 
-const EN_SUFFIXES = [
+export const EN_SUFFIXES = [
   "_en",
   ".en",
   "-en",
@@ -55,7 +63,23 @@ const EN_SUFFIXES = [
   ".en_us",
 ] as const;
 
-const VI_SUFFIXES = ["_vi", ".vi", "-vi", "_vie", ".vie"] as const;
+export const VI_SUFFIXES = [
+  "_vi",
+  ".vi",
+  "-vi",
+  " vi",
+  "_vie",
+  ".vie",
+  "_vietnamese",
+  ".vietnamese",
+  " (vietnamese)",
+  " [vietnamese]",
+  ".vi-vn",
+  "_vi-vn",
+  "-vi-vn",
+  "_vi_vn",
+  ".vi_vn",
+] as const;
 
 /**
  * Chuẩn hoá tên file:
@@ -90,41 +114,69 @@ export function stripExt(name: string, exts: readonly string[]): string {
  * ("Lesson .mp4" ↔ "Lesson _en.srt" / "Lesson .srt"). base đã được trim nên khoảng trắng đó bị mất.
  * Vẫn so TOÀN BỘ chuỗi bằng === (không startsWith/regex).
  */
-function stemMatches(stem: string, base: string, suffix: string): boolean {
+export function stemMatches(stem: string, base: string, suffix: string): boolean {
   if (!stem.endsWith(suffix)) return false;
   const rest = stem.slice(0, stem.length - suffix.length);
   return rest === base || rest.trimEnd() === base;
 }
 
-interface MatchCandidate {
+interface RoleCandidate {
   entry: DriveEntry;
-  kind: SidecarKind;
-  groupRank: number; // 0: bilingual, 1: en, 2: plain
   subExtRank: number; // 0: .srt, 1: .vtt
   suffixRank: number; // vị trí trong mảng suffix của group
 }
 
+type RolePick =
+  | { status: "ok"; entry: DriveEntry }
+  | { status: "ambiguous" }
+  | { status: "none" };
+
+function pickBestCandidate(candidates: readonly RoleCandidate[]): RolePick {
+  if (candidates.length === 0) {
+    return { status: "none" };
+  }
+
+  const sorted = [...candidates].sort((a, b) => {
+    if (a.subExtRank !== b.subExtRank) {
+      return a.subExtRank - b.subExtRank;
+    }
+    return a.suffixRank - b.suffixRank;
+  });
+
+  const best = sorted[0];
+  const topTied = sorted.filter(
+    (c) => c.subExtRank === best.subExtRank && c.suffixRank === best.suffixRank
+  );
+
+  const uniqueIds = new Set(topTied.map((c) => c.entry.id));
+  if (uniqueIds.size > 1) {
+    return { status: "ambiguous" };
+  }
+
+  return { status: "ok", entry: topTied[0].entry };
+}
+
 /**
- * Quyết định file nào trong entries là phụ đề của videoName.
+ * Phân loại bộ file phụ đề ứng với videoName theo 3 trường hợp EN + VI / EN / VI (Phase 9.6 E1).
  * Hàm thuần: không đụng DOM, chrome API, fetch hay Date.
  */
-export function findSidecar(
+export function findSidecarSet(
   videoName: string,
   entries: readonly DriveEntry[]
-): SidecarResult {
-  // Chuẩn hoá TRƯỚC khi cắt đuôi: tiêu đề preview/tên file có thể dư khoảng trắng ở cuối ("Lesson.mp4 ")
+): SidecarSet {
   const base = normalizeName(stripExt(normalizeName(videoName), VIDEO_EXTS));
-  // 10. base rỗng -> none
   if (base === "") {
     return { status: "none" };
   }
 
-  const candidates: MatchCandidate[] = [];
+  const biCandidates: RoleCandidate[] = [];
+  const enCandidates: RoleCandidate[] = [];
+  const plainCandidates: RoleCandidate[] = [];
+  const viCandidates: RoleCandidate[] = [];
 
   for (const entry of entries) {
     const normEntryName = normalizeName(entry.name);
 
-    // 4. Entry là ứng viên khi kết thúc bằng một đuôi trong SUB_EXTS
     let subExt = "";
     for (const ext of SUB_EXTS) {
       if (normEntryName.endsWith(ext)) {
@@ -134,98 +186,125 @@ export function findSidecar(
     }
     if (!subExt) continue;
 
+    const subExtRank = subExt === ".srt" ? 0 : 1;
     const stem = normEntryName.slice(0, normEntryName.length - subExt.length);
 
-    // 9. stem kết thúc bằng _vi, .vi, -vi, _vie, .vie không bao giờ được chọn
-    if (VI_SUFFIXES.some((vi) => stem.endsWith(vi))) {
-      continue;
-    }
-
-    const subExtRank = subExt === ".srt" ? 0 : 1;
-
-    // 5 & 6. Khớp khi và chỉ khi stem === base + suffix (so toàn bộ chuỗi)
-    // Nhóm 1: bilingual
     let matched = false;
+    // 1. Nhóm bilingual
     for (let i = 0; i < BILINGUAL_SUFFIXES.length; i++) {
-      const suffix = BILINGUAL_SUFFIXES[i];
-      if (stemMatches(stem, base, suffix)) {
-        candidates.push({
-          entry,
-          kind: "bilingual",
-          groupRank: 0,
-          subExtRank,
-          suffixRank: i,
-        });
+      if (stemMatches(stem, base, BILINGUAL_SUFFIXES[i])) {
+        biCandidates.push({ entry, subExtRank, suffixRank: i });
         matched = true;
         break;
       }
     }
     if (matched) continue;
 
-    // Nhóm 2: en
+    // 2. Nhóm en
     for (let i = 0; i < EN_SUFFIXES.length; i++) {
-      const suffix = EN_SUFFIXES[i];
-      if (stemMatches(stem, base, suffix)) {
-        candidates.push({
-          entry,
-          kind: "en",
-          groupRank: 1,
-          subExtRank,
-          suffixRank: i,
-        });
+      if (stemMatches(stem, base, EN_SUFFIXES[i])) {
+        enCandidates.push({ entry, subExtRank, suffixRank: i });
         matched = true;
         break;
       }
     }
     if (matched) continue;
 
-    // Nhóm 3: plain ("")
+    // 3. Nhóm vi
+    for (let i = 0; i < VI_SUFFIXES.length; i++) {
+      if (stemMatches(stem, base, VI_SUFFIXES[i])) {
+        viCandidates.push({ entry, subExtRank, suffixRank: i });
+        matched = true;
+        break;
+      }
+    }
+    if (matched) continue;
+
+    // 4. Nhóm plain ("")
     if (stemMatches(stem, base, "")) {
-      candidates.push({
-        entry,
-        kind: "plain",
-        groupRank: 2,
-        subExtRank,
-        suffixRank: 0,
-      });
+      plainCandidates.push({ entry, subExtRank, suffixRank: 0 });
     }
   }
 
-  if (candidates.length === 0) {
-    return { status: "none" };
+  const biRole = pickBestCandidate(biCandidates);
+  let enRole = pickBestCandidate(enCandidates);
+  if (enCandidates.length === 0) {
+    enRole = pickBestCandidate(plainCandidates);
+  }
+  const viRole = pickBestCandidate(viCandidates);
+
+  // Thứ tự quyết định & ambiguous theo §1:
+  // 1. Vai trò bi ambiguous -> toàn bộ ambiguous
+  if (biRole.status === "ambiguous") {
+    return { status: "ambiguous" };
+  }
+  // Có bi hợp lệ -> bilingual
+  if (biRole.status === "ok") {
+    return { status: "bilingual", bi: biRole.entry };
   }
 
-  // 7. Chọn nhóm có ưu tiên cao nhất có ứng viên
-  let bestGroupRank = 2;
-  for (const c of candidates) {
-    if (c.groupRank < bestGroupRank) {
-      bestGroupRank = c.groupRank;
-    }
-  }
-  const groupCandidates = candidates.filter((c) => c.groupRank === bestGroupRank);
-
-  // Trong nhóm: .srt thắng .vtt (subExtRank asc), rồi tới hậu tố đứng trước (suffixRank asc)
-  groupCandidates.sort((a, b) => {
-    if (a.subExtRank !== b.subExtRank) {
-      return a.subExtRank - b.subExtRank;
-    }
-    return a.suffixRank - b.suffixRank;
-  });
-
-  const best = groupCandidates[0];
-  const topTied = groupCandidates.filter(
-    (c) => c.subExtRank === best.subExtRank && c.suffixRank === best.suffixRank
-  );
-
-  // 8. Còn >= 2 ứng viên khác id ngang hạng nhau -> ambiguous. Trùng id -> tính là 1
-  const uniqueIds = new Set(topTied.map((c) => c.entry.id));
-  if (uniqueIds.size > 1) {
+  // Vai trò en ambiguous -> ambiguous
+  if (enRole.status === "ambiguous") {
     return { status: "ambiguous" };
   }
 
-  return {
-    status: "match",
-    entry: topTied[0].entry,
-    kind: best.kind,
-  };
+  // Có en hợp lệ
+  if (enRole.status === "ok") {
+    if (viRole.status === "ok") {
+      // 2. Có en và vi -> pair
+      return { status: "pair", en: enRole.entry, vi: viRole.entry };
+    }
+    // viRole là ambiguous mà en hợp lệ -> bỏ vi, trả en
+    // viRole là none mà en hợp lệ -> trả en
+    return { status: "en", en: enRole.entry };
+  }
+
+  // Không có en (enRole.status === "none")
+  if (viRole.status === "ambiguous") {
+    // viRole ambiguous mà không có en -> ambiguous
+    return { status: "ambiguous" };
+  }
+  if (viRole.status === "ok") {
+    // 4. Chỉ vi -> vi
+    return { status: "vi", vi: viRole.entry };
+  }
+
+  // 5. Không có gì -> none
+  return { status: "none" };
+}
+
+/**
+ * Quyết định file nào trong entries là phụ đề của videoName (tương thích ngược Phase 9.5 D1).
+ * Cài lại qua findSidecarSet.
+ */
+export function findSidecar(
+  videoName: string,
+  entries: readonly DriveEntry[]
+): SidecarResult {
+  const set = findSidecarSet(videoName, entries);
+  switch (set.status) {
+    case "bilingual":
+      return { status: "match", entry: set.bi, kind: "bilingual" };
+    case "pair":
+      return { status: "match", entry: set.en, kind: "en" };
+    case "en": {
+      const base = normalizeName(stripExt(normalizeName(videoName), VIDEO_EXTS));
+      const normName = normalizeName(set.en.name);
+      let subExt = "";
+      for (const ext of SUB_EXTS) {
+        if (normName.endsWith(ext)) {
+          subExt = ext;
+          break;
+        }
+      }
+      const stem = normName.slice(0, normName.length - subExt.length);
+      const isEnSuffix = EN_SUFFIXES.some((s) => stemMatches(stem, base, s));
+      return { status: "match", entry: set.en, kind: isEnSuffix ? "en" : "plain" };
+    }
+    case "ambiguous":
+      return { status: "ambiguous" };
+    case "vi":
+    case "none":
+      return { status: "none" };
+  }
 }

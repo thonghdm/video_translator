@@ -569,3 +569,17 @@ Kết quả: typecheck OK, 412/412 test, build + verify-dist OK.
 **Kiểm chứng:** chạy bundle `DriveIndex` đã build trên trang Drive thật với preview `001 Introduction.mp4` đang mở → `match` `001 Introduction_en.srt` (bỏ qua `_vi.srt`).
 **Chưa kiểm chứng được (cần chạy extension thật):** SW fetch có cookie (T7), YouTube adapter trong iframe embed của Drive, hiển thị overlay.
 Kết quả: typecheck OK, 413/413 test, build + verify-dist OK.
+
+## Phase 9.6 – E1 + E2 Review
+
+**E1 (`findSidecarSet`)** đạt §1: chọn tốt nhất theo từng vai trò (bi / en→plain / vi), quy tắc ambiguous đúng (vi ambiguous + có en → bỏ vi), `findSidecar` cũ cài lại qua `findSidecarSet`, test D1 không sửa. Thử trên tên file thật thư mục AWS (`001 Introduction_en.srt`, `_vi.srt`, `.mp4`, `.html`) → `pair` đúng.
+
+**E2 (`mergeEnVi`, `parseViForced`, `fromPair`, `forceLang`)** đạt §2: O(n+m), bảo toàn id/thứ tự/thời gian EN, 1 EN nhận nhiều VI, câu VI không dấu vẫn ghép, constructor cũ không đổi.
+
+| # | Lỗi | Sửa | Test |
+|---|---|---|---|
+| 1 | Thuật toán 2 con trỏ giả định file đã sắp theo thời gian; file VI đảo thứ tự → con trỏ EN chạy quá → ghép hụt (thử: ratio 0.33 thay vì 1) → dễ rơi xuống dưới `PAIR_MIN_RATIO` và quay về dịch máy | Sắp chỉ số EN (không đổi mảng EN) và bản sao VI trước khi ghép | "Review E2" ×2 |
+| 2 | `forceLang: "vi"` dùng cùng `trackKey` với lần Nhập tay cùng file (parse thường: câu không dấu bị đem dịch và lưu cache) → mở lại, `applyLinesToItems` ghi đè câu VI của file bằng bản dịch máy | `trackKey` = `file:${name}:vi:${hash}` (cập nhật PLAN-drive-envi §3) | `importedPair` |
+
+Ghi nhận (không sửa): `ImportedSubtitleOptions._custom` là cửa hậu nội bộ cho `fromPair` nằm trên constructor public — chấp nhận, không dùng ở nơi khác.
+Kết quả: typecheck OK, 456/456 test, build + verify-dist OK.

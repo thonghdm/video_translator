@@ -210,4 +210,15 @@ describe("Phase 9.5 D1 — sidecarMatch", () => {
     expect(stripExt("Movie.MP4", VIDEO_EXTS)).toBe("Movie");
     expect(normalizeName("  BÀI  1\u00A0 ")).toBe("bài 1");
   });
+
+  it("18. findSidecar cài lại qua findSidecarSet vẫn chọn _en khi có cả _en và _vi", () => {
+    const video = "Lesson.mp4";
+    const en: DriveEntry = { id: "1", name: "Lesson_en.srt" };
+    const vi: DriveEntry = { id: "2", name: "Lesson_vi.srt" };
+    expect(findSidecar(video, [vi, en])).toEqual({
+      status: "match",
+      entry: en,
+      kind: "en",
+    });
+  });
 });
