@@ -38,21 +38,37 @@ Tiện ích cho các trình duyệt nhân Chromium (Chrome, Edge, Brave, Cốc C
 
 ## Google Drive: tự nhận phụ đề
 
-Khi mở preview video trong thư mục trên Google Drive (ví dụ: `001.mp4`), SubTrans tự động quét danh sách file cùng thư mục trong DOM, tìm file phụ đề tương ứng, tải ngầm và hiển thị song ngữ ngay khi bạn phát video.
+Khi bạn mở preview một video trong thư mục trên Google Drive rồi bấm play, SubTrans tìm các file phụ đề cùng tên trong thư mục đó, tải ngầm (dùng phiên đăng nhập Drive của bạn) và hiển thị ngay.
+
+### 3 trường hợp chính
+
+Ví dụ với video `001 Intro.mp4`:
+
+| TH | Thư mục có | Hiển thị | Gọi API dịch |
+|:---:|---|---|---|
+| 1 | `001 Intro_en.srt` + `001 Intro_vi.srt` | Song ngữ: dòng EN từ file `_en`, dòng VI từ file `_vi` (ghép theo thời gian). Toast *"Đã tự nhận phụ đề EN + VI: 001 Intro_en.srt"*. Các câu EN không ghép được với câu VI nào vẫn được dịch bằng máy | **Không**, trừ những câu EN không ghép được với câu VI nào |
+| 2 | Chỉ `001 Intro_en.srt` | EN, phần VI do máy dịch (Google/Gemini theo chế độ đang chọn). Toast *"Đã tự nhận phụ đề: 001 Intro_en.srt"* | Có |
+| 3 | Chỉ `001 Intro_vi.srt` | Chỉ tiếng Việt. Toast *"Đã tự nhận phụ đề tiếng Việt: 001 Intro_vi.srt"* | **Không** |
+
+Ngoài ra:
+- **`001 Intro_bilingual.srt`** (file song ngữ do bản Desktop xuất) luôn được ưu tiên cao nhất: hiện ngay, không gọi API.
+- **`001 Intro.srt`** (không hậu tố) được coi là file tiếng Anh, giống TH2. Nếu nội dung thực ra toàn tiếng Việt thì tự hiện như TH3.
+- **TH1 khi hai file lệch thời gian quá nhiều** (ghép được dưới 60% số câu): bỏ file VI, chuyển sang dùng bản dịch máy cho file EN, kèm toast *"Phụ đề VI lệch thời gian – dùng bản dịch máy cho 001 Intro_en.srt"*.
+- **TH1 khi tải được 1 file:** tải file VI lỗi thì chuyển sang TH2 (vẫn dịch được); tải file EN lỗi thì chuyển sang TH3.
+- Mở lại video đã xem: bản dịch lấy từ cache, không gọi API lần nữa.
 
 ### Quy tắc đặt tên file phụ đề
 
-File phụ đề phải nằm **cùng thư mục** và có **cùng tên** với video (không phân biệt hoa thường), cộng thêm một trong các hậu tố sau. Ví dụ với `001 Intro.mp4`:
+File phụ đề phải nằm **cùng thư mục** và có **cùng tên** với video (không phân biệt hoa thường), cộng một hậu tố:
 
-| Ưu tiên | Hậu tố | Ví dụ | Hành vi |
-|:---:|---|---|---|
-| 1 | `_bilingual`, `.bilingual`, `-bilingual`, ` bilingual` | `001 Intro_bilingual.srt` | File song ngữ (bản Desktop xuất): hiện ngay, **không gọi API dịch** |
-| 2 | `_en`, `.en`, `-en`, ` en`, `_eng`, `.eng`, `_english`, `.english`, ` (english)`, ` [english]`, `.en-US`, `_en-US`, `-en-US`, `_en_US`, `.en_US` | `001 Intro_en.srt` | Phụ đề tiếng Anh, tự dịch sang tiếng Việt |
-| 3 | (không hậu tố) | `001 Intro.srt` | Coi là tiếng Anh, tự dịch |
+| Loại | Hậu tố được nhận |
+|---|---|
+| Song ngữ | `_bilingual`, `.bilingual`, `-bilingual`, ` bilingual` |
+| Tiếng Anh | `_en`, `.en`, `-en`, ` en`, `_eng`, `.eng`, `_english`, `.english`, ` (english)`, ` [english]`, `.en-US`, `_en-US`, `-en-US`, `_en_US`, `.en_US`, hoặc không hậu tố |
+| Tiếng Việt | `_vi`, `.vi`, `-vi`, ` vi`, `_vie`, `.vie`, `_vietnamese`, `.vietnamese`, ` (vietnamese)`, ` [vietnamese]`, `.vi-VN`, `_vi-VN`, `-vi-VN`, `_vi_VN`, `.vi_VN` |
 
-- Nhận cả `.srt` và `.vtt`; cùng mức ưu tiên thì `.srt` được chọn trước.
-- File tiếng Việt (`_vi`, `.vi`, `-vi`, `_vie`, `.vie`) **không** được tự nhận. Muốn dùng thì bấm **Nhập**.
-- Tên phải khớp toàn bộ: `001 Intro.mp4` không nhận nhầm `0010 Intro_en.srt` hay `001 Intro part2_en.srt`.
+- Nhận cả `.srt` và `.vtt`; cùng loại thì `.srt` được chọn trước.
+- Tên phải khớp toàn bộ: `001 Intro.mp4` không nhận nhầm `0010 Intro_en.srt` hay `001 Intro part2_vi.srt`.
 
 ### Thứ tự ưu tiên nguồn phụ đề
 
@@ -71,7 +87,8 @@ Nếu không muốn tiện ích tự tìm và tải phụ đề trên Drive:
 
 - **Thư mục dài (> 50–60 file):** Do Google Drive ảo hóa danh sách DOM (chỉ dựng các phần tử đang hiển thị trên màn hình), nếu video nằm ở cuối thư mục chưa được cuộn tới, file `.srt` có thể chưa xuất hiện trong DOM. Bạn chỉ cần cuộn danh sách xuống trước khi mở video để Drive nạp các phần tử vào DOM.
 - **Thư mục cấm tải xuống:** Với các thư mục chia sẻ có chính sách hạn chế quyền tải xuống của người xem, Google Drive chặn tải file phụ đề (báo toast *"Không có quyền tải phụ đề – bấm Nhập để chọn file"*). Trong trường hợp này, bạn có thể tự nhập file phụ đề từ máy.
-- **File trùng tên:** Nếu trong cùng thư mục có nhiều file phụ đề cùng khớp với video ở cùng mức ưu tiên, SubTrans sẽ dừng và báo toast *"Có nhiều file trùng tên – bấm Nhập để chọn"* để tránh nạp sai nội dung.
+- **File trùng tên:** Nếu có nhiều file EN (hoặc song ngữ) cùng khớp với video ở cùng mức ưu tiên, SubTrans dừng và báo *"Có nhiều file trùng tên – bấm Nhập để chọn"*. Nếu chỉ file VI bị trùng mà có file EN, SubTrans bỏ file VI và dùng TH2.
+- **Nút Nhập** vẫn nhập 1 file như trước (không tự ghép EN + VI).
 
 ---
 

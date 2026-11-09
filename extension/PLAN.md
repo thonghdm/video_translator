@@ -765,9 +765,9 @@ export interface SiteAdapter {
 
 Chi tiết: xem `PLAN-drive-sidecar.md` (đã hoàn thành D0–D6).
 
-### Phase 9.6: Drive tự nhận phụ đề theo 3 trường hợp EN + VI / EN / VI
+### Phase 9.6: Drive tự nhận phụ đề theo 3 trường hợp EN + VI / EN / VI (hoàn thành E1–E5; chờ kiểm thử thật)
 
-Chi tiết: xem `PLAN-drive-envi.md` (phase E1–E5, có prompt cho từng phase).
+Chi tiết: xem `PLAN-drive-envi.md` (phase E1–E5, có prompt cho từng phase). Kết quả kiểm thử: `NOTES.md` › Phase 9.6 – E5.
 
 ### Phase 10 (thử nghiệm, không bắt buộc): Video không có phụ đề → thu âm tab gửi Gemini
 - Quyền thêm: `tabCapture`, `offscreen`.

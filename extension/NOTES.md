@@ -597,3 +597,21 @@ Kết quả: typecheck OK, 465/465 test, build + verify-dist OK.
 Dọn tương thích tạm của E3: đã bỏ `result:"match"`, `fileName`/`text`, biến thể không `mode` — `grep "@deprecated" src/shared src/background/drive` rỗng.
 Test: đủ 8 case controller E4 (pair khớp tốt / lệch / khớp 80% chỉ dịch câu thiếu / vi / en / bilingual / Nhập đè / đổi video); test D5 cũ không bỏ expect nào. Không phát hiện lỗi.
 Kết quả: typecheck OK, 473/473 test, build + verify-dist OK.
+
+## Phase 9.6 – E5: Tài liệu + kiểm thử thật
+
+README mục "Google Drive: tự nhận phụ đề" viết lại theo 3 trường hợp (bảng TH1/TH2/TH3, hậu tố VI, hạ cấp khi lệch/lỗi, nút Nhập không ghép).
+
+**Đã kiểm chứng bằng built-in browser (09/11/2026, thư mục AWS `01 - Introduction`):** bundle `DriveIndex` của E4 chạy trên trang Drive thật, preview `001 Introduction.mp4` đang mở → `result: "pair"` (`001 Introduction_en.srt` + `001 Introduction_vi.srt`, indexed 8). Không lấy được nội dung `.srt` từ trang (CORS ở bước redirect; tải về máy cần người dùng cho phép) → tỷ lệ ghép trên dữ liệu thật CHƯA đo.
+
+**Kiểm thử thủ công — người dùng chạy trên Chrome có cài SubTrans, điền kết quả:**
+
+| # | Kiểm tra | Kỳ vọng | Kết quả | Ghi chú |
+|---|---|---|---|---|
+| 1 | Mở `001 Introduction.mp4` (thư mục AWS `01 - Introduction`) | Toast "EN + VI", song ngữ hiện ngay | | |
+| 2 | Popup | Số dòng dịch Google/Gemini ≈ 0 (chỉ các câu không ghép được) | | |
+| 3 | Tab Network của SW | 2 request `uc?export=download`, không có request `translate` (hoặc rất ít) | | |
+| 4 | Tạm đổi tên `_vi` thành tên khác | Về TH2: toast thường, có dịch | | |
+| 5 | Thư mục chỉ có `_vi` | Toast "tiếng Việt", chỉ hiện VI, không có request dịch | | |
+| 6 | F5, mở lại bài 001 | Hiện ngay từ cache | | |
+| 7 | Bấm Nhập một file khác | Thay phụ đề, chỉ 1 overlay | | |
