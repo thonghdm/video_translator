@@ -403,6 +403,27 @@ export function Options() {
                 </p>
               </div>
             </label>
+
+            <label className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={settings.drive.autoSidecar}
+                onChange={(e) =>
+                  updateSettings({
+                    drive: { ...settings.drive, autoSidecar: e.target.checked },
+                  })
+                }
+                className="mt-0.5 accent-amber-400 rounded w-4 h-4"
+              />
+              <div>
+                <span className="text-xs font-medium text-white">
+                  Tự nhận phụ đề .srt cùng thư mục trên Google Drive
+                </span>
+                <p className="text-[11px] text-neutral-400">
+                  Dùng phiên đăng nhập Google của bạn để tải file phụ đề cùng thư mục. Nội dung chỉ dùng trong tiện ích.
+                </p>
+              </div>
+            </label>
           </div>
         </section>
 

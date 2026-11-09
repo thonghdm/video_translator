@@ -4,6 +4,7 @@ import {
   deepMerge,
   loadSettings,
   saveSettings,
+  sanitizeSettings,
   getApiKey,
   setApiKey,
 } from "../src/shared/settings";
@@ -77,5 +78,54 @@ describe("Settings Management", () => {
     expect(await getApiKey()).toBe("AIzaSyTestKey123");
     await setApiKey("NewKey456");
     expect(await getApiKey()).toBe("NewKey456");
+  });
+
+  describe("Phase 9.5 D2 — Drive autoSidecar setting", () => {
+    it("mặc định DEFAULT_SETTINGS.drive.autoSidecar là true", () => {
+      expect(DEFAULT_SETTINGS.drive.autoSidecar).toBe(true);
+    });
+
+    it("blob cũ không có khóa drive → load ra drive.autoSidecar === true", async () => {
+      // Giả lập storage lưu blob cũ từ bản trước Phase 9.5 (không hề có trường drive)
+      const oldBlob = {
+        mode: "google",
+        gemini: { model: "gemini-3.5-flash-lite", rpm: 12 },
+        shortcuts: { enabled: true },
+      };
+      await chrome.storage.local.set({ settings: oldBlob });
+
+      const loaded = await loadSettings();
+      expect(loaded.drive).toBeDefined();
+      expect(loaded.drive.autoSidecar).toBe(true);
+    });
+
+    it("drive.autoSidecar sai kiểu dữ liệu → sanitize về mặc định true", () => {
+      const base = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        drive: { autoSidecar: "invalid" as unknown as boolean },
+      });
+      expect(base.drive.autoSidecar).toBe(true);
+
+      const nullType = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        drive: { autoSidecar: null as unknown as boolean },
+      });
+      expect(nullType.drive.autoSidecar).toBe(true);
+
+      const numType = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        drive: { autoSidecar: 0 as unknown as boolean },
+      });
+      expect(numType.drive.autoSidecar).toBe(true);
+    });
+
+    it("lưu false rồi load → nhận đúng false", async () => {
+      await saveSettings({
+        drive: { autoSidecar: false },
+      });
+
+      const loaded = await loadSettings();
+      expect(loaded.drive.autoSidecar).toBe(false);
+    });
   });
 });

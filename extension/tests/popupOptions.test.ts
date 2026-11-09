@@ -154,4 +154,23 @@ describe("Phase 7: Settings Storage and Debouncing", () => {
     const contentLoaded = await loadSettings({ includeApiKey: false });
     expect(contentLoaded.gemini.apiKey).toBe("");
   });
+
+  it("công tắc drive.autoSidecar: lưu đúng giá trị khi người dùng bật/tắt", async () => {
+    // Ban đầu mặc định là true
+    const init = await loadSettings();
+    expect(init.drive.autoSidecar).toBe(true);
+
+    // Người dùng bấm tắt công tắc
+    await saveSettings({ drive: { autoSidecar: false } });
+    const savedOff = storageStore["settings"] as typeof DEFAULT_SETTINGS;
+    expect(savedOff.drive.autoSidecar).toBe(false);
+
+    const loadedOff = await loadSettings();
+    expect(loadedOff.drive.autoSidecar).toBe(false);
+
+    // Người dùng bấm bật lại công tắc
+    await saveSettings({ drive: { autoSidecar: true } });
+    const loadedOn = await loadSettings();
+    expect(loadedOn.drive.autoSidecar).toBe(true);
+  });
 });

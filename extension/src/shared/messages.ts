@@ -11,6 +11,7 @@ import type {
   Priority,
   TrackRef
 } from "./types";
+import type { SidecarFailReason } from "./driveTypes";
 
 // Content -> Background (qua Port "subtrans")
 export type C2B =
@@ -34,7 +35,8 @@ export type C2B =
       total: number;
       updates: Array<[number, string]>;
     }
-  | { type: "fetchText"; reqId: string; url: string }; // chỉ http(s), tối đa 2MB
+  | { type: "fetchText"; reqId: string; url: string } // chỉ http(s), tối đa 2MB
+  | { type: "drive.sidecar"; reqId: string; videoDocId?: string };
 
 // Background -> Content
 export type B2C =
@@ -62,6 +64,20 @@ export type B2C =
       type: "status";
       breakers: { api: BreakerView; cloud: BreakerView };
       geminiReady: boolean;
+    }
+  | {
+      type: "drive.sidecar.result";
+      reqId: string;
+      ok: true;
+      fileName: string;
+      text: string;
+    }
+  | {
+      type: "drive.sidecar.result";
+      reqId: string;
+      ok: false;
+      reason: SidecarFailReason;
+      indexed?: number;
     };
 
 export interface BreakerView {

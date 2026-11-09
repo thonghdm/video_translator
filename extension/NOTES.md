@@ -403,3 +403,14 @@ Tài liệu này ghi lại kết quả của các mục đánh dấu **[T] (cầ
 
 Ghi nhận (không phải lỗi): `L.en.srt` + `L_en.srt` → chọn `_en` theo thứ tự hậu tố, không `ambiguous` (đúng spec). Hiệu năng: ~3.4 ms/lần với 5000 entry (chỉ gọi khi mở video) — chấp nhận.
 Kết quả: typecheck OK, 299/299 test, build + verify-dist OK.
+
+## Phase 9.5 – D2 Review (message, setting, công tắc Options)
+
+Đạt spec: `driveTypes.ts` đúng kiểu và type guard; `C2B`/`B2C` chỉ thêm thành viên; `sanitizeSettings` thêm đúng 1 dòng; công tắc Options theo pattern công tắc boolean sẵn có.
+Probe thêm (pass, không cần sửa): blob lưu `drive` = `null` / chuỗi / mảng / số / `{autoSidecar:"yes"}` → đều về `true`; lưu từng phần không làm mất setting khác.
+
+| # | Thiếu sót | Bổ sung | Test |
+|---|---|---|---|
+| 1 | Test Options chỉ kiểm tra storage, không render/bấm công tắc (plan yêu cầu) | Test render thật trang `Options`, tìm công tắc theo nhãn, bấm → sau debounce lưu `drive.autoSidecar=false`, setting khác giữ nguyên; blob `false` → công tắc hiển thị tắt | `driveOptionsToggle.test.ts` |
+
+Kết quả: typecheck OK, 309/309 test, build + verify-dist OK.

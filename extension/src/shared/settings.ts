@@ -44,6 +44,9 @@ export interface Settings {
   shortcuts: {
     enabled: boolean; // true
   };
+  drive: {
+    autoSidecar: boolean; // true
+  };
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -84,6 +87,9 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   shortcuts: {
     enabled: true,
+  },
+  drive: {
+    autoSidecar: true,
   },
 };
 
@@ -200,6 +206,7 @@ export function sanitizeSettings(input: Settings): Settings {
   s.cache.maxTracks = int("cache.maxTracks", s.cache.maxTracks, d.cache.maxTracks);
   s.cache.maxAgeDays = int("cache.maxAgeDays", s.cache.maxAgeDays, d.cache.maxAgeDays);
   s.shortcuts.enabled = typeof s.shortcuts.enabled === "boolean" ? s.shortcuts.enabled : d.shortcuts.enabled;
+  s.drive = { autoSidecar: typeof s.drive?.autoSidecar === "boolean" ? s.drive.autoSidecar : d.drive.autoSidecar };
   return s;
 }
 
