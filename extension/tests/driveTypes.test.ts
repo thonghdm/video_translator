@@ -57,4 +57,49 @@ describe("Phase 9.5 D2 — driveTypes & isDriveLookupReq", () => {
     expect(isDriveLookupReq([])).toBe(false);
     expect(isDriveLookupReq([{ type: "drive.lookup" }])).toBe(false);
   });
+
+  it("Phase 9.6 E3: DriveLookupRes hỗ trợ đầy đủ các biến thể bilingual, pair, en, vi, none, ambiguous", () => {
+    const biRes: import("../src/shared/driveTypes").DriveLookupRes = {
+      ok: true,
+      indexed: 5,
+      result: "bilingual",
+      bi: { id: "bi_1234567890", name: "001_bilingual.srt" },
+    };
+    const pairRes: import("../src/shared/driveTypes").DriveLookupRes = {
+      ok: true,
+      indexed: 10,
+      result: "pair",
+      en: { id: "en_1234567890", name: "001_en.srt" },
+      vi: { id: "vi_1234567890", name: "001_vi.srt" },
+    };
+    const enRes: import("../src/shared/driveTypes").DriveLookupRes = {
+      ok: true,
+      indexed: 3,
+      result: "en",
+      en: { id: "en_1234567890", name: "001_en.srt" },
+    };
+    const viRes: import("../src/shared/driveTypes").DriveLookupRes = {
+      ok: true,
+      indexed: 4,
+      result: "vi",
+      vi: { id: "vi_1234567890", name: "001_vi.srt" },
+    };
+    const noneRes: import("../src/shared/driveTypes").DriveLookupRes = {
+      ok: true,
+      indexed: 0,
+      result: "none",
+    };
+    const ambRes: import("../src/shared/driveTypes").DriveLookupRes = {
+      ok: true,
+      indexed: 2,
+      result: "ambiguous",
+    };
+
+    expect(biRes.result).toBe("bilingual");
+    expect(pairRes.result).toBe("pair");
+    expect(enRes.result).toBe("en");
+    expect(viRes.result).toBe("vi");
+    expect(noneRes.result).toBe("none");
+    expect(ambRes.result).toBe("ambiguous");
+  });
 });

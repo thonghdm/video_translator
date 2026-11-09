@@ -123,11 +123,16 @@ describe("MessagingHub.init (MV3)", () => {
     const mockSidecar = {
       handle: vi.fn(async (_sender, _docId) => ({
         ok: true as const,
+        mode: "en" as const,
+        en: {
+          name: "test.srt",
+          text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
+        },
         fileName: "test.srt",
         text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
       })),
     };
-    makeHub({ translate: vi.fn() }, mockSidecar).init();
+    makeHub({ translate: vi.fn() }, mockSidecar as never).init();
     const port = Object.assign(fakePort(), {
       sender: { tab: { id: 10, url: "https://drive.google.com/test" } },
     });
@@ -147,6 +152,11 @@ describe("MessagingHub.init (MV3)", () => {
       type: "drive.sidecar.result",
       reqId: "req-sidecar-1",
       ok: true,
+      mode: "en",
+      en: {
+        name: "test.srt",
+        text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
+      },
       fileName: "test.srt",
       text: "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello",
     });

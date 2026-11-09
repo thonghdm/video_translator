@@ -11,7 +11,7 @@ import type {
   Priority,
   TrackRef
 } from "./types";
-import type { SidecarFailReason } from "./driveTypes";
+import type { SidecarFailReason, SidecarFile, SidecarMode } from "./driveTypes";
 
 // Content -> Background (qua Port "subtrans")
 export type C2B =
@@ -69,8 +69,26 @@ export type B2C =
       type: "drive.sidecar.result";
       reqId: string;
       ok: true;
+      mode: SidecarMode;
+      en?: SidecarFile;
+      vi?: SidecarFile;
+      bi?: SidecarFile;
+      /** @deprecated Tạm giữ cho content cũ (trước E4) — bằng file chính của mode. XÓA ở Phase 9.6 E4. */
+      fileName: string;
+      /** @deprecated Tạm giữ cho content cũ (trước E4). XÓA ở Phase 9.6 E4 (gửi trùng nội dung qua port). */
+      text: string;
+    }
+  /** @deprecated Biến thể không có `mode` — chỉ để test D5 cũ còn compile. XÓA ở Phase 9.6 E4. */
+  | {
+      type: "drive.sidecar.result";
+      reqId: string;
+      ok: true;
       fileName: string;
       text: string;
+      mode?: SidecarMode;
+      en?: SidecarFile;
+      vi?: SidecarFile;
+      bi?: SidecarFile;
     }
   | {
       type: "drive.sidecar.result";

@@ -1,6 +1,6 @@
 /**
  * SubTrans Extension — Kiểu dữ liệu và hợp đồng cho tính năng Google Drive Sidecar
- * Phase 9.5 D2
+ * Phase 9.5 D2, Phase 9.6 E3 (§4)
  */
 
 export const DRIVE_ID_RE = /^[A-Za-z0-9_-]{10,128}$/;
@@ -20,10 +20,21 @@ export type SidecarFailReason =
 
 export type DriveLookupReq = { type: "drive.lookup"; videoDocId?: string };
 
+export type DriveFileRef = { id: string; name: string };
+
 export type DriveLookupRes =
-  | { ok: true; indexed: number; result: "match"; id: string; name: string }
+  | { ok: true; indexed: number; result: "bilingual"; bi: DriveFileRef }
+  | { ok: true; indexed: number; result: "pair"; en: DriveFileRef; vi: DriveFileRef }
+  | { ok: true; indexed: number; result: "en"; en: DriveFileRef }
+  | { ok: true; indexed: number; result: "vi"; vi: DriveFileRef }
   | { ok: true; indexed: number; result: "none" | "ambiguous" }
-  | { ok: false };
+  | { ok: false }
+  /** @deprecated Dạng của top frame cũ (D4, trước E4) — SW coi như "en". XÓA ở Phase 9.6 E4. */
+  | { ok: true; indexed: number; result: "match"; id: string; name: string };
+
+export type SidecarMode = "bilingual" | "pair" | "en" | "vi";
+
+export type SidecarFile = { name: string; text: string };
 
 /**
  * Type guard kiểm tra message có phải là DriveLookupReq hợp lệ không:

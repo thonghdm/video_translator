@@ -583,3 +583,10 @@ Kết quả: typecheck OK, 413/413 test, build + verify-dist OK.
 
 Ghi nhận (không sửa): `ImportedSubtitleOptions._custom` là cửa hậu nội bộ cho `fromPair` nằm trên constructor public — chấp nhận, không dùng ở nơi khác.
 Kết quả: typecheck OK, 456/456 test, build + verify-dist OK.
+
+## Phase 9.6 – E3 Review (SW tải 1–2 file)
+
+Đạt §3–§4: `fetchOne(id, name)` dùng chung LRU + gộp request trùng; `pair` tải song song bằng `Promise.all`; hạ cấp đúng (vi lỗi → `en`, en lỗi → `vi`, cả hai lỗi → reason của en, parse 0 câu tính là lỗi file đó); ref sai bị bỏ, cả hai sai → `index_unavailable`; bước 1–4 của `handle()` và `driveFetch.ts` không đổi; đủ 7 test + bilingual.
+
+Ghi nhận — **phần tương thích tạm** (hợp lý, vì content/top frame chưa đổi tới E4 nên bản build giữa hai commit vẫn chạy): `DriveLookupRes` còn `result: "match"`; kết quả thành công vẫn kèm `fileName`/`text` (ở `pair` nội dung EN bị gửi 2 lần qua port); `messages.ts` có thêm biến thể không `mode`. Đã đánh dấu `@deprecated … XÓA ở Phase 9.6 E4` và thêm việc dọn vào PLAN-drive-envi "Phase E4" mục 4 + prompt E4.
+Kết quả: typecheck OK, 465/465 test, build + verify-dist OK.

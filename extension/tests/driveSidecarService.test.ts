@@ -35,9 +35,8 @@ describe("DriveSidecarService", () => {
       lookup: vi.fn(async (): Promise<DriveLookupRes> => ({
         ok: true,
         indexed: 10,
-        result: "match",
-        id: validId,
-        name: validName,
+        result: "en",
+        en: { id: validId, name: validName },
       })),
       fetchText: vi.fn(async () => ({
         ok: true as const,
@@ -145,9 +144,8 @@ describe("DriveSidecarService", () => {
     deps.lookup = vi.fn(async (): Promise<DriveLookupRes> => ({
       ok: true,
       indexed: 10,
-      result: "match",
-      id: "bad id with spaces!",
-      name: "valid.srt",
+      result: "en",
+      en: { id: "bad id with spaces!", name: "valid.srt" },
     }));
     const service = new DriveSidecarService(deps);
     const res = await service.handle(validSender);
@@ -159,9 +157,8 @@ describe("DriveSidecarService", () => {
     deps.lookup = vi.fn(async (): Promise<DriveLookupRes> => ({
       ok: true,
       indexed: 10,
-      result: "match",
-      id: validId,
-      name: "   ",
+      result: "en",
+      en: { id: validId, name: "   " },
     }));
     const service = new DriveSidecarService(deps);
     const res = await service.handle(validSender);
@@ -175,12 +172,24 @@ describe("DriveSidecarService", () => {
 
     // Lần 1: fetch thành công và lưu vào LRU
     const firstRes = await service.handle(validSender);
-    expect(firstRes).toEqual({ ok: true, fileName: validName, text: validSubtitleText });
+    expect(firstRes).toEqual({
+      ok: true,
+      mode: "en",
+      en: { name: validName, text: validSubtitleText },
+      fileName: validName,
+      text: validSubtitleText,
+    });
     expect(deps.fetchText).toHaveBeenCalledTimes(1);
 
     // Lần 2: cùng id phụ đề → lấy từ LRU
     const secondRes = await service.handle(validSender);
-    expect(secondRes).toEqual({ ok: true, fileName: validName, text: validSubtitleText });
+    expect(secondRes).toEqual({
+      ok: true,
+      mode: "en",
+      en: { name: validName, text: validSubtitleText },
+      fileName: validName,
+      text: validSubtitleText,
+    });
     expect(deps.fetchText).toHaveBeenCalledTimes(1); // vẫn chỉ 1 lần
   });
 
@@ -207,8 +216,20 @@ describe("DriveSidecarService", () => {
     resolveFetch({ ok: true, text: validSubtitleText });
 
     const [res1, res2] = await Promise.all([promise1, promise2]);
-    expect(res1).toEqual({ ok: true, fileName: validName, text: validSubtitleText });
-    expect(res2).toEqual({ ok: true, fileName: validName, text: validSubtitleText });
+    expect(res1).toEqual({
+      ok: true,
+      mode: "en",
+      en: { name: validName, text: validSubtitleText },
+      fileName: validName,
+      text: validSubtitleText,
+    });
+    expect(res2).toEqual({
+      ok: true,
+      mode: "en",
+      en: { name: validName, text: validSubtitleText },
+      fileName: validName,
+      text: validSubtitleText,
+    });
     expect(deps.fetchText).toHaveBeenCalledTimes(1);
   });
 
@@ -240,7 +261,13 @@ describe("DriveSidecarService", () => {
     // Gọi lại lần 2 → nếu đã bị cache thì fetchText không chạy; vì không cache nên fetchText được gọi lại
     mockCount = 1;
     const res2 = await service.handle(validSender);
-    expect(res2).toEqual({ ok: true, fileName: validName, text: validSubtitleText });
+    expect(res2).toEqual({
+      ok: true,
+      mode: "en",
+      en: { name: validName, text: validSubtitleText },
+      fileName: validName,
+      text: validSubtitleText,
+    });
     expect(deps.fetchText).toHaveBeenCalledTimes(2);
   });
 
@@ -250,6 +277,8 @@ describe("DriveSidecarService", () => {
     const res = await service.handle(validSender);
     expect(res).toEqual({
       ok: true,
+      mode: "en",
+      en: { name: validName, text: validSubtitleText },
       fileName: validName,
       text: validSubtitleText,
     });
@@ -282,9 +311,8 @@ describe("DriveSidecarService - default lookup & integration", () => {
             callback?.({
               ok: true,
               indexed: 5,
-              result: "match",
-              id: "abc1234567890_id",
-              name: "video.srt",
+              result: "en",
+              en: { id: "abc1234567890_id", name: "video.srt" },
             });
           }
         ),
@@ -364,6 +392,7 @@ describe("DriveSidecarService - default lookup & integration", () => {
     const res = await promise;
     expect(res).toEqual({ ok: false, reason: "index_unavailable" });
   });
+
   it("Review D3: lookup trả dữ liệu lạ (result không hợp lệ / indexed không phải số) → không tin", async () => {
     const tab = { tab: { id: 3, url: "https://drive.google.com/drive/folders/abc" } } as chrome.runtime.MessageSender;
     const fetchText = vi.fn();
@@ -378,5 +407,389 @@ describe("DriveSidecarService - default lookup & integration", () => {
       lookup: async () => ({ ok: true, indexed: "x", result: "none" }) as never,
     });
     expect(await badIndexed.handle(tab)).toEqual({ ok: false, reason: "no_match", indexed: 0 });
+  });
+});
+
+describe("DriveSidecarService - Phase 9.6 E3: chế độ pair, song song, và hạ cấp", () => {
+  const validSender: chrome.runtime.MessageSender = {
+    tab: {
+      id: 42,
+      url: "https://drive.google.com/drive/folders/folder_123456789",
+    } as never,
+  };
+
+  const enId = "en_file_id_12345678901234";
+  const enName = "001 Intro_en.srt";
+  const enText = "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello\r\n";
+
+  const viId = "vi_file_id_12345678901234";
+  const viName = "001 Intro_vi.srt";
+  const viText = "1\r\n00:00:00,000 --> 00:00:01,000\r\nXin chào\r\n";
+
+  it("1. Lookup pair → fetchText được gọi 2 lần đồng thời (cả hai promise đã bắt đầu trước khi cái đầu tiên xong)", async () => {
+    let resolveEn!: (val: { ok: true; text: string }) => void;
+    let resolveVi!: (val: { ok: true; text: string }) => void;
+
+    const fetchTextMock = vi.fn(async (id: string) => {
+      if (id === enId) {
+        return new Promise<{ ok: true; text: string }>((r) => {
+          resolveEn = r;
+        });
+      }
+      return new Promise<{ ok: true; text: string }>((r) => {
+        resolveVi = r;
+      });
+    });
+
+    const service = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: enId, name: enName },
+        vi: { id: viId, name: viName },
+      }),
+      fetchText: fetchTextMock,
+      parseCount: () => 1,
+    });
+
+    const handlePromise = service.handle(validSender);
+
+    // Chờ microtasks để cả hai request fetchText được kích hoạt
+    await new Promise((r) => setTimeout(r, 0));
+
+    // CẢ HAI request đều đã được gọi ĐỒNG THỜI trước khi cái nào xong
+    expect(fetchTextMock).toHaveBeenCalledTimes(2);
+    expect(fetchTextMock).toHaveBeenCalledWith(enId);
+    expect(fetchTextMock).toHaveBeenCalledWith(viId);
+
+    // Giải quyết
+    resolveEn({ ok: true, text: enText });
+    resolveVi({ ok: true, text: viText });
+
+    const res = await handlePromise;
+    expect(res).toEqual({
+      ok: true,
+      mode: "pair",
+      en: { name: enName, text: enText },
+      vi: { name: viName, text: viText },
+      fileName: enName,
+      text: enText,
+    });
+  });
+
+  it("2. pair mà vi lỗi → mode: 'en'; en lỗi → mode: 'vi'; cả hai lỗi → reason của en", async () => {
+    // 2a. vi lỗi (not_found), en OK → mode "en"
+    const serviceViErr = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: enId, name: enName },
+        vi: { id: viId, name: viName },
+      }),
+      fetchText: async (id: string) => {
+        if (id === enId) return { ok: true as const, text: enText };
+        return { ok: false as const, reason: "not_found" as const };
+      },
+      parseCount: () => 1,
+    });
+    const resViErr = await serviceViErr.handle(validSender);
+    expect(resViErr).toEqual({
+      ok: true,
+      mode: "en",
+      en: { name: enName, text: enText },
+      fileName: enName,
+      text: enText,
+    });
+
+    // 2b. en lỗi (too_large), vi OK → mode "vi"
+    const serviceEnErr = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: enId, name: enName },
+        vi: { id: viId, name: viName },
+      }),
+      fetchText: async (id: string) => {
+        if (id === enId) return { ok: false as const, reason: "too_large" as const };
+        return { ok: true as const, text: viText };
+      },
+      parseCount: () => 1,
+    });
+    const resEnErr = await serviceEnErr.handle(validSender);
+    expect(resEnErr).toEqual({
+      ok: true,
+      mode: "vi",
+      vi: { name: viName, text: viText },
+      fileName: viName,
+      text: viText,
+    });
+
+    // 2c. Cả hai lỗi → trả reason của en
+    const serviceBothErr = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: enId, name: enName },
+        vi: { id: viId, name: viName },
+      }),
+      fetchText: async (id: string) => {
+        if (id === enId) return { ok: false as const, reason: "not_found" as const };
+        return { ok: false as const, reason: "timeout" as const };
+      },
+      parseCount: () => 1,
+    });
+    const resBothErr = await serviceBothErr.handle(validSender);
+    expect(resBothErr).toEqual({
+      ok: false,
+      reason: "not_found",
+    });
+  });
+
+  it("3. pair mà vi parse 0 câu → mode: 'en'", async () => {
+    const service = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: enId, name: enName },
+        vi: { id: viId, name: viName },
+      }),
+      fetchText: async (id: string) => {
+        if (id === enId) return { ok: true as const, text: enText };
+        return { ok: true as const, text: "invalid vi subtitle" };
+      },
+      parseCount: (text) => (text.includes("invalid") ? 0 : 1),
+    });
+    const res = await service.handle(validSender);
+    expect(res).toEqual({
+      ok: true,
+      mode: "en",
+      en: { name: enName, text: enText },
+      fileName: enName,
+      text: enText,
+    });
+  });
+
+  it("4. Lookup vi → mode: 'vi', chỉ tải 1 file", async () => {
+    const fetchTextMock = vi.fn(async () => ({ ok: true as const, text: viText }));
+    const service = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "vi",
+        vi: { id: viId, name: viName },
+      }),
+      fetchText: fetchTextMock,
+      parseCount: () => 1,
+    });
+    const res = await service.handle(validSender);
+    expect(res).toEqual({
+      ok: true,
+      mode: "vi",
+      vi: { name: viName, text: viText },
+      fileName: viName,
+      text: viText,
+    });
+    expect(fetchTextMock).toHaveBeenCalledTimes(1);
+    expect(fetchTextMock).toHaveBeenCalledWith(viId);
+  });
+
+  it("5. Ref có id sai → bị bỏ; cả hai sai → index_unavailable", async () => {
+    // 5a. vi có id sai regex → bỏ vi, chỉ tải en → mode: "en"
+    const fetchMock = vi.fn(async () => ({ ok: true as const, text: enText }));
+    const serviceBadVi = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: enId, name: enName },
+        vi: { id: "bad id with space!", name: viName },
+      }),
+      fetchText: fetchMock,
+      parseCount: () => 1,
+    });
+    const resBadVi = await serviceBadVi.handle(validSender);
+    expect(resBadVi).toEqual({
+      ok: true,
+      mode: "en",
+      en: { name: enName, text: enText },
+      fileName: enName,
+      text: enText,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(enId);
+
+    // 5b. en có id sai regex → bỏ en, chỉ tải vi → mode: "vi"
+    const fetchMockVi = vi.fn(async () => ({ ok: true as const, text: viText }));
+    const serviceBadEn = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: "short", name: enName },
+        vi: { id: viId, name: viName },
+      }),
+      fetchText: fetchMockVi,
+      parseCount: () => 1,
+    });
+    const resBadEn = await serviceBadEn.handle(validSender);
+    expect(resBadEn).toEqual({
+      ok: true,
+      mode: "vi",
+      vi: { name: viName, text: viText },
+      fileName: viName,
+      text: viText,
+    });
+    expect(fetchMockVi).toHaveBeenCalledTimes(1);
+    expect(fetchMockVi).toHaveBeenCalledWith(viId);
+
+    // 5c. Cả hai ref đều sai → index_unavailable và không fetch
+    const fetchMockNone = vi.fn();
+    const serviceBadBoth = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: "invalid en id", name: enName },
+        vi: { id: "invalid vi id", name: viName },
+      }),
+      fetchText: fetchMockNone,
+    });
+    const resBadBoth = await serviceBadBoth.handle(validSender);
+    expect(resBadBoth).toEqual({
+      ok: false,
+      reason: "index_unavailable",
+    });
+    expect(fetchMockNone).not.toHaveBeenCalled();
+  });
+
+  it("6. LRU hit cho file en vẫn tải vi", async () => {
+    const fetchMock = vi.fn(async (id: string) => {
+      if (id === enId) return { ok: true as const, text: enText };
+      return { ok: true as const, text: viText };
+    });
+
+    const service = new DriveSidecarService({
+      lookup: async (_tab, req) => {
+        if (req.videoDocId === "video_doc_id_001") {
+          return {
+            ok: true,
+            indexed: 5,
+            result: "en",
+            en: { id: enId, name: enName },
+          };
+        }
+        return {
+          ok: true,
+          indexed: 5,
+          result: "pair",
+          en: { id: enId, name: enName },
+          vi: { id: viId, name: viName },
+        };
+      },
+      fetchText: fetchMock,
+      parseCount: () => 1,
+    });
+
+    // Lần 1: tải en (lưu enId vào LRU)
+    const res1 = await service.handle(validSender, "video_doc_id_001");
+    expect(res1.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(enId);
+
+    // Lần 2: lookup pair (enId đã có trong LRU, viId chưa có)
+    const res2 = await service.handle(validSender, "video_doc_id_002");
+    expect(res2).toEqual({
+      ok: true,
+      mode: "pair",
+      en: { name: enName, text: enText },
+      vi: { name: viName, text: viText },
+      fileName: enName,
+      text: enText,
+    });
+    // fetchText chỉ được gọi thêm đúng 1 lần cho viId
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith(viId);
+  });
+
+  it("7. Hai request pair đồng thời cùng id → mỗi id chỉ tải 1 lần", async () => {
+    let resolveEn!: (val: { ok: true; text: string }) => void;
+    let resolveVi!: (val: { ok: true; text: string }) => void;
+
+    const fetchMock = vi.fn(async (id: string) => {
+      if (id === enId) {
+        return new Promise<{ ok: true; text: string }>((r) => {
+          resolveEn = r;
+        });
+      }
+      return new Promise<{ ok: true; text: string }>((r) => {
+        resolveVi = r;
+      });
+    });
+
+    const service = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 10,
+        result: "pair",
+        en: { id: enId, name: enName },
+        vi: { id: viId, name: viName },
+      }),
+      fetchText: fetchMock,
+      parseCount: () => 1,
+    });
+
+    const p1 = service.handle(validSender);
+    const p2 = service.handle(validSender);
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Mỗi id chỉ được fetch đúng 1 lần
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    resolveEn({ ok: true, text: enText });
+    resolveVi({ ok: true, text: viText });
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1).toEqual({
+      ok: true,
+      mode: "pair",
+      en: { name: enName, text: enText },
+      vi: { name: viName, text: viText },
+      fileName: enName,
+      text: enText,
+    });
+    expect(r2).toEqual(r1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("Lookup bilingual → mode: 'bilingual'", async () => {
+    const biId = "bi_file_id_12345678901234";
+    const biName = "001 Intro_bilingual.srt";
+    const biText = "1\r\n00:00:00,000 --> 00:00:01,000\r\nHello\r\nXin chào\r\n";
+
+    const service = new DriveSidecarService({
+      lookup: async () => ({
+        ok: true,
+        indexed: 5,
+        result: "bilingual",
+        bi: { id: biId, name: biName },
+      }),
+      fetchText: async () => ({ ok: true as const, text: biText }),
+      parseCount: () => 1,
+    });
+
+    const res = await service.handle(validSender);
+    expect(res).toEqual({
+      ok: true,
+      mode: "bilingual",
+      bi: { name: biName, text: biText },
+      fileName: biName,
+      text: biText,
+    });
   });
 });

@@ -264,6 +264,7 @@ Ràng buộc:
 1. `DriveIndex.lookup`: dùng `findSidecarSet`, map sang `DriveLookupRes` mới. Giữ nguyên việc phát hiện video trùng tên → `ambiguous`. **Không** đụng `scan`, `findPreviewTitle`, `DRIVE_SELECTORS`.
 2. `trySidecar`: dựng nguồn theo `mode` (§3), áp ngưỡng `PAIR_MIN_RATIO`, toast theo bảng §3. `sidecarCache` lưu nguyên kết quả thành công (mode + files).
 3. Mọi quy tắc của D5 giữ nguyên: kiểm tra `gen`/`signal` sau mỗi `await`, không đè bản `user`, cache lỗi theo danh sách cũ.
+4. **Dọn phần tương thích tạm của E3** (đánh dấu `@deprecated … XÓA ở Phase 9.6 E4`): bỏ `result: "match"` khỏi `DriveLookupRes` và nhánh xử lý nó trong `sidecarService.ts`; bỏ `fileName`/`text` khỏi kết quả thành công của `drive.sidecar.result` (và chỗ gán trong `sidecarService.ts`); bỏ biến thể `drive.sidecar.result` không có `mode` trong `messages.ts`. Sau bước này `grep -rn "@deprecated" src/shared src/background/drive` phải rỗng. Được sửa thêm: `src/shared/driveTypes.ts`, `src/shared/messages.ts`, `src/background/drive/sidecarService.ts`, `tests/driveSidecarService.test.ts`, `tests/phase2-messaging.test.ts` (chỉ bỏ các trường cũ).
 
 **Test bắt buộc (controller):**
 - `pair` khớp tốt → session có item `engine = "file"` ở các câu đã ghép, và **không** có `translate` nào gửi cho những câu đó; toast "EN + VI".
@@ -347,6 +348,7 @@ Bạn đang làm Phase 9.6 E4 của SubTrans Chrome Extension (extension/, nhán
 NHIỆM VỤ: DriveIndex.lookup dùng findSidecarSet; trySidecar dựng nguồn theo mode (bilingual/en/vi/pair), áp PAIR_MIN_RATIO, toast theo bảng §3.
 Được sửa DUY NHẤT: src/content/drive/driveIndex.ts (CHỈ hàm lookup), src/content/index.ts (CHỈ trySidecar + kiểu sidecarCache), src/content/drive/sidecarClient.ts (chỉ kiểu), tests/driveIndex.test.ts + tests/driveIndex-review.test.ts (chỉ sửa expect của lookup theo hình dạng mới), tests/driveSidecarClient.test.ts (sửa message giả lập + thêm case).
 TUYỆT ĐỐI KHÔNG: đụng scan/findPreviewTitle/DRIVE_SELECTORS; đổi hành vi nút Nhập; bỏ kiểm tra gen/signal sau await; để sidecar đè bản "user".
+DỌN TƯƠNG THÍCH TẠM CỦA E3 (Phase E4 mục 4): xóa mọi thứ đánh dấu @deprecated "XÓA ở Phase 9.6 E4" trong src/shared/driveTypes.ts, src/shared/messages.ts, src/background/drive/sidecarService.ts (được phép sửa thêm các file này + tests/driveSidecarService.test.ts, tests/phase2-messaging.test.ts chỉ để bỏ trường cũ). Sau đó grep -rn "@deprecated" src/shared src/background/drive phải rỗng.
 Bắt buộc: đủ test controller trong plan; toàn bộ test D5 cũ vẫn xanh (chỉ đổi hình dạng message giả lập).
 Nghiệm thu: pnpm run typecheck && pnpm run test && pnpm run build
 Không commit. Báo lại: git status, git diff --stat, số test trước → sau.
