@@ -662,3 +662,16 @@ Kết quả: typecheck OK, 503/503 test, build + verify-dist OK.
 | 3 | `deeplBreaker` dùng cấu hình mặc định (trần backoff 10 phút) → 456 "khóa 6 giờ" thực tế chỉ khóa 10 phút rồi gọi thử lại | `index.ts`: `maxBackoffMs = 6 giờ` cho riêng breaker DeepL | — (index.ts không có unit test) |
 
 Kết quả: typecheck OK, 519/519 test, build + verify-dist OK.
+
+## Phase 12 – G4 Review + hoàn thiện (popup/options)
+
+Bản nộp mới làm phần popup: đã sửa nhãn đảo ngược (`byEngine.api` → "Google/DeepL" xanh lá, `byEngine.cloud` → "Gemini" cyan; thông báo breaker `api` → Google, `cloud` → Gemini, thêm `deepl`), mục "Cấu hình DeepL (Dự phòng)" (key password + nút hiện/ẩn như Gemini, nút Kiểm tra hiển thị `✓ ms · đã dùng x / y ký tự`, 2 công tắc). **Thiếu** phần Options và toàn bộ test bắt buộc → đã bổ sung.
+
+| # | Vấn đề | Xử lý |
+|---|---|---|
+| 1 | Đổi key DeepL nhưng kết quả "✓ … ký tự" của key cũ vẫn hiện → hiểu nhầm key mới đã hợp lệ | Xóa kết quả kiểm tra khi key thay đổi |
+| 2 | Options chưa có dòng mô tả DeepL (plan G4 mục 3) | Thêm dòng mô tả dự phòng DeepL trong khu Google Translate |
+| 3 | Hộp thoại "Khôi phục mặc định" ghi "API Key của Gemini sẽ được giữ nguyên" (đã sai từ G2: key DeepL cũng được giữ) | "API key của Gemini và DeepL sẽ được giữ nguyên" |
+| 4 | Không có test UI | `deeplUi.test.ts` (7 test, render thật `Popup`): nhãn đếm; 2 kịch bản thông báo breaker; nhập key → `deeplApiKey`, blob rỗng, ô password; Kiểm tra OK (định dạng 12.345 / 500.000) và lỗi + đổi key xóa kết quả; 2 công tắc. Trên Popup gốc (HEAD) 5/7 test FAIL (nhãn đảo); trên bản nộp 1/7 FAIL (mục 1) |
+
+Kết quả: typecheck OK, 526/526 test, build + verify-dist OK.

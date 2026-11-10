@@ -55,6 +55,7 @@ export function Popup() {
   const [breakers, setBreakers] = useState<{
     api: BreakerView;
     cloud: BreakerView;
+    deepl?: BreakerView;
   } | null>(null);
 
   // Gemini State
@@ -68,6 +69,18 @@ export function Popup() {
   const [availableModels, setAvailableModels] = useState<string[]>(DEFAULT_MODELS);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [modelFetchMsg, setModelFetchMsg] = useState<string | null>(null);
+
+  // DeepL State
+  const [showDeeplConfig, setShowDeeplConfig] = useState(false);
+  const [showDeeplApiKey, setShowDeeplApiKey] = useState(false);
+  const [deeplTestResult, setDeeplTestResult] = useState<{
+    loading: boolean;
+    ok?: boolean;
+    latencyMs?: number;
+    used?: number;
+    limit?: number;
+    error?: string;
+  } | null>(null);
 
   // Accordion/Collapse toggles
   const [showGeminiConfig, setShowGeminiConfig] = useState(false);
@@ -117,7 +130,7 @@ export function Popup() {
       // 2. Gửi tin nhắn lấy trạng thái breakers từ background
       chrome.runtime.sendMessage(
         { type: "status" } as UiReq,
-        (res: { ok: boolean; breakers?: { api: BreakerView; cloud: BreakerView } }) => {
+        (res: { ok: boolean; breakers?: { api: BreakerView; cloud: BreakerView; deepl?: BreakerView } }) => {
           if (!chrome.runtime.lastError && res?.ok && res.breakers) {
             setBreakers(res.breakers);
           }
@@ -180,6 +193,53 @@ export function Popup() {
       });
     } catch (err: unknown) {
       setTestResult({
+        loading: false,
+        ok: false,
+        error: (err as Error)?.message || String(err),
+      });
+    }
+  };
+
+  const formatNumber = (n?: number): string => {
+    if (typeof n !== "number") return "0";
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  };
+
+  // Test DeepL connection
+  const handleTestDeepl = async () => {
+    if (!settings.deepl.apiKey) {
+      setDeeplTestResult({
+        loading: false,
+        ok: false,
+        error: "Vui lòng nhập API key trước khi kiểm tra",
+      });
+      return;
+    }
+
+    setDeeplTestResult({ loading: true });
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: "deepl.test",
+        apiKey: settings.deepl.apiKey,
+      } as UiReq)) as {
+        ok: boolean;
+        latencyMs?: number;
+        used?: number;
+        limit?: number;
+        sample?: string;
+        error?: string;
+      };
+
+      setDeeplTestResult({
+        loading: false,
+        ok: res.ok,
+        latencyMs: res.latencyMs,
+        used: res.used,
+        limit: res.limit,
+        error: res.error,
+      });
+    } catch (err: unknown) {
+      setDeeplTestResult({
         loading: false,
         ok: false,
         error: (err as Error)?.message || String(err),
@@ -352,11 +412,11 @@ export function Popup() {
             <div className="flex items-center gap-3 pt-0.5 text-[11px]">
               <span className="inline-flex items-center gap-1 text-emerald-400">
                 <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                Gemini: {tabStatus.byEngine.api}
+                Google/DeepL: {tabStatus.byEngine.api}
               </span>
               <span className="inline-flex items-center gap-1 text-cyan-400">
                 <span className="w-2 h-2 rounded-full bg-cyan-400" />
-                Google: {tabStatus.byEngine.cloud}
+                Gemini: {tabStatus.byEngine.cloud}
               </span>
             </div>
 
@@ -366,14 +426,19 @@ export function Popup() {
                 {tabStatus.message}
               </div>
             )}
-            {breakers?.cloud.blocked && (
+            {breakers?.api.blocked && (
               <div className="text-[11px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-1 rounded">
                 Google Translate tạm dừng (rate limit)
               </div>
             )}
-            {breakers?.api.blocked && (
+            {breakers?.deepl?.blocked && (
               <div className="text-[11px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-1 rounded">
-                Gemini API tạm dừng (hết quota / lỗi 429)
+                DeepL tạm dừng (hết hạn mức tháng / 429)
+              </div>
+            )}
+            {breakers?.cloud.blocked && (
+              <div className="text-[11px] text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-1 rounded">
+                Gemini tạm dừng (hết quota / 429)
               </div>
             )}
           </div>
@@ -568,6 +633,149 @@ export function Popup() {
                   )}
                 </div>
               )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 4b. CẤU HÌNH DEEPL (DỰ PHÒNG) */}
+      <div className="rounded-lg bg-player-surface border border-player-border overflow-hidden">
+        <button
+          onClick={() => setShowDeeplConfig(!showDeeplConfig)}
+          className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-neutral-300 hover:text-white transition"
+        >
+          <span className="flex items-center gap-1.5">
+            <span>Cấu hình DeepL (Dự phòng)</span>
+            {settings.deepl.apiKey ? (
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                Đã có key
+              </span>
+            ) : (
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-player-control text-neutral-400 border border-player-border">
+                Chưa có key
+              </span>
+            )}
+          </span>
+          {showDeeplConfig ? (
+            <ChevronUp className="w-3.5 h-3.5" />
+          ) : (
+            <ChevronDown className="w-3.5 h-3.5" />
+          )}
+        </button>
+
+        {showDeeplConfig && (
+          <div className="p-3 border-t border-player-border space-y-2.5">
+            {/* API Key Input */}
+            <div className="space-y-1">
+              <div className="flex justify-between items-center text-[11px]">
+                <span className="text-neutral-300">API Key</span>
+                <a
+                  href="https://www.deepl.com/pro-api"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-amber-400 hover:text-amber-300 inline-flex items-center gap-0.5 text-[10px]"
+                >
+                  Lấy key miễn phí <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
+              <div className="relative">
+                <input
+                  type={showDeeplApiKey ? "text" : "password"}
+                  value={settings.deepl.apiKey}
+                  onChange={(e) => {
+                    // Đổi key → kết quả kiểm tra cũ không còn đúng (tránh hiện ✓ của key trước)
+                    setDeeplTestResult(null);
+                    updateSettings({
+                      deepl: { ...settings.deepl, apiKey: e.target.value.trim() },
+                    });
+                  }}
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx"
+                  className="w-full bg-player-bg border border-player-border rounded px-2.5 py-1 text-xs text-white focus:outline-none focus:border-amber-400 pr-8"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowDeeplApiKey(!showDeeplApiKey)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-white"
+                >
+                  {showDeeplApiKey ? (
+                    <EyeOff className="w-3.5 h-3.5" />
+                  ) : (
+                    <Eye className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Test Connection Button */}
+            <div className="pt-0.5">
+              <button
+                type="button"
+                onClick={handleTestDeepl}
+                disabled={deeplTestResult?.loading || !settings.deepl.apiKey}
+                className="w-full py-1 rounded bg-player-control border border-player-border text-xs text-neutral-200 hover:bg-player-control/80 hover:text-white disabled:opacity-40 font-medium transition"
+              >
+                {deeplTestResult?.loading ? "Đang kiểm tra kết nối..." : "Kiểm tra kết nối"}
+              </button>
+
+              {deeplTestResult && !deeplTestResult.loading && (
+                <div
+                  className={`mt-1.5 p-1.5 rounded text-[11px] flex items-center gap-1.5 ${
+                    deeplTestResult.ok
+                      ? "bg-emerald-500/15 border border-emerald-500/30 text-emerald-300"
+                      : "bg-rose-500/15 border border-rose-500/30 text-rose-300"
+                  }`}
+                >
+                  {deeplTestResult.ok ? (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        ✓ {deeplTestResult.latencyMs} ms · đã dùng {formatNumber(deeplTestResult.used)} / {formatNumber(deeplTestResult.limit)} ký tự
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">{deeplTestResult.error || "Lỗi kết nối"}</span>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Toggles */}
+            <div className="space-y-2 pt-1 border-t border-player-border/60">
+              <label className="flex items-center justify-between cursor-pointer text-xs text-neutral-300 hover:text-white">
+                <span>Dùng DeepL khi Google Translate lỗi</span>
+                <input
+                  type="checkbox"
+                  checked={settings.deepl.enabled}
+                  onChange={(e) =>
+                    updateSettings({
+                      deepl: { ...settings.deepl, enabled: e.target.checked },
+                    })
+                  }
+                  className="w-4 h-4 rounded border-player-border text-amber-500 focus:ring-0 focus:ring-offset-0 bg-player-bg cursor-pointer"
+                />
+              </label>
+
+              <div className="space-y-0.5">
+                <label className="flex items-center justify-between cursor-pointer text-xs text-neutral-300 hover:text-white">
+                  <span>Ưu tiên DeepL (dùng trước Google)</span>
+                  <input
+                    type="checkbox"
+                    checked={settings.deepl.prefer}
+                    onChange={(e) =>
+                      updateSettings({
+                        deepl: { ...settings.deepl, prefer: e.target.checked },
+                      })
+                    }
+                    className="w-4 h-4 rounded border-player-border text-amber-500 focus:ring-0 focus:ring-offset-0 bg-player-bg cursor-pointer"
+                  />
+                </label>
+                <p className="text-[10px] text-neutral-400">
+                  Tốn hạn mức 500.000 ký tự/tháng nhanh hơn
+                </p>
+              </div>
             </div>
           </div>
         )}

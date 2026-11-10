@@ -120,7 +120,7 @@ export function Options() {
   const handleResetDefaults = async () => {
     if (
       !window.confirm(
-        "Khôi phục tất cả cài đặt về mặc định? (API Key của Gemini sẽ được giữ nguyên)"
+        "Khôi phục tất cả cài đặt về mặc định? (API key của Gemini và DeepL sẽ được giữ nguyên)"
       )
     ) {
       return;
@@ -234,6 +234,10 @@ export function Options() {
               <p className="text-[11px] text-neutral-400">Mặc định: 5000ms</p>
             </div>
           </div>
+          <p className="text-[11px] text-neutral-400 border-t border-player-border pt-2.5">
+            Dự phòng DeepL: khi Google Translate lỗi hoặc bị chặn, SubTrans tự chuyển sang DeepL nếu bạn đã nhập
+            key DeepL trong popup (gói Free: 500.000 ký tự/tháng). Bật/tắt và "Ưu tiên DeepL" cấu hình trong popup.
+          </p>
         </section>
 
         {/* 2. GEMINI API */}
