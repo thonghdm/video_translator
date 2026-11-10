@@ -675,3 +675,18 @@ Bản nộp mới làm phần popup: đã sửa nhãn đảo ngược (`byEngine
 | 4 | Không có test UI | `deeplUi.test.ts` (7 test, render thật `Popup`): nhãn đếm; 2 kịch bản thông báo breaker; nhập key → `deeplApiKey`, blob rỗng, ô password; Kiểm tra OK (định dạng 12.345 / 500.000) và lỗi + đổi key xóa kết quả; 2 công tắc. Trên Popup gốc (HEAD) 5/7 test FAIL (nhãn đảo); trên bản nộp 1/7 FAIL (mục 1) |
 
 Kết quả: typecheck OK, 526/526 test, build + verify-dist OK.
+
+## Phase 12 – G5: Tài liệu + kiểm thử thật
+
+### Kiểm thử thủ công — người dùng chạy, agent KHÔNG được tự điền:
+
+| # | Kiểm tra | Kỳ vọng | Kết quả |
+|---|---|---|---|
+| 1 | Popup → dán key → Kiểm tra | ✓ + số ký tự đã dùng | |
+| 2 | Bật "Ưu tiên DeepL", mở video YouTube có CC tiếng Anh | Dịch chạy; `/v2/usage` tăng | |
+| 3 | Tắt "Ưu tiên DeepL"; giả lập GTX bị chặn (DevTools SW → Network → chặn `translate.googleapis.com`) | Dịch vẫn chạy qua DeepL, không đếm ngược | |
+| 4 | Tắt công tắc "Dùng DeepL…", vẫn chặn GTX | Hiện đếm ngược như trước | |
+| 5 | Dán key sai → Kiểm tra | Báo lỗi key, key bị che trong thông báo | |
+| 6 | Popup | Nhãn "Google/DeepL" xanh lá, "Gemini" cyan; thông báo tạm dừng đúng engine | |
+| 7 | Console production (SW, popup) | Không có key / nội dung phụ đề | |
+
