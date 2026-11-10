@@ -769,6 +769,10 @@ Chi tiết: xem `PLAN-drive-sidecar.md` (đã hoàn thành D0–D6).
 
 Chi tiết: xem `PLAN-drive-envi.md` (phase E1–E5, có prompt cho từng phase). Kết quả kiểm thử: `NOTES.md` › Phase 9.6 – E5.
 
+### Phase 12: DeepL API Free làm engine dự phòng cho Google Translate
+
+Chi tiết: xem `PLAN-deepl.md` (G0 kiểm chứng key do người dùng tự chạy; G1–G5 có prompt cho từng phase).
+
 ### Phase 10 (thử nghiệm, không bắt buộc): Video không có phụ đề → thu âm tab gửi Gemini
 - Quyền thêm: `tabCapture`, `offscreen`.
 - Luồng xử lý:

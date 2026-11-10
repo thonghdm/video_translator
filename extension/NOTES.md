@@ -615,3 +615,27 @@ README mục "Google Drive: tự nhận phụ đề" viết lại theo 3 trườ
 | 5 | Thư mục chỉ có `_vi` | Toast "tiếng Việt", chỉ hiện VI, không có request dịch | | |
 | 6 | F5, mở lại bài 001 | Hiện ngay từ cache | | |
 | 7 | Bấm Nhập một file khác | Thay phụ đề, chỉ 1 overlay | | |
+
+## Phase 12 – G0: Kiểm chứng key DeepL thật [T]
+
+Ghi nhận kết quả kiểm chứng DeepL API Free (endpoint `https://api-free.deepl.com`):
+
+| # | Câu hỏi | Kết quả | Ghi chú |
+|---|---|---|---|
+| G0-1 | `/v2/usage` trả `character_limit` | `500000` | Hạn mức 500.000 ký tự / tháng cho gói API Free |
+| G0-2 | Dịch sang `VI` không có `model_type` | status 200, ~250ms, 3 câu tiếng Việt tự nhiên | Đạt, dịch tiếng Việt hoạt động tốt trên gói Free |
+| G0-3 | Có `model_type: "quality_optimized"` | status 400 | Gói Free không hỗ trợ `model_type` (tính năng Pro/Next-gen) → quyết định: `DEEPL_SEND_MODEL_TYPE = false` |
+| G0-4 | Gửi 50 dòng trong 1 request | nhận đủ 50 | Batch 50 dòng trả về đúng 50 phần tử |
+
+**Kết luận G0:**
+- G0-2 thành công (status 200).
+- G0-3 = 400 → `DEEPL_SEND_MODEL_TYPE = false` (không gửi `model_type` trong body request).
+- Đủ điều kiện bắt đầu Phase 12 G1.
+
+
+## Phase 12 – G1 Review (engine DeepL)
+
+Đạt: đúng API trong PLAN-deepl G1; `DEEPL_SEND_MODEL_TYPE = false` theo G0-3; mọi request qua `apiFetch` (đường production) hoặc `fetchFn` giả có ép `credentials:"omit"` (đường test); timeout + hủy qua `createTimeoutSignal(…, callerSignal)` (đã kiểm: hủy giữa chừng → `CanceledError`); ánh xạ HTTP đúng bảng §1 (429 đọc Retry-After số giây/ngày, 456 → `DeepLQuotaError` 6 giờ, 401/403 → `DisabledError`); bỏ dòng rỗng khỏi body; chia lô ≤50/≤120 KiB, gọi tuần tự; lỗi qua `sanitizeApiKey` (import, không sao chép); không có `console.*`; `errors.ts` chỉ thêm 1 class. Đủ 12 nhóm test. Không phát hiện lỗi.
+Ghi nhận: lỗi 400 đính kèm thân phản hồi DeepL (`{"message":…}`) — không chứa nội dung phụ đề, chấp nhận.
+Ngoài phạm vi G1: `scripts/zip.mjs` đang có thay đổi chưa commit (thêm bản đóng gói Firefox) — chưa review, KHÔNG gộp vào commit G1.
+Kết quả: typecheck OK, 493/493 test, build + verify-dist OK.

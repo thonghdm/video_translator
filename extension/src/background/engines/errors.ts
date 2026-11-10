@@ -73,6 +73,17 @@ export class LocalRateLimitError extends Error {
 }
 
 /**
+ * Hết hạn mức tháng của DeepL (HTTP 456).
+ * Kế thừa RateLimitedError với retryAfterMs mặc định 6 giờ.
+ */
+export class DeepLQuotaError extends RateLimitedError {
+  constructor(message = "DeepL quota exceeded (456)", retryAfterMs = 6 * 60 * 60 * 1000) {
+    super(message, retryAfterMs);
+    this.name = "DeepLQuotaError";
+  }
+}
+
+/**
  * Phân loại lỗi trả về ErrKind (Mục 6.1). Port từ classifyErr trong translator.go:434.
  *
  * CHỈ dựa vào lớp lỗi (instanceof) do chính engine ném ra — KHÔNG dò chuỗi message và KHÔNG coi
