@@ -196,3 +196,40 @@ if (!files.some((f) => f.name === "manifest.json")) {
 
 const kb = (zipBuffer.length / 1024).toFixed(1);
 console.log(`[zip] Created ${zipFilePath} (${kb} KB, ${files.length} files)`);
+
+// 2. Tạo bản đóng gói tương thích riêng cho Mozilla Firefox (AMO)
+const firefoxFiles = files.map((f) => {
+  if (f.name !== "manifest.json") return f;
+  const manifestObj = JSON.parse(f.data.toString("utf8"));
+  manifestObj.browser_specific_settings = {
+    gecko: {
+      id: "subtrans-extension@thonghdm.com",
+      strict_min_version: "115.0",
+      data_collection_permissions: {
+        required: ["none"]
+      }
+    }
+  };
+  if (manifestObj.background && manifestObj.background.service_worker) {
+    manifestObj.background.scripts = [manifestObj.background.service_worker];
+  }
+  delete manifestObj.minimum_chrome_version;
+  return {
+    name: f.name,
+    mtime: f.mtime,
+    data: Buffer.from(JSON.stringify(manifestObj, null, 2), "utf8")
+  };
+});
+
+const ffZipBuffer = buildZip(firefoxFiles);
+const ffZipFileName = `subtrans-extension-firefox-v${version}.zip`;
+const ffZipFilePath = join(releaseDir, ffZipFileName);
+writeFileSync(ffZipFilePath, ffZipBuffer);
+try {
+  verifyZip(ffZipBuffer, firefoxFiles);
+} catch (err) {
+  console.error(`[zip] LỖI: file zip Firefox không hợp lệ (${err.message})`);
+  process.exit(1);
+}
+const ffKb = (ffZipBuffer.length / 1024).toFixed(1);
+console.log(`[zip] Created ${ffZipFilePath} (${ffKb} KB, ${firefoxFiles.length} files) [Firefox AMO]`);

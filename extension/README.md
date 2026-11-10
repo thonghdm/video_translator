@@ -1,8 +1,8 @@
 # SubTrans – Phụ đề song ngữ Anh–Việt cho trình duyệt (Chrome Extension, Manifest V3)
 
-Tiện ích cho các trình duyệt nhân Chromium (Chrome, Edge, Brave, Cốc Cốc; Chromium ≥ 116). Tiện ích hiện **phụ đề song ngữ Anh–Việt** đè lên video đang phát. Bản dịch lấy từ Google Translate hoặc Google Gemini.
+Tiện ích cho các trình duyệt nhân Chromium (Chrome, Edge, Brave, Cốc Cốc; Chromium ≥ 116). Tiện ích hiện **phụ đề song ngữ Anh–Việt** đè lên video đang phát. Bản dịch lấy từ Google Translate, DeepL (dự phòng) hoặc Google Gemini.
 
-Đây là phiên bản trình duyệt của SubTrans Desktop (Wails/Go), nằm trong thư mục `extension/` và **không thay đổi** gì của bản Desktop. Bản này chỉ dùng 2 API đám mây, không chạy AI cục bộ (Whisper, Qwen).
+Đây là phiên bản trình duyệt của SubTrans Desktop (Wails/Go), nằm trong thư mục `extension/` và **không thay đổi** gì của bản Desktop. Bản này chỉ dùng các API dịch đám mây, không chạy AI cục bộ (Whisper, Qwen).
 
 ---
 
@@ -17,18 +17,18 @@ Tiện ích cho các trình duyệt nhân Chromium (Chrome, Edge, Brave, Cốc C
 **Dịch** (chọn trong popup)
 | Chế độ | Cách hoạt động | Cần API key |
 |---|---|---|
-| `google` (mặc định) | Google Translate, nhanh. Nếu Google tạm chặn và bạn có key thì tự chuyển sang Gemini | Không |
-| `gemini` | Gemini dịch theo ngữ cảnh, giữ nguyên thuật ngữ lập trình. Gemini lỗi hoặc hết quota thì tạm dùng Google, sau đó tự dịch lại bằng Gemini | Có |
-| `hybrid` | Câu đang xem dịch nhanh bằng Google; phần còn lại dịch bằng Gemini. Khi xong hết, các câu Google được nâng cấp dần lên Gemini (chấm chỉ báo đổi từ xanh lá sang cyan) | Có |
+| `google` (mặc định) | Google Translate, nhanh. Google Translate lỗi/bị chặn → tự chuyển sang DeepL (nếu đã có key DeepL). Nếu Google tạm chặn và bạn có key Gemini thì tự chuyển sang Gemini | Không |
+| `gemini` | Gemini dịch theo ngữ cảnh, giữ nguyên thuật ngữ lập trình. Gemini lỗi hoặc hết quota thì tạm dùng Google/DeepL, sau đó tự dịch lại bằng Gemini | Có |
+| `hybrid` | Câu đang xem dịch nhanh bằng Google/DeepL; phần còn lại dịch bằng Gemini. Khi xong hết, các câu dịch máy được nâng cấp dần lên Gemini (chấm chỉ báo đổi từ xanh lá sang cyan) | Có |
 
 - Dịch trước theo vị trí đang xem: ưu tiên đoạn quanh chỗ đang phát (−1s … +15s), sau đó tới phần phía trước, rồi phần phía sau. Tua tới đâu, đoạn đó được ưu tiên.
 - **Cache IndexedDB:** xem lại hoặc F5 thì phụ đề hiện ngay, không gọi API. Tự dọn khi quá 200 video hoặc quá 30 ngày (chỉnh được ở Options).
-- **Tự phục hồi khi lỗi:** bị giới hạn (429) hoặc mất mạng thì tạm nghỉ, hiện đồng hồ đếm ngược, rồi tự dịch tiếp. Có circuit breaker riêng cho Google và Gemini.
+- **Tự phục hồi khi lỗi:** bị giới hạn (429) hoặc mất mạng thì tạm nghỉ, hiện đồng hồ đếm ngược, rồi tự dịch tiếp. Có circuit breaker riêng cho Google, DeepL và Gemini.
 
 **Hiển thị**
 - 4 chế độ: Song ngữ → Chỉ tiếng Việt → Chỉ tiếng Anh → Tắt.
 - Overlay nằm trong Shadow DOM, nên không bị CSS của trang làm vỡ. Kéo thả được, vị trí lưu theo từng trang web. Vẫn hiện khi fullscreen (khi fullscreen chính thẻ `<video>` thì dùng track phụ đề của trình duyệt).
-- Chấm chỉ báo nguồn dịch của từng dòng: xanh lá = Google, cyan = Gemini, xám = từ file.
+- Chấm chỉ báo nguồn dịch của từng dòng: xanh lá = Google/DeepL, cyan = Gemini, xám = từ file.
 - Popup: bật/tắt toàn cục hoặc theo trang, chế độ dịch, Gemini key/model, cỡ chữ, màu chữ, độ mờ nền, tiến độ dịch của tab.
 - Trang Options: thông số nâng cao (RPM, timeout, batch, giới hạn cache…), danh sách video đã lưu, xóa cache.
 
@@ -128,6 +128,17 @@ Muốn dùng với file HTML trên máy (`file://`, ví dụ `dev/test-page.html
 
 Mặc định giới hạn 12 request/phút cho Gemini, để không vượt hạn mức gói miễn phí. Chỉnh trong Options nếu bạn dùng gói trả phí.
 
+## Cấu hình DeepL (dự phòng, không bắt buộc)
+
+DeepL API là engine dự phòng tự động cho Google Translate (GTX) khi gặp lỗi giới hạn tần suất (rate limit) hoặc bị chặn tạm thời:
+
+1. Đăng ký tài khoản và lấy key miễn phí tại [deepl.com/pro-api](https://www.deepl.com/pro-api) (chọn gói **DeepL API Free**, key miễn phí có đuôi `:fx`). Gói miễn phí cung cấp **500.000 ký tự/tháng**.
+2. Mở popup SubTrans → mục **Cấu hình DeepL (Dự phòng)** → dán key (cài đặt tự động lưu).
+3. Bấm **Kiểm tra**: hiển thị độ trễ và số ký tự đã sử dụng trên tổng hạn mức tháng (ví dụ: `✓ 120 ms · đã dùng 12.345 / 500.000 ký tự`), hoặc thông báo lỗi (đã che key).
+4. Hai công tắc cấu hình:
+   - **Dùng DeepL khi Google Translate lỗi** (`deepl.enabled`, mặc định bật): khi Google Translate lỗi hoặc bị chặn, SubTrans tự động chuyển sang DeepL để video không bị ngắt phụ đề.
+   - **Ưu tiên DeepL (dùng trước Google)** (`deepl.prefer`, mặc định tắt): dùng DeepL làm engine chính trước khi thử Google Translate. *Lưu ý: bật tùy chọn này sẽ tiêu tốn hạn mức 500.000 ký tự/tháng nhanh hơn.*
+
 ## Phím tắt (chỉ hoạt động trên trang đang có phụ đề SubTrans, và không hoạt động khi đang gõ chữ)
 
 | Phím | Tác dụng |
@@ -148,7 +159,7 @@ Mặc định giới hạn 12 request/phút cho Gemini, để không vượt h�
 |---|---|---|
 | Chạy ở đâu | Ngay trên trang đang xem (YouTube, trang có `<track>`, file `.srt` nhập vào) | Ứng dụng Windows: file video trên máy, link YouTube, Google Drive |
 | Video không có phụ đề | Phải nhập file `.srt`/`.vtt` | Whisper tự nghe và tạo phụ đề (offline) |
-| Dịch | Google Translate + Gemini | Google Translate + Gemini + Qwen chạy cục bộ (offline) |
+| Dịch | Google Translate + DeepL + Gemini | Google Translate + Gemini + Qwen chạy cục bộ (offline) |
 | Cài đặt | Vài trăm KB, không cần GPU hay model | Bộ cài, kèm model AI ~1.5GB |
 | Trao đổi phụ đề | Xuất/nhập `.srt`/`.vtt` cùng định dạng, mở được file của nhau | ← |
 
@@ -158,7 +169,8 @@ Mặc định giới hạn 12 request/phút cho Gemini, để không vượt h�
 
 - **Dùng cá nhân (Load unpacked).** Chưa đưa lên Chrome Web Store. Chế độ `google` dùng endpoint Google Translate không chính thức (`translate_a/single?client=gtx`), có thể bị chặn bất cứ lúc nào. Nếu muốn publish cần đổi engine và thu hẹp quyền (xem `PLAN.md` › R9).
 - **Quyền rộng:** tiện ích chạy trên mọi trang (`<all_urls>`) để tìm `<video>`. Trên trang không có phụ đề, tiện ích không hiện gì và không chiếm phím tắt.
-- **Quyền riêng tư:** câu phụ đề được gửi tới Google Translate hoặc Gemini để dịch. Gemini API key được lưu trong `chrome.storage.local` trên máy bạn, chỉ gửi tới `generativelanguage.googleapis.com` (qua header, không nằm trên URL), và không bao giờ được đưa vào trang web. Mọi request dịch đều **không gửi kèm cookie** đăng nhập Google của bạn. Trên Google Drive, SubTrans dùng phiên đăng nhập của bạn để tải file phụ đề nằm cùng thư mục với video đang xem. File chỉ được đọc trong tiện ích, không gửi đi nơi khác ngoài bước dịch như bình thường.
+- **Quyền riêng tư:** câu phụ đề được gửi tới Google Translate, Gemini hoặc DeepL để dịch. Gemini API key và DeepL API key được lưu riêng trong `chrome.storage.local` trên máy bạn, chỉ gửi qua header tới endpoint chính thức (`generativelanguage.googleapis.com` cho Gemini; `api-free.deepl.com` hoặc `api.deepl.com` cho DeepL), và không bao giờ được đưa vào trang web hay script nội dung. Mọi request dịch đều **không gửi kèm cookie** (request tới DeepL luôn đặt `credentials: "omit"`). Trên Google Drive, SubTrans dùng phiên đăng nhập của bạn để tải file phụ đề nằm cùng thư mục với video đang xem. File chỉ được đọc trong tiện ích, không gửi đi nơi khác ngoài bước dịch như bình thường.
+- **Giới hạn hiển thị engine:** dòng do DeepL dịch hiển thị chung nhóm "Google/DeepL" (cùng chấm xanh lá) với Google Translate.
 - **YouTube:** không hỗ trợ Shorts và livestream đang phát (VOD của livestream đã kết thúc thì vẫn được). Video YouTube nhúng trên trang khác: phụ đề chỉ được lấy sau khi bấm play.
 - **Chưa kiểm chứng trên trang thật:** Google Drive preview, Udemy, Coursera, edX (xem `NOTES.md` › Phase 9 để tự kiểm tra). Nếu tiện ích không lấy được phụ đề trên các trang này, bạn vẫn dùng được nút **Nhập** `.srt`.
 - **Video có DRM** (Netflix, Disney+…) không lấy được phụ đề gốc.
