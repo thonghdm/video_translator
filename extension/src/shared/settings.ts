@@ -47,6 +47,11 @@ export interface Settings {
   drive: {
     autoSidecar: boolean; // true
   };
+  deepl: {
+    apiKey: string; // "" (lưu riêng tại deeplApiKey trong chrome.storage.local)
+    enabled: boolean; // true — có key + enabled mới dùng
+    prefer: boolean; // false — true: DeepL trước, GTX sau
+  };
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -90,6 +95,11 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   drive: {
     autoSidecar: true,
+  },
+  deepl: {
+    apiKey: "",
+    enabled: true,
+    prefer: false,
   },
 };
 
@@ -207,18 +217,24 @@ export function sanitizeSettings(input: Settings): Settings {
   s.cache.maxAgeDays = int("cache.maxAgeDays", s.cache.maxAgeDays, d.cache.maxAgeDays);
   s.shortcuts.enabled = typeof s.shortcuts.enabled === "boolean" ? s.shortcuts.enabled : d.shortcuts.enabled;
   s.drive = { autoSidecar: typeof s.drive?.autoSidecar === "boolean" ? s.drive.autoSidecar : d.drive.autoSidecar };
+  s.deepl = {
+    apiKey: typeof s.deepl?.apiKey === "string" ? s.deepl.apiKey.trim() : "",
+    enabled: typeof s.deepl?.enabled === "boolean" ? s.deepl.enabled : d.deepl.enabled,
+    prefer: typeof s.deepl?.prefer === "boolean" ? s.deepl.prefer : d.deepl.prefer,
+  };
   return s;
 }
 
 const SETTINGS_KEY = "settings";
 const API_KEY_KEY = "geminiApiKey";
+const DEEPL_API_KEY_KEY = "deeplApiKey";
 
 /**
  * Tải cài đặt từ chrome.storage.local, tự động deep-merge với DEFAULT_SETTINGS
  */
 export interface LoadSettingsOptions {
   /**
-   * Có đọc Gemini API key hay không (mặc định true).
+   * Có đọc Gemini/DeepL API key hay không (mặc định true).
    * Content script PHẢI truyền false: key không bao giờ được đưa vào context của trang (PLAN 3.4).
    */
   includeApiKey?: boolean;
@@ -230,14 +246,22 @@ export async function loadSettings(opts: LoadSettingsOptions = {}): Promise<Sett
     return cloneDefaults();
   }
 
-  const keys = includeApiKey ? [SETTINGS_KEY, API_KEY_KEY] : [SETTINGS_KEY];
+  const keys = includeApiKey
+    ? [SETTINGS_KEY, API_KEY_KEY, DEEPL_API_KEY_KEY]
+    : [SETTINGS_KEY];
   const data = await chrome.storage.local.get(keys);
   const saved = data[SETTINGS_KEY];
   const settings = sanitizeSettings(deepMerge(DEFAULT_SETTINGS, saved));
   settings.gemini.apiKey = "";
+  settings.deepl.apiKey = "";
 
-  if (includeApiKey && typeof data[API_KEY_KEY] === "string") {
-    settings.gemini.apiKey = data[API_KEY_KEY].trim();
+  if (includeApiKey) {
+    if (typeof data[API_KEY_KEY] === "string") {
+      settings.gemini.apiKey = data[API_KEY_KEY].trim();
+    }
+    if (typeof data[DEEPL_API_KEY_KEY] === "string") {
+      settings.deepl.apiKey = data[DEEPL_API_KEY_KEY].trim();
+    }
   }
 
   return settings;
@@ -255,10 +279,17 @@ export async function saveSettings(partial: Partial<Settings>): Promise<void> {
   const updated = sanitizeSettings(deepMerge(current, partial));
 
   // Ghi 1 lần (key + blob) → chỉ 1 sự kiện storage.onChanged. API key lưu riêng, KHÔNG nằm trong blob.
-  const toSave = { ...updated, gemini: { ...updated.gemini, apiKey: "" } };
+  const toSave = {
+    ...updated,
+    gemini: { ...updated.gemini, apiKey: "" },
+    deepl: { ...updated.deepl, apiKey: "" },
+  };
   const payload: Record<string, unknown> = { [SETTINGS_KEY]: toSave };
   if (partial.gemini?.apiKey !== undefined) {
     payload[API_KEY_KEY] = updated.gemini.apiKey;
+  }
+  if (partial.deepl?.apiKey !== undefined) {
+    payload[DEEPL_API_KEY_KEY] = updated.deepl.apiKey;
   }
   await chrome.storage.local.set(payload);
 }
@@ -293,7 +324,10 @@ export function onSettingsChanged(
     changes: { [key: string]: chrome.storage.StorageChange },
     areaName: string
   ) => {
-    if (areaName === "local" && (changes[SETTINGS_KEY] || changes[API_KEY_KEY])) {
+    if (
+      areaName === "local" &&
+      (changes[SETTINGS_KEY] || changes[API_KEY_KEY] || changes[DEEPL_API_KEY_KEY])
+    ) {
       void loadSettings(opts).then(callback);
     }
   };

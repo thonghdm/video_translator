@@ -128,4 +128,46 @@ describe("Settings Management", () => {
       expect(loaded.drive.autoSidecar).toBe(false);
     });
   });
+
+  describe("Phase 12 G2 — DeepL settings", () => {
+    it("DEFAULT_SETTINGS có cấu hình deepl mặc định: enabled true, prefer false, apiKey rỗng", () => {
+      expect(DEFAULT_SETTINGS.deepl).toBeDefined();
+      expect(DEFAULT_SETTINGS.deepl.apiKey).toBe("");
+      expect(DEFAULT_SETTINGS.deepl.enabled).toBe(true);
+      expect(DEFAULT_SETTINGS.deepl.prefer).toBe(false);
+    });
+
+    it("blob cũ không có trường deepl → deepMerge/loadSettings bổ sung giá trị mặc định", async () => {
+      const oldBlob = {
+        mode: "google",
+        gemini: { model: "gemini-3.5-flash-lite", rpm: 12 },
+      };
+      await chrome.storage.local.set({ settings: oldBlob });
+
+      const loaded = await loadSettings();
+      expect(loaded.deepl).toBeDefined();
+      expect(loaded.deepl.apiKey).toBe("");
+      expect(loaded.deepl.enabled).toBe(true);
+      expect(loaded.deepl.prefer).toBe(false);
+    });
+
+    it("lưu partial deepl.apiKey và prefer → lưu riêng biệt và đọc lại chính xác", async () => {
+      await saveSettings({
+        deepl: {
+          apiKey: "test-deepl-key:fx",
+          enabled: true,
+          prefer: true,
+        },
+      });
+
+      const loaded = await loadSettings();
+      expect(loaded.deepl.apiKey).toBe("test-deepl-key:fx");
+      expect(loaded.deepl.prefer).toBe(true);
+      expect(loaded.deepl.enabled).toBe(true);
+
+      // Blob settings không bao giờ chứa key
+      const raw = await chrome.storage.local.get("settings");
+      expect((raw.settings as any).deepl.apiKey).toBe("");
+    });
+  });
 });

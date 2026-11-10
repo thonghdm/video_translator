@@ -10,6 +10,7 @@ export interface SessionState {
   gtxBreaker?: BreakerSnapshot;
   geminiBreaker?: BreakerSnapshot;
   geminiBucket?: TokenBucketSnapshot;
+  deeplBreaker?: BreakerSnapshot;
 }
 
 const SESSION_KEY = "subtrans_sw_state";
@@ -20,11 +21,12 @@ export class StateManager {
   constructor(
     private gtxBreaker: CircuitBreaker,
     private geminiBreaker: CircuitBreaker,
-    private geminiBucket: TokenBucket
+    private geminiBucket: TokenBucket,
+    private deeplBreaker?: CircuitBreaker
   ) {}
 
   /**
-   * Lưu snapshot của 2 breaker và bucket vào chrome.storage.session với debounce 500ms
+   * Lưu snapshot của các breaker và bucket vào chrome.storage.session với debounce 500ms
    */
   public scheduleSave(): void {
     if (this.saveTimeout) {
@@ -48,6 +50,9 @@ export class StateManager {
       geminiBreaker: this.geminiBreaker.snapshot(),
       geminiBucket: this.geminiBucket.snapshot(),
     };
+    if (this.deeplBreaker) {
+      state.deeplBreaker = this.deeplBreaker.snapshot();
+    }
 
     await chrome.storage.session.set({ [SESSION_KEY]: state });
   }
@@ -73,6 +78,9 @@ export class StateManager {
         }
         if (state.geminiBucket) {
           this.geminiBucket.restore(state.geminiBucket);
+        }
+        if (state.deeplBreaker && this.deeplBreaker) {
+          this.deeplBreaker.restore(state.deeplBreaker);
         }
       }
     } catch (err) {

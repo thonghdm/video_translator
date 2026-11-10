@@ -639,3 +639,14 @@ Ghi nhận kết quả kiểm chứng DeepL API Free (endpoint `https://api-free
 Ghi nhận: lỗi 400 đính kèm thân phản hồi DeepL (`{"message":…}`) — không chứa nội dung phụ đề, chấp nhận.
 Ngoài phạm vi G1: `scripts/zip.mjs` đang có thay đổi chưa commit (thêm bản đóng gói Firefox) — chưa review, KHÔNG gộp vào commit G1.
 Kết quả: typecheck OK, 493/493 test, build + verify-dist OK.
+
+## Phase 12 – G2 Review (settings, lưu key, hợp đồng)
+
+Đạt §3: `deepl { apiKey, enabled, prefer }` với key lưu riêng `deeplApiKey` (blob luôn ""); `loadSettings` đọc 2 key trong 1 lần `get`, `includeApiKey:false` xóa cả 2; `saveSettings` ghi blob + key trong 1 lần `set`; `onSettingsChanged` nghe thêm `deeplApiKey`; `sanitizeSettings` ép kiểu; `messages.ts` chỉ thêm `deepl.test` + `breakers.deepl?`; `StateManager` thêm tham số cuối tùy chọn. Đủ 5 nhóm test.
+
+| # | Lỗi | Sửa | Test |
+|---|---|---|---|
+| 1 | `useSettings.resetDefaults(keepApiKey=true)` ("Khôi phục mặc định" ở Options) chỉ giữ key Gemini; `cloneDefaults()` có `deepl.apiKey = ""` → `saveSettings(fresh)` thấy `partial.deepl.apiKey !== undefined` → **ghi "" đè lên key DeepL** | Giữ/xóa cả `deepl.apiKey` cùng quy tắc với Gemini (sửa `src/shared/useSettings.ts` — ngoài danh sách G2 nhưng là hệ quả trực tiếp của cách lưu key mới) | `deeplResetDefaults.test.ts` (FAIL trước khi sửa) |
+
+Đã rà các chỗ gọi `saveSettings`: content script chỉ lưu `{ subtitleMode }` (không đụng key); popup/options đi qua `useSettings` (nạp `includeApiKey: true`).
+Kết quả: typecheck OK, 503/503 test, build + verify-dist OK.

@@ -106,7 +106,9 @@ export function useSettings(): UseSettingsResult {
     timerRef.current = null;
     pendingRef.current = null;
     const fresh = cloneDefaults();
+    // Giữ (hoặc xóa) TẤT CẢ key lưu riêng: thiếu dòng nào thì "Khôi phục mặc định" sẽ ghi "" đè lên key đó
     fresh.gemini.apiKey = keepApiKey ? settingsRef.current.gemini.apiKey : "";
+    fresh.deepl.apiKey = keepApiKey ? settingsRef.current.deepl.apiKey : "";
     setSettings(fresh);
     await saveSettings(fresh);
     setSaving(false);

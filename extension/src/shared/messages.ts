@@ -62,7 +62,7 @@ export type B2C =
     }
   | {
       type: "status";
-      breakers: { api: BreakerView; cloud: BreakerView };
+      breakers: { api: BreakerView; cloud: BreakerView; deepl?: BreakerView };
       geminiReady: boolean;
     }
   | {
@@ -92,6 +92,7 @@ export type UiReq =
   | { type: "status" }
   | { type: "gemini.test"; apiKey: string; model: string }
   | { type: "gemini.listModels"; apiKey: string }
+  | { type: "deepl.test"; apiKey: string }
   | { type: "cache.stats" }
   | { type: "cache.listRecent"; limit?: number }
   | { type: "cache.clear"; trackKey?: string };
