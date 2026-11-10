@@ -70,7 +70,7 @@ Hàm mới `viaMachine(lines, srcLang, isTier1, signal)` thay cho lời gọi `v
    - `CanceledError` / `signal.aborted` → ném lại ngay, không thử engine sau.
    - `NetworkError` → ném lại ngay (engine kia cũng cần mạng; router hiện có `skipCloud` sẽ xử lý như cũ).
    - Lỗi khác (`RateLimitedError`, `DeepLQuotaError`, `DisabledError`, lỗi HTTP…) → ghi nhớ rồi thử engine tiếp theo.
-4. Tất cả đều lỗi → ném lỗi **có ích nhất cho content**: ưu tiên `RateLimitedError` có `retryAfterMs` **nhỏ nhất** (để đếm ngược đúng lúc engine sớm mở lại nhất); không có thì ném lỗi của engine đầu tiên.
+4. Tất cả đều lỗi → ném lỗi **ít chặn nhất**: bỏ `DisabledError` (trừ khi chỉ có nó); còn lỗi tạm thời không phải rate-limit thì ném lỗi đó (content thử lại sớm); toàn rate-limit thì lấy `retryAfterMs` **nhỏ nhất**. (Sửa khi review G3.)
 5. DeepL có **breaker riêng** (`deeplBreaker`) và **hàng đợi riêng** (`new GtxQueue(1, 250)` — dùng lại class hiện có, đặt tên biến `deeplQueue`). Kiểm tra breaker **ngay trước khi gọi HTTP**, đúng mẫu `viaGoogle` hiện có (xin `allow()` sau khi đã có chỗ trong hàng đợi; report kết quả; probe half-open).
 6. Kết quả DeepL vẫn gắn `engine: "api"` và vẫn ghi vào cache cụm từ `api|…` (như GTX).
 

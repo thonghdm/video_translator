@@ -23,10 +23,12 @@ import {
   CanceledError,
   DisabledError,
   RateLimitedError,
+  NetworkError,
   errToBreakerOutcome,
 } from "./engines/errors";
 import { googleBatchOrPerLine, type GtxQueue } from "./engines/gtx";
 import type { GeminiEngine } from "./engines/gemini";
+import type { DeepLEngine } from "./engines/deepl";
 import { type CircuitBreaker, OUTCOME_OK } from "../shared/breaker";
 
 export interface TranslateOptions {
@@ -89,7 +91,13 @@ export class TranslationRouter {
     private phraseCache: LRUCache<string, string>,
     private gtxBreaker: CircuitBreaker,
     private gtxQueue: GtxQueue,
-    private geminiEngine: GeminiEngine
+    private geminiEngine: GeminiEngine,
+    private deepl?: {
+      engine: DeepLEngine;
+      breaker: CircuitBreaker;
+      queue: GtxQueue;
+      getPrefs: () => { enabled: boolean; prefer: boolean };
+    }
   ) {}
 
   public updateConfig(newConfig: Partial<RouterConfig>): void {
@@ -147,7 +155,7 @@ export class TranslationRouter {
       try {
         out =
           tier.id === "api"
-            ? await this.viaGoogle(input, srcLang, isTier1, signal)
+            ? await this.viaMachine(input, srcLang, isTier1, signal)
             : await this.viaGemini(input, pending, todoLines, isTier1, signal);
       } catch (err) {
         if (err instanceof CanceledError || signal?.aborted) {
@@ -195,7 +203,77 @@ export class TranslationRouter {
 
   // ---------------------------------------------------------------------------
 
-  private async viaGoogle(
+  private async viaMachine(
+    lines: string[],
+    srcLang: string,
+    isTier1: boolean,
+    signal?: AbortSignal
+  ): Promise<string[]> {
+    const hasDeepl = Boolean(
+      this.deepl &&
+      this.deepl.engine.hasKey() &&
+      this.deepl.getPrefs().enabled
+    );
+
+    const preferDeepl = Boolean(hasDeepl && this.deepl!.getPrefs().prefer);
+
+    const engines: Array<"gtx" | "deepl"> = [];
+    if (hasDeepl) {
+      if (preferDeepl) {
+        engines.push("deepl", "gtx");
+      } else {
+        engines.push("gtx", "deepl");
+      }
+    } else {
+      engines.push("gtx");
+    }
+
+    const errors: unknown[] = [];
+
+    for (const eng of engines) {
+      if (signal?.aborted) {
+        throw new CanceledError();
+      }
+      try {
+        if (eng === "gtx") {
+          return await this.callGtx(lines, srcLang, isTier1, signal);
+        } else {
+          return await this.callDeepL(lines, srcLang, isTier1, signal);
+        }
+      } catch (err) {
+        if (err instanceof CanceledError || signal?.aborted) {
+          throw err instanceof CanceledError ? err : new CanceledError();
+        }
+        if (err instanceof NetworkError) {
+          throw err;
+        }
+        errors.push(err);
+      }
+    }
+
+    // Tất cả đều lỗi. Chọn lỗi "ít chặn nhất" để content không tạm nghỉ quá lâu:
+    // - Bỏ DisabledError (key DeepL sai/thiếu là chuyện cấu hình của engine dự phòng, không nói gì về việc dịch).
+    // - Còn lỗi tạm thời không phải rate-limit (HTTP 5xx, timeout…) → ném nó: content thử lại sớm, thay vì
+    //   tạm nghỉ theo retryAfter của engine kia (vd DeepL hết hạn mức tháng = 6 giờ).
+    // - Toàn rate-limit → retryAfterMs NHỎ NHẤT.
+    const informative = errors.filter((e) => !(e instanceof DisabledError));
+    if (informative.length === 0) throw errors[0];
+    const transient = informative.find((e) => !(e instanceof RateLimitedError));
+    if (transient !== undefined) throw transient;
+    const rateLimitedErrors = informative as RateLimitedError[];
+    let best = rateLimitedErrors[0];
+    let minMs = best.retryAfterMs ?? Infinity;
+    for (let i = 1; i < rateLimitedErrors.length; i++) {
+      const ms = rateLimitedErrors[i].retryAfterMs ?? Infinity;
+      if (ms < minMs) {
+        minMs = ms;
+        best = rateLimitedErrors[i];
+      }
+    }
+    throw best;
+  }
+
+  private async callGtx(
     lines: string[],
     srcLang: string,
     isTier1: boolean,
@@ -225,6 +303,47 @@ export class TranslationRouter {
           return out; // luôn đủ lines.length phần tử (batch khớp, hoặc dịch từng dòng)
         } catch (err) {
           this.gtxBreaker.report(errToBreakerOutcome(err), isProbe);
+          throw err;
+        }
+      },
+      isTier1,
+      signal
+    );
+  }
+
+  private async callDeepL(
+    lines: string[],
+    srcLang: string,
+    isTier1: boolean,
+    signal?: AbortSignal
+  ): Promise<string[]> {
+    if (!this.deepl) {
+      throw new DisabledError("DeepL engine not configured");
+    }
+    const { engine, breaker, queue } = this.deepl;
+    return queue.run(
+      async () => {
+        const { allowed, isProbe } = breaker.allow();
+        if (!allowed) {
+          const until = breaker.getBlockedUntil();
+          throw new RateLimitedError(
+            "DeepL circuit breaker is open",
+            until > 0 ? Math.max(0, until - Date.now()) : undefined
+          );
+        }
+        try {
+          const out = await engine.translateLines(lines, srcLang, signal);
+          breaker.report(OUTCOME_OK, isProbe);
+          return out;
+        } catch (err) {
+          if (!(err instanceof DisabledError)) {
+            breaker.report(errToBreakerOutcome(err), isProbe);
+          } else if (isProbe) {
+            // Key sai không phải lỗi tạm thời của DeepL → không phạt breaker, NHƯNG phải trả lượt probe
+            // half-open (report "canceled" = giải phóng cờ probing, không đổi trạng thái); nếu không,
+            // breaker kẹt half-open mãi và DeepL bị khóa tới khi service worker khởi động lại.
+            breaker.report({ kind: "canceled" }, true);
+          }
           throw err;
         }
       },

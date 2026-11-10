@@ -6,6 +6,7 @@
 import type { B2C, BreakerView, C2B, UiReq } from "../shared/messages";
 import type { TranslationRouter } from "./router";
 import { GeminiEngine } from "./engines/gemini";
+import { DeepLEngine } from "./engines/deepl";
 import type { CircuitBreaker } from "../shared/breaker";
 import type { StateManager } from "./state";
 import { apiFetch, createTimeoutSignal } from "./engines/http";
@@ -36,7 +37,8 @@ export class MessagingHub {
     private stateManager: StateManager,
     private db: SubtransDB,
     private getCachePolicy?: () => Promise<{ maxTracks: number; maxAgeDays: number }>,
-    private driveSidecar?: DriveSidecarService
+    private driveSidecar?: DriveSidecarService,
+    private deeplBreaker?: CircuitBreaker
   ) {}
 
   /**
@@ -300,20 +302,30 @@ export class MessagingHub {
   private async handleUiMessage(msg: UiReq): Promise<unknown> {
     switch (msg.type) {
       case "status": {
+        const breakers: { api: BreakerView; cloud: BreakerView; deepl?: BreakerView } = {
+          api: {
+            blocked: this.gtxBreaker.blocked(),
+            until: this.gtxBreaker.getBlockedUntil(),
+          },
+          cloud: {
+            blocked: this.geminiBreaker.blocked(),
+            until: this.geminiBreaker.getBlockedUntil(),
+          },
+        };
+        if (this.deeplBreaker) {
+          breakers.deepl = {
+            blocked: this.deeplBreaker.blocked(),
+            until: this.deeplBreaker.getBlockedUntil(),
+          };
+        }
         return {
           ok: true,
-          breakers: {
-            api: {
-              blocked: this.gtxBreaker.blocked(),
-              until: this.gtxBreaker.getBlockedUntil(),
-            },
-            cloud: {
-              blocked: this.geminiBreaker.blocked(),
-              until: this.geminiBreaker.getBlockedUntil(),
-            },
-          },
+          breakers,
           geminiReady: this.geminiEngine.isAvailable(),
         };
+      }
+      case "deepl.test": {
+        return await DeepLEngine.testConnection(msg.apiKey);
       }
       case "gemini.test": {
         return await GeminiEngine.testConnection(
@@ -358,12 +370,20 @@ export class MessagingHub {
       until: this.geminiBreaker.getBlockedUntil(),
     };
 
+    const breakers: { api: BreakerView; cloud: BreakerView; deepl?: BreakerView } = {
+      api: apiView,
+      cloud: cloudView,
+    };
+    if (this.deeplBreaker) {
+      breakers.deepl = {
+        blocked: this.deeplBreaker.blocked(),
+        until: this.deeplBreaker.getBlockedUntil(),
+      };
+    }
+
     const statusMsg: B2C = {
       type: "status",
-      breakers: {
-        api: apiView,
-        cloud: cloudView,
-      },
+      breakers,
       geminiReady: this.geminiEngine.isAvailable(),
     };
 

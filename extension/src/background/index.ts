@@ -12,6 +12,7 @@ import { LRUCache } from "../shared/lru";
 import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, type Settings } from "../shared/settings";
 import { GtxQueue } from "./engines/gtx";
 import { GeminiEngine } from "./engines/gemini";
+import { DeepLEngine } from "./engines/deepl";
 import { TranslationRouter } from "./router";
 import { StateManager } from "./state";
 import { MessagingHub } from "./messaging";
@@ -30,6 +31,13 @@ const geminiBreaker = new CircuitBreaker(defaultBreakerConfig()); // = cấu hì
 const geminiBucket = new TokenBucket(D.gemini.rpm);
 const gtxQueue = new GtxQueue(D.gtx.concurrency, D.gtx.gapMs);
 const subtransDB = new SubtransDB();
+
+// Trần backoff 6 giờ (mặc định 10 phút): HTTP 456 (hết hạn mức tháng) phải khóa DeepL đủ 6 giờ như DeepLQuotaError,
+// không mở lại mỗi 10 phút để gọi thử. 429 vẫn theo Retry-After (sàn 15 s của breaker).
+const deeplBreaker = new CircuitBreaker({ ...defaultBreakerConfig(), maxBackoffMs: 6 * 60 * 60 * 1000 });
+const deeplQueue = new GtxQueue(1, 250);
+const deeplEngine = new DeepLEngine({ apiKey: "" });
+let deeplPrefs = { enabled: D.deepl.enabled, prefer: D.deepl.prefer };
 
 const geminiEngine = new GeminiEngine(
   {
@@ -50,10 +58,16 @@ const router = new TranslationRouter(
   phraseCache,
   gtxBreaker,
   gtxQueue,
-  geminiEngine
+  geminiEngine,
+  {
+    engine: deeplEngine,
+    breaker: deeplBreaker,
+    queue: deeplQueue,
+    getPrefs: () => deeplPrefs,
+  }
 );
 
-const stateManager = new StateManager(gtxBreaker, geminiBreaker, geminiBucket);
+const stateManager = new StateManager(gtxBreaker, geminiBreaker, geminiBucket, deeplBreaker);
 let cachePolicy: Settings["cache"] = { ...D.cache };
 let driveAuto = DEFAULT_SETTINGS.drive.autoSidecar;
 const driveSidecar = new DriveSidecarService({ isEnabled: () => driveAuto });
@@ -66,7 +80,8 @@ const messagingHub = new MessagingHub(
   stateManager,
   subtransDB,
   async () => cachePolicy,
-  driveSidecar
+  driveSidecar,
+  deeplBreaker
 );
 
 function applySettings(s: Settings): void {
@@ -81,6 +96,8 @@ function applySettings(s: Settings): void {
   });
   geminiBucket.setRpm(s.gemini.rpm);
   gtxQueue.updateConfig(s.gtx.concurrency, s.gtx.gapMs);
+  deeplEngine.updateKey(s.deepl.apiKey);
+  deeplPrefs = { enabled: s.deepl.enabled, prefer: s.deepl.prefer };
   router.updateConfig({ mode: s.mode, geminiModel: s.gemini.model, gtxTimeoutMs: s.gtx.timeoutMs });
   cachePolicy = { ...s.cache };
   driveAuto = s.drive.autoSidecar;

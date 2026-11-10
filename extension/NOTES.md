@@ -650,3 +650,15 @@ Kết quả: typecheck OK, 493/493 test, build + verify-dist OK.
 
 Đã rà các chỗ gọi `saveSettings`: content script chỉ lưu `{ subtitleMode }` (không đụng key); popup/options đi qua `useSettings` (nạp `includeApiKey: true`).
 Kết quả: typecheck OK, 503/503 test, build + verify-dist OK.
+
+## Phase 12 – G3 Review (DeepL dự phòng trong router)
+
+Đạt §2: `viaMachine` (GTX ↔ DeepL theo `prefer`, bỏ DeepL khi chưa có key/`enabled=false`), `callGtx` giữ nguyên nội dung `viaGoogle`, `callDeepL` cùng mẫu queue → allow → report; Network/Canceled ném ngay; tham số mới ở CUỐI constructor (router, MessagingHub, StateManager); `planTiers`/`EngineId`/content không đổi; `status` có `breakers.deepl`; `deepl.test`. Test router/e2e cũ không sửa dòng nào. Content script không dùng `breakers.api` để tạm dừng (chỉ dùng `retryAfterMs` của lỗi) → GTX bị chặn vẫn đi được sang DeepL.
+
+| # | Lỗi | Sửa | Test |
+|---|---|---|---|
+| 1 | DeepL key sai (`DisabledError`) trong **lượt probe half-open**: không report → cờ `probing` không được trả → breaker DeepL kẹt half-open, **DeepL bị khóa vĩnh viễn** tới khi SW khởi động lại (kể cả sau khi đã sửa key) | `isProbe` → `report({kind:"canceled"}, true)` (trả lượt probe, không phạt) | "probe half-open" (FAIL trước khi sửa) |
+| 2 | Chọn lỗi cuối: GTX lỗi tạm thời (HTTP 500/timeout) + DeepL 456 → ném `DeepLQuotaError` (6 giờ) → content **tạm nghỉ 6 giờ** dù GTX có thể hồi lại sau vài giây | Bỏ `DisabledError`; còn lỗi không phải rate-limit thì ném lỗi đó; toàn rate-limit mới lấy `retryAfterMs` nhỏ nhất (cập nhật quy tắc §2.4) | "GTX 500 + DeepL 456" (FAIL trước khi sửa) |
+| 3 | `deeplBreaker` dùng cấu hình mặc định (trần backoff 10 phút) → 456 "khóa 6 giờ" thực tế chỉ khóa 10 phút rồi gọi thử lại | `index.ts`: `maxBackoffMs = 6 giờ` cho riêng breaker DeepL | — (index.ts không có unit test) |
+
+Kết quả: typecheck OK, 519/519 test, build + verify-dist OK.

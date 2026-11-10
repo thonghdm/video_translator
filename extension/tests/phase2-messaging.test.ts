@@ -207,4 +207,66 @@ describe("MessagingHub.init (MV3)", () => {
     proc.off("unhandledRejection", unhandled);
     expect(unhandled).not.toHaveBeenCalled();
   });
+
+  describe("Phase 12 G3 — DeepL MessagingHub", () => {
+    it("status trả về breakers.deepl khi có deeplBreaker", async () => {
+      const { onMessage } = fakeChrome();
+      const br = { blocked: () => false, getBlockedUntil: () => 0 };
+      const deeplBr = { blocked: () => true, getBlockedUntil: () => 123456789 };
+      const hub = new MessagingHub(
+        { translate: vi.fn() } as never,
+        br as never,
+        br as never,
+        { isAvailable: () => false, getEndpoint: () => "https://x" } as never,
+        { scheduleSave: vi.fn() } as never,
+        {} as never,
+        undefined,
+        undefined,
+        deeplBr as never
+      );
+      hub.init();
+
+      let reply: any;
+      onMessage[0]({ type: "status" }, {}, (r: any) => {
+        reply = r;
+      });
+
+      await new Promise((r) => setTimeout(r, 10));
+      expect(reply.ok).toBe(true);
+      expect(reply.breakers.deepl).toEqual({
+        blocked: true,
+        until: 123456789,
+      });
+    });
+
+    it("deepl.test gọi DeepLEngine.testConnection và trả về kết quả", async () => {
+      const { onMessage } = fakeChrome();
+      const { DeepLEngine } = await import("../src/background/engines/deepl");
+      const spy = vi.spyOn(DeepLEngine, "testConnection").mockResolvedValueOnce({
+        ok: true,
+        latencyMs: 123,
+        used: 1000,
+        limit: 500000,
+        sample: "Xin chào",
+      });
+
+      const hub = makeHub({ translate: vi.fn() });
+      hub.init();
+
+      let reply: any;
+      onMessage[0]({ type: "deepl.test", apiKey: "test-key:fx" }, {}, (r: any) => {
+        reply = r;
+      });
+
+      await new Promise((r) => setTimeout(r, 10));
+      expect(spy).toHaveBeenCalledWith("test-key:fx");
+      expect(reply).toEqual({
+        ok: true,
+        latencyMs: 123,
+        used: 1000,
+        limit: 500000,
+        sample: "Xin chào",
+      });
+    });
+  });
 });
