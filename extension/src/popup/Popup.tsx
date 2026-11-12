@@ -319,7 +319,7 @@ export function Popup() {
             <h1 className="text-sm font-bold tracking-tight text-white flex items-center gap-1.5">
               SubTrans
               <span className="text-[10px] font-normal px-1 py-0.2 rounded bg-player-surface border border-player-border text-neutral-400">
-                v0.1.0
+                v0.1.1
               </span>
             </h1>
           </div>
