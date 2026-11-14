@@ -49,7 +49,7 @@ export function UpdateNotice() {
       <h2 className="font-semibold text-amber-300">SubTrans đã cập nhật lên v{unread.version}</h2>
       <p className="text-neutral-400">Phiên bản trước: {unread.previousVersion}</p>
       <ul className="list-disc pl-4 space-y-1">
-        {changelogFor(unread.version).map((line) => <li key={line}>{line}</li>)}
+        {changelogFor(unread.version).map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}
       </ul>
       <p>Nếu trang video đang mở mất kết nối, nhấn F5 để tiếp tục dịch.</p>
       {error && <p role="alert" className="text-rose-300">Chưa lưu được xác nhận. Vui lòng thử lại.</p>}
