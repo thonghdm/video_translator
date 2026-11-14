@@ -16,7 +16,7 @@ export function parseUnreadUpdate(value: unknown): UnreadUpdate | null {
 
 // Add an entry here with each release; unknown versions still show the update notice.
 const CHANGELOG: Record<string, readonly string[]> = {
-  "0.1.1": [
+  "0.1.2": [
     "Thông báo nội dung cập nhật ngay trong popup.",
     "Hướng dẫn tải lại trang khi tiện ích mất kết nối sau cập nhật.",
   ],

@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { acknowledgeUpdate, recordInstalledUpdate, restoreUpdateBadge } from "../src/background/updates";
 import { UpdateNotice } from "../src/popup/UpdateNotice";
 import { changelogFor, parseUnreadUpdate } from "../src/shared/updates";
+import { version } from "../package.json";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -17,7 +18,7 @@ beforeEach(() => {
   listeners = new Set();
   vi.stubGlobal("chrome", {
     runtime: {
-      getManifest: () => ({ version: "0.1.1" }),
+      getManifest: () => ({ version }),
       sendMessage: vi.fn((msg: { version: string }) => acknowledgeUpdate(msg.version)),
     },
     action: { setBadgeText: vi.fn().mockResolvedValue(undefined), setBadgeBackgroundColor: vi.fn().mockResolvedValue(undefined) },
@@ -53,7 +54,7 @@ afterEach(async () => {
 describe("update lifecycle", () => {
   it("records version changes and restores NEW after a worker restart", async () => {
     await recordInstalledUpdate({ reason: "update" as chrome.runtime.OnInstalledReason, previousVersion: "0.1.0" });
-    expect(store.unreadUpdate).toEqual({ version: "0.1.1", previousVersion: "0.1.0" });
+    expect(store.unreadUpdate).toEqual({ version, previousVersion: "0.1.0" });
     vi.mocked(chrome.action.setBadgeText).mockClear();
     await restoreUpdateBadge();
     expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: "NEW" });
@@ -63,7 +64,7 @@ describe("update lifecycle", () => {
   it("ignores first install, browser updates and same-version reloads", async () => {
     for (const details of [
       { reason: "install" }, { reason: "chrome_update" },
-      { reason: "update", previousVersion: "0.1.1" },
+      { reason: "update", previousVersion: version },
     ]) await recordInstalledUpdate(details as chrome.runtime.InstalledDetails);
     expect(store.unreadUpdate).toBeUndefined();
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
@@ -77,7 +78,7 @@ describe("update lifecycle", () => {
     await acknowledgeUpdate("0.1.0");
     expect(store.unreadUpdate).toBeDefined();
     expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: "NEW" });
-    await acknowledgeUpdate("0.1.1");
+    await acknowledgeUpdate(version);
     expect(store.unreadUpdate).toBeUndefined();
     expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: "" });
     await restoreUpdateBadge();
@@ -85,12 +86,12 @@ describe("update lifecycle", () => {
   });
 
   it("renders changelog without clearing unread state until explicit acknowledgement", async () => {
-    store.unreadUpdate = { version: "0.1.1", previousVersion: "0.1.0" };
+    store.unreadUpdate = { version, previousVersion: "0.1.0" };
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
     await act(async () => root!.render(createElement(UpdateNotice)));
-    expect(host.textContent).toContain("v0.1.1");
+    expect(host.textContent).toContain(`v${version}`);
     expect(host.querySelectorAll("li")).toHaveLength(2);
     expect(store.unreadUpdate).toBeDefined();
     await act(async () => host.querySelector("button")!.click());
@@ -100,7 +101,7 @@ describe("update lifecycle", () => {
   });
 
   it("keeps the notice when acknowledgement fails", async () => {
-    store.unreadUpdate = { version: "0.1.1", previousVersion: "0.1.0" };
+    store.unreadUpdate = { version, previousVersion: "0.1.0" };
     vi.mocked(chrome.runtime.sendMessage).mockRejectedValueOnce(new Error("offline"));
     host = document.createElement("div");
     document.body.append(host);
