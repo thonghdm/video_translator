@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Scheduler, inPlayWindow } from "../src/content/scheduler";
 import type { SubtitleItem } from "../src/shared/types";
 import type { BackgroundPort } from "../src/content/port";
+import { PortClosedError } from "../src/content/port";
 
 function makeItems(count: number, dur = 3): SubtitleItem[] {
   const items: SubtitleItem[] = [];
@@ -92,6 +93,47 @@ describe("Scheduler Two-Tier Batching & Planning", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("stops permanently on invalidated context and preserves the reload message", async () => {
+    const request = vi.spyOn(fakePort, "request").mockRejectedValue(new PortClosedError());
+    const onStatusMessage = vi.fn();
+    const onItemsUpdated = vi.fn();
+    const scheduler = new Scheduler({
+      trackKey: "test:update", srcLang: "en", mode: "google",
+      port: fakePort as unknown as BackgroundPort,
+      getItems: () => makeItems(30), onItemsUpdated, onStatusMessage,
+    });
+    scheduler.plan(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onStatusMessage).toHaveBeenLastCalledWith(expect.stringContaining("F5"));
+    expect(scheduler.inflightCount).toBe(0);
+    expect(scheduler.queuedCount).toBe(0);
+    const count = request.mock.calls.length;
+    scheduler.tick(20);
+    scheduler.onSeeked(40);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledTimes(count);
+    expect(onItemsUpdated).not.toHaveBeenCalled();
+    scheduler.dispose();
+    expect(onStatusMessage).toHaveBeenLastCalledWith(expect.stringContaining("F5"));
+  });
+
+  it("continues retrying transient request errors", async () => {
+    const request = vi.spyOn(fakePort, "request").mockRejectedValue(new Error("timeout"));
+    const onStatusMessage = vi.fn();
+    const scheduler = new Scheduler({
+      trackKey: "test:timeout", srcLang: "en", mode: "google",
+      port: fakePort as unknown as BackgroundPort,
+      getItems: () => makeItems(30), onItemsUpdated: vi.fn(), onStatusMessage,
+    });
+    scheduler.plan(0);
+    await vi.advanceTimersByTimeAsync(0);
+    const count = request.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(request.mock.calls.length).toBeGreaterThan(count);
+    expect(onStatusMessage).not.toHaveBeenCalledWith(expect.stringContaining("F5"));
+    scheduler.dispose();
   });
 
   it("ưu tiên tier1 -> ahead -> behind", () => {

@@ -12,6 +12,7 @@ import type { StateManager } from "./state";
 import { apiFetch, createTimeoutSignal } from "./engines/http";
 import type { SubtransDB } from "./cache/db";
 import type { DriveSidecarService } from "./drive/sidecarService";
+import { acknowledgeUpdate } from "./updates";
 
 /** postMessage an toàn: port có thể đã ngắt (tab đóng, content reload) → bỏ qua, không ném lỗi */
 export function safePost(port: chrome.runtime.Port, msg: B2C): boolean {
@@ -301,6 +302,8 @@ export class MessagingHub {
 
   private async handleUiMessage(msg: UiReq): Promise<unknown> {
     switch (msg.type) {
+      case "update.acknowledge":
+        return acknowledgeUpdate(msg.version);
       case "status": {
         const breakers: { api: BreakerView; cloud: BreakerView; deepl?: BreakerView } = {
           api: {

@@ -89,6 +89,7 @@ export interface BreakerView {
 
 // Popup/Options -> Background (chrome.runtime.sendMessage, có trả lời)
 export type UiReq =
+  | { type: "update.acknowledge"; version: string }
   | { type: "status" }
   | { type: "gemini.test"; apiKey: string; model: string }
   | { type: "gemini.listModels"; apiKey: string }

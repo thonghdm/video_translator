@@ -22,7 +22,7 @@ import type { EngineId, Priority, SubtitleItem, TranslateMode } from "../shared/
 import { splitLinesIntoControlledBatches } from "../shared/batching";
 import { upsertSubtitles } from "../shared/subtitles";
 import type { BackgroundPort } from "./port";
-import { newReqId } from "./port";
+import { newReqId, PortClosedError } from "./port";
 import type { B2C, BreakerView, C2B } from "../shared/messages";
 
 export interface SchedulerOptions {
@@ -267,6 +267,11 @@ export class Scheduler {
       .catch((err) => {
         if (this.disposed) return;
         this.inflight.delete(reqId);
+        if (err instanceof PortClosedError) {
+          this.dispose();
+          this.opts.onStatusMessage?.("SubTrans đã mất kết nối với tiện ích. Nhấn F5 để tải lại trang và tiếp tục dịch.");
+          return;
+        }
         if (import.meta.env?.DEV) console.warn("[SubTrans][scheduler] request lỗi:", err);
         // Timeout/port lỗi: coi như lỗi tạm thời, không tính lượt retry; lập lại lịch sau
         this.pauseFor(3_000, false);

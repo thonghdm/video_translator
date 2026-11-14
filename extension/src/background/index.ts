@@ -18,6 +18,11 @@ import { StateManager } from "./state";
 import { MessagingHub } from "./messaging";
 import { SubtransDB } from "./cache/db";
 import { DriveSidecarService } from "./drive/sidecarService";
+import { recordInstalledUpdate, restoreUpdateBadge } from "./updates";
+
+chrome.runtime.onInstalled.addListener((details) => {
+  void recordInstalledUpdate(details).catch((err) => console.warn("[SubTrans] Update notice:", err));
+});
 
 const log = (...args: unknown[]) => {
   if (import.meta.env.DEV) console.log("[SubTrans][SW]", ...args);
@@ -105,6 +110,7 @@ function applySettings(s: Settings): void {
 
 // 2. Khởi tạo bất đồng bộ
 async function init(): Promise<void> {
+  await restoreUpdateBadge().catch((err) => console.warn("[SubTrans] Update badge:", err));
   await stateManager.restore();
   const settings = await loadSettings();
   applySettings(settings);

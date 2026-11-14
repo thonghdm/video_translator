@@ -5,6 +5,8 @@
 
 import { useEffect, useState, useCallback, useId } from "react";
 import { useSettings } from "../shared/useSettings";
+import { UpdateNotice } from "./UpdateNotice";
+import { version } from "../../package.json";
 import type { SubtitleMode, TranslateMode } from "../shared/types";
 import type { BreakerView, TabStatus, UiReq } from "../shared/messages";
 import {
@@ -319,7 +321,7 @@ export function Popup() {
             <h1 className="text-sm font-bold tracking-tight text-white flex items-center gap-1.5">
               SubTrans
               <span className="text-[10px] font-normal px-1 py-0.2 rounded bg-player-surface border border-player-border text-neutral-400">
-                v0.1.1
+                v{version}
               </span>
             </h1>
           </div>
@@ -339,6 +341,8 @@ export function Popup() {
           <span>{settings.enabled ? "Bật" : "Tắt"}</span>
         </button>
       </div>
+
+      <UpdateNotice />
 
       {/* Per-site toggle banner */}
       {activeHostname && (
