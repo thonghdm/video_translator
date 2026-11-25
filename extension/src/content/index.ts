@@ -157,7 +157,11 @@ export class ContentController {
     if (wasOn && !isOn) return this.deactivate();
     if (!wasOn && isOn) return this.activate();
     if (this.store) {
-      this.store.setState({ mode: next.subtitleMode, style: next.style });
+      this.store.setState({
+        mode: next.subtitleMode,
+        style: next.style,
+        ttsEnabled: next.tts.enabled,
+      });
       this.session?.onModeChanged(next.subtitleMode);
     }
     this.session?.onSettingsChanged(next);
@@ -200,6 +204,10 @@ export class ContentController {
         e.stopPropagation();
         e.preventDefault();
         this.cycleSubtitleMode();
+      } else if (key === "d" && !e.shiftKey) {
+        e.stopPropagation();
+        e.preventDefault();
+        this.toggleTts();
       } else if (key === "g") {
         e.stopPropagation();
         e.preventDefault();
@@ -233,6 +241,13 @@ export class ContentController {
 
     this.store?.flashToast(`Chế độ phụ đề: ${labels[nextMode]}`);
     void saveSettings({ subtitleMode: nextMode });
+  }
+
+  private toggleTts(): void {
+    const next = !this.settings.tts.enabled;
+    this.store?.setState({ ttsEnabled: next });
+    this.store?.flashToast(next ? "Thuyết minh: Bật" : "Thuyết minh: Tắt");
+    void saveSettings({ tts: { ...this.settings.tts, enabled: next } });
   }
 
   private adjustOffset(delta: number): void {
@@ -337,6 +352,7 @@ export class ContentController {
       mode: this.settings.subtitleMode,
       style: this.settings.style,
       offset: this.offset,
+      ttsEnabled: this.settings.tts.enabled,
     }));
     const native = new NativeTrackFallback(video);
     native.setOffset(this.offset);
@@ -350,6 +366,7 @@ export class ContentController {
       onExport: (format, mode) => this.handleExport(format, mode),
       onOffsetChange: (delta) => this.adjustOffset(delta),
       onOffsetReset: () => this.resetOffset(),
+      onToggleTts: () => this.toggleTts(),
     });
     // Ẩn overlay khi YouTube đang phát quảng cáo (ad-showing)
     if (typeof adapter.isAdPlaying === "function") {

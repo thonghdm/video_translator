@@ -13,6 +13,7 @@ import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, type Settings } from
 import { GtxQueue } from "./engines/gtx";
 import { GeminiEngine } from "./engines/gemini";
 import { DeepLEngine } from "./engines/deepl";
+import { ensureEdgeTtsHeaderRules } from "./engines/edgeTts";
 import { TranslationRouter } from "./router";
 import { StateManager } from "./state";
 import { MessagingHub } from "./messaging";
@@ -110,6 +111,7 @@ function applySettings(s: Settings): void {
 
 // 2. Khởi tạo bất đồng bộ
 async function init(): Promise<void> {
+  void ensureEdgeTtsHeaderRules();
   await restoreUpdateBadge().catch((err) => console.warn("[SubTrans] Update badge:", err));
   await stateManager.restore();
   const settings = await loadSettings();

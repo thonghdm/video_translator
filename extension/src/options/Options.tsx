@@ -5,6 +5,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useSettings } from "../shared/useSettings";
+import { TtsSettingsSection } from "../shared/TtsSettingsSection";
 import { NumberField } from "./NumberField";
 import type { UiReq } from "../shared/messages";
 import {
@@ -564,6 +565,14 @@ export function Options() {
               </div>
             )}
           </div>
+        </section>
+
+        {/* Thuyết minh tiếng Việt (Edge Neural TTS) */}
+        <section className="p-5 rounded-xl bg-player-surface border border-player-border">
+          <TtsSettingsSection
+            tts={settings.tts}
+            onChange={(tts) => updateSettings({ tts })}
+          />
         </section>
       </div>
     </div>

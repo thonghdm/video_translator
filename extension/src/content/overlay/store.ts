@@ -27,6 +27,8 @@ export interface OverlayState {
   hover: boolean;
   /** Tiêu đề track phụ đề đang phát */
   trackTitle?: string;
+  /** Trạng thái bật/tắt thuyết minh tiếng Việt (Edge TTS) */
+  ttsEnabled?: boolean;
 }
 
 export type Listener = () => void;
@@ -48,6 +50,7 @@ export class OverlayStore {
       offset: 0,
       hasTrack: false,
       hover: false,
+      ttsEnabled: false,
       ...initial,
     };
   }

@@ -4,6 +4,7 @@
  */
 
 import type { SubtitleMode, TranslateMode } from "./types";
+import type { TtsVoice } from "./messages";
 
 export interface Settings {
   enabled: boolean; // true
@@ -51,6 +52,13 @@ export interface Settings {
     apiKey: string; // "" (lưu riêng tại deeplApiKey trong chrome.storage.local)
     enabled: boolean; // true — có key + enabled mới dùng
     prefer: boolean; // false — true: DeepL trước, GTX sau
+  };
+  tts: {
+    enabled: boolean; // false (mặc định tắt để không ảnh hưởng hành vi hiện tại)
+    voice: TtsVoice; // "vi-VN-HoaiMyNeural"
+    rateOffset: number; // 0 (%, -20..50, bước 5)
+    ttsVolume: number; // 1.0 (0.1..1.0)
+    duckingVolume: number; // 0.2 (0.0..1.0 — âm lượng video gốc khi đang đọc)
   };
 }
 
@@ -100,6 +108,13 @@ export const DEFAULT_SETTINGS: Settings = {
     apiKey: "",
     enabled: true,
     prefer: false,
+  },
+  tts: {
+    enabled: false,
+    voice: "vi-VN-HoaiMyNeural",
+    rateOffset: 0,
+    ttsVolume: 1.0,
+    duckingVolume: 0.2,
   },
 };
 
@@ -158,6 +173,9 @@ export const SETTING_LIMITS = {
   "style.bgOpacity": [0, 1],
   "cache.maxTracks": [10, 1000],
   "cache.maxAgeDays": [1, 365],
+  "tts.rateOffset": [-20, 50],
+  "tts.ttsVolume": [0.1, 1],
+  "tts.duckingVolume": [0, 1],
 } as const satisfies Record<string, readonly [number, number]>;
 
 export type LimitKey = keyof typeof SETTING_LIMITS;
@@ -171,6 +189,7 @@ export function clampSetting(key: LimitKey, value: unknown, fallback: number): n
 
 const MODES = ["google", "gemini", "hybrid"] as const;
 const SUB_MODES = ["bilingual", "vi", "en", "off"] as const;
+const TTS_VOICES = ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"] as const;
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
 /**
@@ -221,6 +240,20 @@ export function sanitizeSettings(input: Settings): Settings {
     apiKey: typeof s.deepl?.apiKey === "string" ? s.deepl.apiKey.trim() : "",
     enabled: typeof s.deepl?.enabled === "boolean" ? s.deepl.enabled : d.deepl.enabled,
     prefer: typeof s.deepl?.prefer === "boolean" ? s.deepl.prefer : d.deepl.prefer,
+  };
+  const rawRateOffset =
+    Math.round(clampSetting("tts.rateOffset", s.tts?.rateOffset, d.tts.rateOffset) / 5) * 5;
+  s.tts = {
+    enabled: typeof s.tts?.enabled === "boolean" ? s.tts.enabled : d.tts.enabled,
+    voice: (TTS_VOICES as readonly string[]).includes(s.tts?.voice)
+      ? (s.tts.voice as TtsVoice)
+      : d.tts.voice,
+    rateOffset: rawRateOffset === 0 ? 0 : rawRateOffset,
+    ttsVolume:
+      Math.round(clampSetting("tts.ttsVolume", s.tts?.ttsVolume, d.tts.ttsVolume) * 100) / 100,
+    duckingVolume:
+      Math.round(clampSetting("tts.duckingVolume", s.tts?.duckingVolume, d.tts.duckingVolume) * 100) /
+      100,
   };
   return s;
 }

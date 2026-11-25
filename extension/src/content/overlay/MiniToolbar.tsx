@@ -12,6 +12,8 @@ import {
   Info,
   Plus,
   Minus,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 
 export interface MiniToolbarProps {
@@ -20,10 +22,12 @@ export interface MiniToolbarProps {
   offset: number;
   message: string | null;
   hasTrack: boolean;
+  ttsEnabled?: boolean;
   onOffsetChange: (delta: number) => void;
   onOffsetReset: () => void;
   onImportFile: (file: File) => void;
   onExport: (format: "srt" | "vtt", mode: "bilingual" | "target" | "source") => void;
+  onToggleTts?: () => void;
 }
 
 export function MiniToolbar({
@@ -31,10 +35,12 @@ export function MiniToolbar({
   offset,
   message,
   hasTrack,
+  ttsEnabled = false,
   onOffsetChange,
   onOffsetReset,
   onImportFile,
   onExport,
+  onToggleTts,
 }: MiniToolbarProps) {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
@@ -186,6 +192,33 @@ export function MiniToolbar({
         {/* Đường kẻ phân cách */}
         <div className="w-[1px] h-3.5 bg-white/20 my-auto" />
 
+        {/* Nút Bật/Tắt Thuyết minh tiếng Việt */}
+        <button
+          onClick={() => onToggleTts?.()}
+          disabled={!hasTrack}
+          data-testid="st-tts-toggle"
+          className={`flex items-center gap-1 px-1.5 py-0.5 rounded transition text-[11px] font-medium disabled:opacity-40 ${
+            ttsEnabled
+              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30"
+              : "hover:bg-white/10 text-neutral-300 hover:text-white"
+          }`}
+          title={
+            ttsEnabled
+              ? "Đang bật thuyết minh tiếng Việt (phím D để tắt)"
+              : "Bật thuyết minh tiếng Việt (phím D)"
+          }
+        >
+          {ttsEnabled ? (
+            <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+          ) : (
+            <VolumeX className="w-3.5 h-3.5 text-neutral-400" />
+          )}
+          <span>Thuyết minh</span>
+        </button>
+
+        {/* Đường kẻ phân cách */}
+        <div className="w-[1px] h-3.5 bg-white/20 my-auto" />
+
         {/* Chỉnh lệch thời gian (Offset) */}
         <div className="flex items-center gap-1">
           <button
@@ -222,7 +255,7 @@ export function MiniToolbar({
             setShowExportMenu(false);
           }}
           className="p-0.5 rounded hover:bg-white/10 text-neutral-400 hover:text-white transition ml-0.5"
-          title="Phím tắt: V (chế độ phụ đề), G/H (chỉnh lệch thời gian)"
+          title="Phím tắt: V (chế độ phụ đề), D (thuyết minh), G/H (chỉnh lệch thời gian)"
         >
           <Keyboard className="w-3.5 h-3.5" />
         </button>
@@ -230,7 +263,7 @@ export function MiniToolbar({
 
       {/* Popover trợ giúp phím tắt */}
       {showShortcutsHelp && (
-        <div className="bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl p-2.5 text-xs text-neutral-300 space-y-1.5 w-52">
+        <div className="bg-neutral-900 border border-neutral-700 rounded-lg shadow-2xl p-2.5 text-xs text-neutral-300 space-y-1.5 w-56">
           <div className="font-semibold text-white border-b border-neutral-800 pb-1 flex items-center gap-1.5">
             <Keyboard className="w-3.5 h-3.5 text-amber-400" />
             <span>Phím tắt SubTrans</span>
@@ -240,6 +273,12 @@ export function MiniToolbar({
               V
             </span>
             <span>Chuyển chế độ phụ đề</span>
+          </div>
+          <div className="flex justify-between items-center text-[11px]">
+            <span className="font-mono bg-neutral-800 px-1.5 py-0.5 rounded text-emerald-300 font-bold">
+              D
+            </span>
+            <span>Bật/tắt thuyết minh tiếng Việt</span>
           </div>
           <div className="flex justify-between items-center text-[11px]">
             <span className="font-mono bg-neutral-800 px-1.5 py-0.5 rounded text-amber-300 font-bold">

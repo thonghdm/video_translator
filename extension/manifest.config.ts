@@ -6,10 +6,11 @@ export default defineManifest({
   name: "SubTrans – Phụ đề song ngữ",
   version: pkg.version,
   minimum_chrome_version: "116",
-  permissions: ["storage", "unlimitedStorage"],
+  permissions: ["storage", "unlimitedStorage", "declarativeNetRequestWithHostAccess"],
   host_permissions: [
     "https://translate.googleapis.com/*",
     "https://generativelanguage.googleapis.com/*",
+    "https://speech.platform.bing.com/*",
     "<all_urls>"
   ],
   background: {

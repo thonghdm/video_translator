@@ -13,7 +13,7 @@ import { cuesToItems, findSubtitleAtTime } from "../../shared/subtitles";
 import { Disposer } from "../../shared/disposer";
 import { raf, cancelRaf } from "../../shared/raf";
 import { fnv1a32 } from "../../shared/hash";
-import type { Settings } from "../../shared/settings";
+import { DEFAULT_SETTINGS, type Settings } from "../../shared/settings";
 import type { B2C } from "../../shared/messages";
 import type { BackgroundPort } from "../port";
 import { newReqId } from "../port";
@@ -21,6 +21,7 @@ import type { SubtitleSource } from "../adapters/types";
 import type { OverlayStore } from "../overlay/store";
 import type { NativeTrackFallback } from "../overlay/nativeTrackFallback";
 import { Scheduler } from "../scheduler";
+import { DubbingManager } from "../tts/dubbingManager";
 
 export interface SessionOptions {
   port?: BackgroundPort;
@@ -106,6 +107,7 @@ export class Session {
   private lastShown: SubtitleItem | null = null;
   private started = false;
   private scheduler: Scheduler | null = null;
+  private dubbing: DubbingManager | null = null;
 
   // Buffer gom lưu cache (debounce 2s)
   private readonly saveLinesBuffer = new Map<string /*engineKey*/, Map<number /*id*/, string /*text*/>>();
@@ -122,6 +124,19 @@ export class Session {
     this.disposer.add(() => this.flushSaveLines());
     this.disposer.add(() => this.scheduler?.dispose());
     this.disposer.add(() => this.source.dispose());
+
+    if (this.opts.port) {
+      this.dubbing = new DubbingManager(
+        this.video,
+        this.opts.port,
+        this.opts.settings ?? DEFAULT_SETTINGS,
+        {
+          onStatusNotice: (msg) => this.store.flashToast(msg),
+          getPlayhead: () => this.getCurrentPlayhead(),
+        }
+      );
+      this.disposer.add(() => this.dubbing?.dispose());
+    }
   }
 
   public get track() {
@@ -218,6 +233,10 @@ export class Session {
       pretranslateWholeTrack: newSettings.pretranslateWholeTrack,
     });
     this.scheduler?.plan(this.getCurrentPlayhead());
+    this.dubbing?.updateSettings(newSettings);
+    if (newSettings.tts.enabled && this.lastShown) {
+      this.dubbing?.onCueTick(this.getCurrentPlayhead(), this.lastShown, this.items);
+    }
   }
 
   public dispose(): void {
@@ -346,19 +365,43 @@ export class Session {
     const { signal } = this.disposer;
     const once = () => this.tick();
 
-    v.addEventListener("play", () => this.startLoop(), { signal });
-    v.addEventListener("playing", () => this.startLoop(), { signal });
-    v.addEventListener("pause", () => (this.stopLoop(), once()), { signal });
-    v.addEventListener("ended", () => (this.stopLoop(), once()), { signal });
+    v.addEventListener("play", () => {
+      this.startLoop();
+      this.dubbing?.onPlay();
+    }, { signal });
+    v.addEventListener("playing", () => {
+      this.startLoop();
+      this.dubbing?.onPlay();
+    }, { signal });
+    v.addEventListener("pause", () => {
+      this.stopLoop();
+      once();
+      this.dubbing?.onPause();
+    }, { signal });
+    v.addEventListener("ended", () => {
+      this.stopLoop();
+      once();
+      this.dubbing?.onEnded();
+    }, { signal });
+    v.addEventListener("seeking", () => {
+      this.dubbing?.onSeeking();
+    }, { signal });
     v.addEventListener(
       "seeked",
       () => {
+        this.dubbing?.onSeeked();
         once();
         this.scheduler?.onSeeked(this.getCurrentPlayhead());
       },
       { signal }
     );
-    v.addEventListener("ratechange", once, { signal });
+    v.addEventListener("ratechange", () => {
+      once();
+      this.dubbing?.onRateChange();
+    }, { signal });
+    v.addEventListener("volumechange", () => {
+      this.dubbing?.onVolumeChange();
+    }, { signal });
 
     let loadCount = 0;
     v.addEventListener(
@@ -374,8 +417,12 @@ export class Session {
     document.addEventListener(
       "visibilitychange",
       () => {
-        if (document.hidden) this.stopLoop();
-        else if (!v.paused) this.startLoop();
+        if (document.hidden) {
+          this.stopLoop();
+          this.dubbing?.onVisibilityChange();
+        } else if (!v.paused) {
+          this.startLoop();
+        }
       },
       { signal }
     );
@@ -414,8 +461,14 @@ export class Session {
   private tick(): void {
     const t = this.getCurrentPlayhead();
     const item = findSubtitleAtTime(this.items, t);
-    if (item === this.lastShown) return;
+    const newlyTranslated =
+      item !== null &&
+      this.lastShown !== null &&
+      !this.lastShown.translated &&
+      item.translated;
+    if (item === this.lastShown && !newlyTranslated) return;
     this.lastShown = item;
     this.store.setState({ item });
+    this.dubbing?.onCueTick(t, item, this.items);
   }
 }

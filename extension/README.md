@@ -34,6 +34,11 @@ Tiện ích cho các trình duyệt nhân Chromium (Chrome, Edge, Brave, Cốc C
 
 **Xuất phụ đề:** `.srt` hoặc `.vtt` × (Song ngữ / Tiếng Việt / Tiếng Anh), từ popup hoặc từ MiniToolbar trên video. Tên file: `<tiêu đề>.<bilingual|vi|en>.<srt|vtt>`. Định dạng giống hệt bản Desktop xuất, nên hai bên mở được file của nhau.
 
+**Thuyết minh tiếng Việt (Edge Neural TTS — mặc định tắt):**
+- Tự động đọc phụ đề tiếng Việt đã dịch bằng giọng Neural tự nhiên (`Hoài Mỹ` / `Nam Minh`), không cần API key, hỗ trợ cả Firefox và Chromium.
+- Bật/tắt nhanh qua nút **Thuyết minh** trên MiniToolbar, phím tắt `D`, hoặc trong Popup/Options; có thanh trượt chỉnh âm lượng giọng đọc, hạ tiếng video gốc (Audio Ducking), tốc độ cơ sở và nút nghe thử.
+- **Lưu ý quyền riêng tư:** Tính năng mặc định tắt. Khi bạn chủ động bật, văn bản phụ đề tiếng Việt sẽ được gửi tới dịch vụ Microsoft Edge Read Aloud (`speech.platform.bing.com`) để tổng hợp giọng nói (endpoint không chính thức, có thể thay đổi bất cứ lúc nào).
+
 ---
 
 ## Google Drive: tự nhận phụ đề

@@ -13,6 +13,8 @@ import type {
 } from "./types";
 import type { SidecarFailReason, SidecarFile, SidecarMode } from "./driveTypes";
 
+export type TtsVoice = "vi-VN-HoaiMyNeural" | "vi-VN-NamMinhNeural";
+
 // Content -> Background (qua Port "subtrans")
 export type C2B =
   | {
@@ -36,7 +38,14 @@ export type C2B =
       updates: Array<[number, string]>;
     }
   | { type: "fetchText"; reqId: string; url: string } // chỉ http(s), tối đa 2MB
-  | { type: "drive.sidecar"; reqId: string; videoDocId?: string };
+  | { type: "drive.sidecar"; reqId: string; videoDocId?: string }
+  | {
+      type: "tts.synthesize";
+      reqId: string;
+      text: string;
+      voice: TtsVoice;
+      rate: string; // ví dụ "+0%", "+15%", "-10%"
+    };
 
 // Background -> Content
 export type B2C =
@@ -80,6 +89,14 @@ export type B2C =
       ok: false;
       reason: SidecarFailReason;
       indexed?: number;
+    }
+  | {
+      type: "tts.result";
+      reqId: string;
+      ok: boolean;
+      audioBase64?: string;
+      mime?: "audio/mpeg";
+      error?: string;
     };
 
 export interface BreakerView {
@@ -96,7 +113,8 @@ export type UiReq =
   | { type: "deepl.test"; apiKey: string }
   | { type: "cache.stats" }
   | { type: "cache.listRecent"; limit?: number }
-  | { type: "cache.clear"; trackKey?: string };
+  | { type: "cache.clear"; trackKey?: string }
+  | { type: "tts.test"; voice: TtsVoice; rate?: string; text?: string };
 
 // Popup -> Content của tab đang mở (chrome.tabs.sendMessage)
 export type PopupToTab =

@@ -17,6 +17,7 @@ export interface OverlayAppProps {
   onOffsetReset?: () => void;
   onImportFile?: (file: File) => void;
   onExport?: (format: "srt" | "vtt", mode: "bilingual" | "target" | "source") => void;
+  onToggleTts?: () => void;
 }
 
 export function OverlayApp({
@@ -27,6 +28,7 @@ export function OverlayApp({
   onOffsetReset,
   onImportFile,
   onExport,
+  onToggleTts,
 }: OverlayAppProps) {
   const s = useSyncExternalStore(store.subscribe, store.getState);
   const onReset = useCallback(
@@ -57,10 +59,12 @@ export function OverlayApp({
           offset={s.offset}
           message={s.message}
           hasTrack={s.hasTrack}
+          ttsEnabled={Boolean(s.ttsEnabled)}
           onOffsetChange={onOffsetChange ?? (() => {})}
           onOffsetReset={onOffsetReset ?? (() => {})}
           onImportFile={onImportFile ?? (() => {})}
           onExport={onExport ?? (() => {})}
+          onToggleTts={onToggleTts ?? (() => {})}
         />
       )}
 

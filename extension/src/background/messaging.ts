@@ -7,6 +7,7 @@ import type { B2C, BreakerView, C2B, UiReq } from "../shared/messages";
 import type { TranslationRouter } from "./router";
 import { GeminiEngine } from "./engines/gemini";
 import { DeepLEngine } from "./engines/deepl";
+import { synthesizeEdgeTts } from "./engines/edgeTts";
 import type { CircuitBreaker } from "../shared/breaker";
 import type { StateManager } from "./state";
 import { apiFetch, createTimeoutSignal } from "./engines/http";
@@ -247,6 +248,39 @@ export class MessagingHub {
         break;
       }
 
+      case "tts.synthesize": {
+        const controller = new AbortController();
+        portInFlight.set(msg.reqId, controller);
+
+        synthesizeEdgeTts({
+          text: msg.text,
+          voice: msg.voice,
+          rate: msg.rate,
+          signal: controller.signal,
+        })
+          .then((audioBase64) => {
+            safePost(port, {
+              type: "tts.result",
+              reqId: msg.reqId,
+              ok: true,
+              audioBase64,
+              mime: "audio/mpeg",
+            });
+          })
+          .catch((err: unknown) => {
+            safePost(port, {
+              type: "tts.result",
+              reqId: msg.reqId,
+              ok: false,
+              error: (err as Error)?.message || String(err),
+            });
+          })
+          .finally(() => {
+            portInFlight.delete(msg.reqId);
+          });
+        break;
+      }
+
       default:
         break;
     }
@@ -351,6 +385,29 @@ export class MessagingHub {
         // Xóa toàn bộ cache → xóa luôn cache cụm từ trong RAM của router
         if (!msg.trackKey) this.router.clearPhraseCache?.();
         return { ok: true };
+      }
+      case "tts.test": {
+        const t0 = performance.now();
+        try {
+          const audioBase64 = await synthesizeEdgeTts({
+            text:
+              msg.text ||
+              "Xin chào, đây là giọng thuyết minh phụ đề tiếng Việt tự động.",
+            voice: msg.voice,
+            rate: msg.rate ?? "+0%",
+          });
+          return {
+            ok: true,
+            latencyMs: Math.round(performance.now() - t0),
+            audioBase64,
+            mime: "audio/mpeg" as const,
+          };
+        } catch (err: unknown) {
+          return {
+            ok: false,
+            error: (err as Error)?.message || String(err),
+          };
+        }
       }
       default:
         return { ok: false, error: "Unknown UiReq" };

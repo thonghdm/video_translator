@@ -5,6 +5,7 @@
 
 import { useEffect, useState, useCallback, useId } from "react";
 import { useSettings } from "../shared/useSettings";
+import { TtsSettingsSection } from "../shared/TtsSettingsSection";
 import { UpdateNotice } from "./UpdateNotice";
 import { version } from "../../package.json";
 import type { SubtitleMode, TranslateMode } from "../shared/types";
@@ -910,6 +911,13 @@ export function Popup() {
           </div>
         </div>
       </div>
+
+      {/* 5.5 THUYẾT MINH TIẾNG VIỆT (EDGE TTS) */}
+      <TtsSettingsSection
+        tts={settings.tts}
+        onChange={(tts) => updateSettings({ tts })}
+        compact
+      />
 
       {/* 6. XUẤT PHỤ ĐỀ */}
       <div className="space-y-1.5">

@@ -33,6 +33,7 @@ export interface OverlayHostOptions {
   onOffsetReset?: () => void;
   onImportFile?: (file: File) => void;
   onExport?: (format: "srt" | "vtt", mode: "bilingual" | "target" | "source") => void;
+  onToggleTts?: () => void;
 }
 
 const HOST_TAG = "subtrans-overlay";
@@ -115,6 +116,7 @@ export class OverlayHost {
         onOffsetReset: opts.onOffsetReset,
         onImportFile: opts.onImportFile,
         onExport: opts.onExport,
+        onToggleTts: opts.onToggleTts,
       })
     );
 
