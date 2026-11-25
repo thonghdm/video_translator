@@ -65,6 +65,22 @@ async function playBase64WithWebAudio(
   }
 }
 
+function sendUiMessage<T>(req: UiReq): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    try {
+      chrome.runtime.sendMessage(req, (res: T) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || "Lỗi gửi yêu cầu tới background"));
+          return;
+        }
+        resolve(res);
+      });
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  });
+}
+
 export function TtsSettingsSection({
   tts,
   onChange,
@@ -90,12 +106,12 @@ export function TtsSettingsSection({
         voice: tts.voice,
         rate: formatRate(tts.rateOffset),
       };
-      const res = (await chrome.runtime.sendMessage(req)) as {
+      const res = await sendUiMessage<{
         ok?: boolean;
         latencyMs?: number;
         audioBase64?: string;
         error?: string;
-      };
+      }>(req);
       if (!res?.ok || !res.audioBase64) {
         setTestResult({ ok: false, error: res?.error || "Không nhận được âm thanh" });
         return;

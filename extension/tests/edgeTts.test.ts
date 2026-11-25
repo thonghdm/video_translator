@@ -102,7 +102,7 @@ describe("edgeTts engine", () => {
     const gNext = await generateSecMsGec(tNextWindow, 0);
     const gSkewed = await generateSecMsGec(t1, 300);
 
-    expect(g1).toMatch(/^[0-9A-F]{64}$/);
+    expect(g1).toMatch(/^[0-9A-F]{16}-[0-9A-F]{64}$/);
     expect(g1).toBe(g2);
     expect(g1).not.toBe(gNext);
     expect(gSkewed).toBe(gNext);

@@ -7,13 +7,14 @@
  */
 
 import type { TtsVoice } from "../../shared/messages";
+import { generateSecMsGecV2 } from "./edgeTtsDrm";
 
 export const EDGE_TTS_CONFIG = {
   TRUSTED_CLIENT_TOKEN: "6A5AA1D4EAFF4E9FB37E23D68491D6F4",
-  SEC_MS_GEC_VERSION: "1-130.0.2849.68",
+  SEC_MS_GEC_VERSION: "2-143.0.3650.75",
   EDGE_ORIGIN: "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold",
   EDGE_UA:
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
   WSS_URL: "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1",
   CLOCK_SYNC_URL: "https://speech.platform.bing.com/",
   DNR_RULE_ID: 9101,
@@ -21,9 +22,6 @@ export const EDGE_TTS_CONFIG = {
   MAX_CONCURRENCY: 2,
 } as const;
 
-const WINDOWS_EPOCH_OFFSET_SEC = 11644473600n;
-const FIVE_MINUTES_SEC = 300n;
-const TICKS_PER_SEC = 10000000n;
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 let cachedClockSkewSec = 0;
@@ -58,12 +56,79 @@ function makeConnectionId(): string {
   return hex;
 }
 
+function getExtensionInitiatorDomain(): string | null {
+  try {
+    if (typeof chrome !== "undefined" && typeof chrome.runtime?.getURL === "function") {
+      const host = new URL(chrome.runtime.getURL("")).hostname;
+      if (host) return host;
+    }
+  } catch {
+    // bỏ qua
+  }
+  return typeof chrome !== "undefined" && chrome.runtime?.id ? chrome.runtime.id : null;
+}
+
+let webRequestRegistered = false;
+
+/**
+ * Trên Firefox (bản đóng gói scripts/zip.mjs có quyền webRequest + webRequestBlocking),
+ * gắn listener onBeforeSendHeaders làm lớp bảo hiểm chắc chắn ghi đè Origin & User-Agent
+ * cho WebSocket handshake tới speech.platform.bing.com.
+ * Trên Chrome MV3 không có quyền này → tự bỏ qua an toàn và dùng DNR.
+ */
+function ensureFirefoxWebRequestFallback(): void {
+  if (webRequestRegistered) return;
+  try {
+    const wr = (
+      chrome as unknown as {
+        webRequest?: {
+          onBeforeSendHeaders?: {
+            addListener: (
+              cb: (details: {
+                requestHeaders?: Array<{ name: string; value?: string }>;
+              }) => { requestHeaders?: Array<{ name: string; value?: string }> },
+              filter: { urls: string[] },
+              extraInfoSpec: string[]
+            ) => void;
+          };
+        };
+      }
+    ).webRequest;
+    if (!wr?.onBeforeSendHeaders?.addListener) return;
+
+    wr.onBeforeSendHeaders.addListener(
+      (details) => {
+        const headers = (details.requestHeaders ?? []).filter((h) => {
+          const lower = h.name.toLowerCase();
+          return lower !== "origin" && lower !== "user-agent";
+        });
+        headers.push(
+          { name: "Origin", value: EDGE_TTS_CONFIG.EDGE_ORIGIN },
+          { name: "User-Agent", value: EDGE_TTS_CONFIG.EDGE_UA }
+        );
+        return { requestHeaders: headers };
+      },
+      {
+        urls: [
+          "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/*",
+          "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/*",
+        ],
+      },
+      ["blocking", "requestHeaders"]
+    );
+    webRequestRegistered = true;
+  } catch {
+    // Chrome MV3 không cho phép blocking webRequest → bỏ qua, dùng DNR
+  }
+}
+
 /**
  * Cài đặt rule declarativeNetRequest gắn Origin và User-Agent chuẩn Edge Read Aloud
  * cho các request tới speech.platform.bing.com.
  * Luôn removeRuleIds cùng lúc với addRules để tránh lỗi trùng ID khi SW khởi động lại.
  */
 export async function ensureEdgeTtsHeaderRules(): Promise<void> {
+  ensureFirefoxWebRequestFallback();
   if (
     typeof chrome === "undefined" ||
     !chrome.declarativeNetRequest?.updateDynamicRules
@@ -71,8 +136,9 @@ export async function ensureEdgeTtsHeaderRules(): Promise<void> {
     return;
   }
 
+  const initiatorDomain = getExtensionInitiatorDomain();
   const baseCondition: chrome.declarativeNetRequest.RuleCondition = {
-    urlFilter: "||speech.platform.bing.com/",
+    urlFilter: "||speech.platform.bing.com/consumer/speech/synthesize/readaloud/",
     resourceTypes: [
       "websocket",
       "xmlhttprequest",
@@ -99,13 +165,13 @@ export async function ensureEdgeTtsHeaderRules(): Promise<void> {
       ],
     },
     condition:
-      withInitiator && chrome.runtime?.id
-        ? { ...baseCondition, initiatorDomains: [chrome.runtime.id] }
+      withInitiator && initiatorDomain
+        ? { ...baseCondition, initiatorDomains: [initiatorDomain] }
         : baseCondition,
   });
 
   try {
-    if (chrome.runtime?.id) {
+    if (initiatorDomain) {
       try {
         await chrome.declarativeNetRequest.updateDynamicRules({
           removeRuleIds: [EDGE_TTS_CONFIG.DNR_RULE_ID],
@@ -113,7 +179,7 @@ export async function ensureEdgeTtsHeaderRules(): Promise<void> {
         });
         return;
       } catch {
-        // Một số bản trình duyệt không hỗ trợ initiatorDomains với extension ID → fallback bỏ initiatorDomains
+        // Một số bản trình duyệt không hỗ trợ initiatorDomains với extension host → fallback bỏ initiatorDomains
       }
     }
 
@@ -127,26 +193,13 @@ export async function ensureEdgeTtsHeaderRules(): Promise<void> {
 }
 
 /**
- * Sinh token Sec-MS-GEC (SHA-256 HEX IN HOA 64 ký tự) theo thuật toán Edge Read Aloud.
- * Dùng BigInt để giữ chính xác tuyệt đối đơn vị 100-nanoseconds.
+ * Sinh token Sec-MS-GEC v2 ("<16 HEX>-<64 HEX>") theo thuật toán Edge Read Aloud mới nhất.
  */
 export async function generateSecMsGec(
   nowMs = Date.now(),
   clockSkewSec = 0
 ): Promise<string> {
-  const unixSec = Math.floor(nowMs / 1000) + Math.round(clockSkewSec);
-  let ticks = BigInt(unixSec) + WINDOWS_EPOCH_OFFSET_SEC;
-  ticks -= ticks % FIVE_MINUTES_SEC;
-  const ticks100ns = ticks * TICKS_PER_SEC;
-  const strToHash = `${ticks100ns.toString()}${EDGE_TTS_CONFIG.TRUSTED_CLIENT_TOKEN}`;
-  const encoded = new TextEncoder().encode(strToHash);
-  const hashBuf = await crypto.subtle.digest("SHA-256", encoded);
-  const bytes = new Uint8Array(hashBuf);
-  let hex = "";
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i].toString(16).padStart(2, "0");
-  }
-  return hex.toUpperCase();
+  return generateSecMsGecV2(EDGE_TTS_CONFIG.TRUSTED_CLIENT_TOKEN, nowMs, clockSkewSec);
 }
 
 /**
