@@ -9,6 +9,11 @@ export default defineConfig({
     crx({ manifest })
   ],
   build: {
-    target: "esnext"
+    target: "esnext",
+    rollupOptions: {
+      input: {
+        offscreen: "src/offscreen/tts.html"
+      }
+    }
   }
 });

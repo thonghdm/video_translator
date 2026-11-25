@@ -147,8 +147,7 @@ describe("edgeTts engine", () => {
     }
   });
 
-  it("ensureEdgeTtsHeaderRules gọi removeRuleIds cùng addRules, fallback bỏ initiatorDomains và an toàn khi thiếu API", async () => {
-    // 1. Thành công ngay với initiatorDomains
+  it("ensureEdgeTtsHeaderRules gọi removeRuleIds cùng addRules (không gắn initiatorDomains) và an toàn khi thiếu API", async () => {
     const updateDynamicRules = vi.fn().mockResolvedValue(undefined);
     (globalThis as unknown as { chrome: unknown }).chrome = {
       runtime: { id: "ext-test-id" },
@@ -160,26 +159,18 @@ describe("edgeTts engine", () => {
     const firstArg = updateDynamicRules.mock.calls[0][0];
     expect(firstArg.removeRuleIds).toEqual([EDGE_TTS_CONFIG.DNR_RULE_ID]);
     expect(firstArg.addRules).toHaveLength(1);
-    expect(firstArg.addRules[0].condition.initiatorDomains).toEqual(["ext-test-id"]);
+    expect(firstArg.addRules[0].condition.initiatorDomains).toBeUndefined();
+    expect(firstArg.addRules[0].condition.urlFilter).toContain(
+      "speech.platform.bing.com/consumer/speech/synthesize/readaloud/"
+    );
 
-    // 2. Fallback khi lần đầu có initiatorDomains bị từ chối
-    const updateFallback = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("initiatorDomains unsupported"))
-      .mockResolvedValueOnce(undefined);
+    // Không ném lỗi khi không có declarativeNetRequest hoặc khi updateDynamicRules reject
+    const updateReject = vi.fn().mockRejectedValueOnce(new Error("DNR error"));
     (globalThis as unknown as { chrome: unknown }).chrome = {
-      runtime: { id: "ext-test-id" },
-      declarativeNetRequest: { updateDynamicRules: updateFallback },
+      declarativeNetRequest: { updateDynamicRules: updateReject },
     };
+    await expect(ensureEdgeTtsHeaderRules()).resolves.toBeUndefined();
 
-    await ensureEdgeTtsHeaderRules();
-    expect(updateFallback).toHaveBeenCalledTimes(2);
-    expect(updateFallback.mock.calls[1][0].removeRuleIds).toEqual([
-      EDGE_TTS_CONFIG.DNR_RULE_ID,
-    ]);
-    expect(updateFallback.mock.calls[1][0].addRules[0].condition.initiatorDomains).toBeUndefined();
-
-    // 3. Không ném lỗi khi không có declarativeNetRequest
     (globalThis as unknown as { chrome: unknown }).chrome = {};
     await expect(ensureEdgeTtsHeaderRules()).resolves.toBeUndefined();
   });

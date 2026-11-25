@@ -89,6 +89,13 @@ export class MessagingHub {
     // 2. Lắng nghe thông điệp từ Popup/Options (UiReq)
     chrome.runtime.onMessage.addListener(
       (msg: UiReq, _sender, sendResponse: (response: unknown) => void) => {
+        if (
+          !msg ||
+          typeof msg !== "object" ||
+          (msg as { target?: string }).target === "subtrans-offscreen-tts"
+        ) {
+          return false;
+        }
         this.ready
           .then(() => this.handleUiMessage(msg))
           .then((res) => sendResponse(res))

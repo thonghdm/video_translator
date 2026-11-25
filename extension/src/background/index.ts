@@ -111,7 +111,7 @@ function applySettings(s: Settings): void {
 
 // 2. Khởi tạo bất đồng bộ
 async function init(): Promise<void> {
-  void ensureEdgeTtsHeaderRules();
+  await ensureEdgeTtsHeaderRules();
   await restoreUpdateBadge().catch((err) => console.warn("[SubTrans] Update badge:", err));
   await stateManager.restore();
   const settings = await loadSettings();

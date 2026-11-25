@@ -56,18 +56,6 @@ function makeConnectionId(): string {
   return hex;
 }
 
-function getExtensionInitiatorDomain(): string | null {
-  try {
-    if (typeof chrome !== "undefined" && typeof chrome.runtime?.getURL === "function") {
-      const host = new URL(chrome.runtime.getURL("")).hostname;
-      if (host) return host;
-    }
-  } catch {
-    // bỏ qua
-  }
-  return typeof chrome !== "undefined" && chrome.runtime?.id ? chrome.runtime.id : null;
-}
-
 let webRequestRegistered = false;
 
 /**
@@ -136,17 +124,9 @@ export async function ensureEdgeTtsHeaderRules(): Promise<void> {
     return;
   }
 
-  const initiatorDomain = getExtensionInitiatorDomain();
-  const baseCondition: chrome.declarativeNetRequest.RuleCondition = {
-    urlFilter: "||speech.platform.bing.com/consumer/speech/synthesize/readaloud/",
-    resourceTypes: [
-      "websocket",
-      "xmlhttprequest",
-      "other",
-    ] as chrome.declarativeNetRequest.ResourceType[],
-  };
-
-  const buildRule = (withInitiator: boolean): chrome.declarativeNetRequest.Rule => ({
+  // Không truyền initiatorDomains vì chrome-extension:// và moz-extension:// không khớp DNS domain
+  // trên một số bản Chromium/Firefox; urlFilter đã khóa hẹp tuyệt đối vào đường dẫn readaloud.
+  const rule: chrome.declarativeNetRequest.Rule = {
     id: EDGE_TTS_CONFIG.DNR_RULE_ID,
     priority: 1,
     action: {
@@ -164,28 +144,20 @@ export async function ensureEdgeTtsHeaderRules(): Promise<void> {
         },
       ],
     },
-    condition:
-      withInitiator && initiatorDomain
-        ? { ...baseCondition, initiatorDomains: [initiatorDomain] }
-        : baseCondition,
-  });
+    condition: {
+      urlFilter: "||speech.platform.bing.com/consumer/speech/synthesize/readaloud/",
+      resourceTypes: [
+        "websocket",
+        "xmlhttprequest",
+        "other",
+      ] as chrome.declarativeNetRequest.ResourceType[],
+    },
+  };
 
   try {
-    if (initiatorDomain) {
-      try {
-        await chrome.declarativeNetRequest.updateDynamicRules({
-          removeRuleIds: [EDGE_TTS_CONFIG.DNR_RULE_ID],
-          addRules: [buildRule(true)],
-        });
-        return;
-      } catch {
-        // Một số bản trình duyệt không hỗ trợ initiatorDomains với extension host → fallback bỏ initiatorDomains
-      }
-    }
-
     await chrome.declarativeNetRequest.updateDynamicRules({
       removeRuleIds: [EDGE_TTS_CONFIG.DNR_RULE_ID],
-      addRules: [buildRule(false)],
+      addRules: [rule],
     });
   } catch (err) {
     console.warn("[SubTrans][EdgeTTS] Không thể cài DNR header rule:", err);
@@ -539,11 +511,10 @@ export interface SynthesizeEdgeTtsOptions {
 }
 
 /**
- * Tổng hợp giọng nói tiếng Việt từ Edge Neural TTS, trả về chuỗi MP3 Base64.
- * Có giới hạn đồng thời (MAX_CONCURRENCY = 2), hỗ trợ AbortSignal, và tự đồng bộ
- * đồng hồ + retry đúng 1 lần nếu lỗi xảy ra trước khi nhận bất kỳ byte audio nào.
+ * Tổng hợp trực tiếp qua WebSocket trong context hiện tại
+ * (chạy trực tiếp trên Firefox Background Event Page, Offscreen Document của Chromium, và Unit Test).
  */
-export async function synthesizeEdgeTts(
+export async function synthesizeEdgeTtsLocal(
   opts: SynthesizeEdgeTtsOptions
 ): Promise<string> {
   const escapedText = sanitizeAndEscapeSsmlText(opts.text);
@@ -596,4 +567,121 @@ export async function synthesizeEdgeTts(
   } finally {
     releaseSlot();
   }
+}
+
+let offscreenCreating: Promise<void> | null = null;
+const OFFSCREEN_PATH = "src/offscreen/tts.html";
+
+async function ensureOffscreenDocument(): Promise<void> {
+  const runtimeWithContexts = chrome.runtime as typeof chrome.runtime & {
+    getContexts?: (filter: {
+      contextTypes: string[];
+      documentUrls?: string[];
+    }) => Promise<unknown[]>;
+  };
+  if (typeof runtimeWithContexts.getContexts === "function") {
+    const existing = await runtimeWithContexts.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [chrome.runtime.getURL(OFFSCREEN_PATH)],
+    });
+    if (existing.length > 0) return;
+  }
+
+  if (!offscreenCreating) {
+    offscreenCreating = chrome.offscreen
+      .createDocument({
+        url: OFFSCREEN_PATH,
+        reasons: ["BLOBS" as chrome.offscreen.Reason],
+        justification: "Run Edge TTS WebSocket inside frame context for DNR header rules",
+      })
+      .catch((err: unknown) => {
+        // Bỏ qua nếu đã có offscreen document đang mở
+        const msg = (err as Error)?.message || "";
+        if (!msg.includes("Only a single offscreen")) {
+          throw err;
+        }
+      })
+      .finally(() => {
+        offscreenCreating = null;
+      });
+  }
+  await offscreenCreating;
+}
+
+async function synthesizeViaOffscreen(
+  opts: SynthesizeEdgeTtsOptions
+): Promise<string> {
+  if (opts.signal?.aborted) {
+    throw createAbortError();
+  }
+  await ensureOffscreenDocument();
+  if (opts.signal?.aborted) {
+    throw createAbortError();
+  }
+
+  const reqId = makeConnectionId();
+  return new Promise<string>((resolve, reject) => {
+    const onAbort = () => {
+      try {
+        chrome.runtime.sendMessage({
+          target: "subtrans-offscreen-tts",
+          type: "offscreen.tts.cancel",
+          reqId,
+        });
+      } catch {
+        // bỏ qua
+      }
+      reject(createAbortError());
+    };
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+
+    chrome.runtime.sendMessage(
+      {
+        target: "subtrans-offscreen-tts",
+        type: "offscreen.tts.synthesize",
+        reqId,
+        text: opts.text,
+        voice: opts.voice,
+        rate: opts.rate,
+        timeoutMs: opts.timeoutMs,
+      },
+      (res?: { ok?: boolean; audioBase64?: string; aborted?: boolean; error?: string }) => {
+        opts.signal?.removeEventListener("abort", onAbort);
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || "Offscreen TTS failed"));
+          return;
+        }
+        if (res?.aborted) {
+          reject(createAbortError());
+          return;
+        }
+        if (!res?.ok || !res.audioBase64) {
+          reject(new Error(res?.error || "Offscreen TTS không trả về dữ liệu"));
+          return;
+        }
+        resolve(res.audioBase64);
+      }
+    );
+  });
+}
+
+/**
+ * Điểm vào chính gọi từ Background:
+ * - Đảm bảo rule DNR/webRequest đã được cài.
+ * - Nếu đang chạy trong Chromium Service Worker (không có DOM document, có chrome.offscreen),
+ *   chuyển tiếp sang Offscreen Document để DNR gắn được Origin/User-Agent cho WebSocket.
+ * - Ngược lại (Firefox Event Page có DOM hoặc môi trường test), chạy trực tiếp synthesizeEdgeTtsLocal.
+ */
+export async function synthesizeEdgeTts(
+  opts: SynthesizeEdgeTtsOptions
+): Promise<string> {
+  await ensureEdgeTtsHeaderRules();
+  if (
+    typeof document === "undefined" &&
+    typeof chrome !== "undefined" &&
+    typeof chrome.offscreen?.createDocument === "function"
+  ) {
+    return synthesizeViaOffscreen(opts);
+  }
+  return synthesizeEdgeTtsLocal(opts);
 }

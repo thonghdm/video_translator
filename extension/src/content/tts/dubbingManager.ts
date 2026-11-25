@@ -138,6 +138,9 @@ export class DubbingManager {
       gain.connect(ctx.destination);
       this.audioCtx = ctx;
       this.gainNode = gain;
+      if (ctx.state === "suspended") {
+        this.armUnlockListeners();
+      }
       return { ctx, gain };
     } catch (err) {
       if (import.meta.env?.DEV) {
@@ -399,15 +402,17 @@ export class DubbingManager {
 
     audio.gain.gain.value = this.settings.tts.ttsVolume;
 
-    // Xử lý Autoplay Policy nếu AudioContext đang suspended
+    // Xử lý Autoplay Policy nếu AudioContext đang suspended:
+    // Trên Chromium, ctx.resume() trả về Promise treo vô hạn (không reject) nếu chưa có user gesture,
+    // nên bắt buộc giới hạn thời gian chờ 350ms để báo người dùng click mở khóa ngay.
     if (audio.ctx.state === "suspended") {
-      try {
-        await audio.ctx.resume();
-      } catch {
-        this.handleAutoplayBlocked();
-        return;
-      }
-      if (audio.ctx.state === "suspended") {
+      const resumed = await Promise.race([
+        Promise.resolve(audio.ctx.resume())
+          .then(() => true)
+          .catch(() => false),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 350)),
+      ]);
+      if (!resumed || audio.ctx.state === "suspended") {
         this.handleAutoplayBlocked();
         return;
       }
@@ -507,13 +512,7 @@ export class DubbingManager {
     }
   }
 
-  private handleAutoplayBlocked(): void {
-    if (!this.autoplayNoticeShown) {
-      this.autoplayNoticeShown = true;
-      this.opts.onStatusNotice?.(
-        "Nhấp vào vùng video để mở khóa âm thanh lồng tiếng"
-      );
-    }
+  private armUnlockListeners(): void {
     if (this.unlockCleanup || typeof document === "undefined") return;
     const unlock = () => {
       this.clearUnlockListeners();
@@ -521,12 +520,22 @@ export class DubbingManager {
         void Promise.resolve(this.audioCtx.resume()).catch(() => {});
       }
     };
-    document.addEventListener("pointerdown", unlock, { once: true });
-    document.addEventListener("keydown", unlock, { once: true });
+    document.addEventListener("pointerdown", unlock, { capture: true, once: true });
+    document.addEventListener("keydown", unlock, { capture: true, once: true });
     this.unlockCleanup = () => {
-      document.removeEventListener("pointerdown", unlock);
-      document.removeEventListener("keydown", unlock);
+      document.removeEventListener("pointerdown", unlock, true);
+      document.removeEventListener("keydown", unlock, true);
     };
+  }
+
+  private handleAutoplayBlocked(): void {
+    if (!this.autoplayNoticeShown) {
+      this.autoplayNoticeShown = true;
+      this.opts.onStatusNotice?.(
+        "Nhấp vào vùng video để mở khóa âm thanh lồng tiếng"
+      );
+    }
+    this.armUnlockListeners();
   }
 
   private clearUnlockListeners(): void {

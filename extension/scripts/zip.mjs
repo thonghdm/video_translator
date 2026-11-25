@@ -213,9 +213,13 @@ const firefoxFiles = files.map((f) => {
   if (manifestObj.background && manifestObj.background.service_worker) {
     manifestObj.background.scripts = [manifestObj.background.service_worker];
   }
-  // Firefox hỗ trợ webRequestBlocking để đảm bảo ghi đè Origin/User-Agent trên WebSocket Edge TTS
+  // Firefox hỗ trợ webRequestBlocking để ghi đè Origin/User-Agent trên WebSocket Edge TTS, và không dùng quyền offscreen của Chrome
   manifestObj.permissions = Array.from(
-    new Set([...(manifestObj.permissions ?? []), "webRequest", "webRequestBlocking"])
+    new Set(
+      [...(manifestObj.permissions ?? []), "webRequest", "webRequestBlocking"].filter(
+        (p) => p !== "offscreen"
+      )
+    )
   );
   delete manifestObj.minimum_chrome_version;
   return {
